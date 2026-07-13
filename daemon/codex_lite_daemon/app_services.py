@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections import Counter
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -673,51 +672,57 @@ def _chat_out(project_id: str, thread: dict[str, Any]) -> dict:
 
 
 def _merge_messages(transcript_messages: list[dict], local_messages: list[dict]) -> list[dict]:
-    transcript_occurrences = Counter(
-        key
-        for key in (_message_occurrence_key(message) for message in transcript_messages)
-        if key is not None
-    )
-    filtered_local_messages: list[dict] = []
-    for message in sorted(local_messages, key=_message_sort_key):
-        key = _message_occurrence_key(message)
-        if key is not None and transcript_occurrences[key] > 0:
-            transcript_occurrences[key] -= 1
-            continue
-        filtered_local_messages.append(message)
-
     seen_ids: set[str] = set()
-    merged: list[dict] = []
-    for message in [*transcript_messages, *filtered_local_messages]:
+    merged_with_source: list[tuple[dict, str]] = []
+    for message, source in [*((message, "transcript") for message in transcript_messages), *((message, "local") for message in local_messages)]:
         message_id = str(message.get("id") or "")
         if message_id and message_id in seen_ids:
             continue
         if message_id:
             seen_ids.add(message_id)
-        merged.append(message)
-    return sorted(merged, key=_message_sort_key)
+        merged_with_source.append((message, source))
+
+    sorted_messages = sorted(merged_with_source, key=lambda item: _message_sort_key(item[0]))
+    deduped: list[tuple[dict, str]] = []
+    for message, source in sorted_messages:
+        if deduped and _is_same_adjacent_message(deduped[-1][0], message):
+            _, previous_source = deduped[-1]
+            if previous_source == "local" and source == "transcript":
+                deduped[-1] = (message, source)
+            continue
+        deduped.append((message, source))
+    return [message for message, _ in deduped]
 
 
-def _message_occurrence_key(message: dict) -> tuple[str, str] | None:
-    role = str(message.get("role") or "").strip().lower()
-    content = _message_content_key(str(message.get("content") or ""))
-    if not role or not content:
-        return None
-    return (role, content)
+def _is_same_adjacent_message(previous: dict, current: dict) -> bool:
+    previous_role = str(previous.get("role") or "").strip().lower()
+    current_role = str(current.get("role") or "").strip().lower()
+    if not previous_role or previous_role != current_role:
+        return False
+    if _message_content_key(str(previous.get("content") or "")) != _message_content_key(str(current.get("content") or "")):
+        return False
+    return _message_time_slot(previous) == _message_time_slot(current)
 
 
 def _message_content_key(content: str) -> str:
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
-    return normalized.split("\n\nAttachments:\n", 1)[0].strip()
+    return normalized.strip()
+
+
+def _message_time_slot(message: dict) -> datetime:
+    return _message_timestamp(message).replace(microsecond=0)
 
 
 def _message_sort_key(message: dict) -> tuple[datetime, str]:
+    return (_message_timestamp(message), str(message.get("id") or ""))
+
+
+def _message_timestamp(message: dict) -> datetime:
     value = str(message.get("createdAt") or "")
     try:
-        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        timestamp = datetime.min.replace(tzinfo=timezone.utc)
-    return (timestamp, str(message.get("id") or ""))
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _run_out(run_id: str, run: AppServerActiveRun) -> dict:

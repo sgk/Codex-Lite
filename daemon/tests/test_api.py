@@ -186,7 +186,7 @@ def test_clipboard_attachment_summary_hides_path() -> None:
     assert summary == "確認して\n\nAttachments:\n- clipboard-20260713-174210-abcd.png\n- note.txt: /home/sgk/project/note.txt"
 
 
-def test_merge_messages_dedupes_local_echoes_by_content_occurrence_and_sorts_by_time() -> None:
+def test_merge_messages_dedupes_adjacent_same_text_at_same_second_and_sorts_by_time() -> None:
     transcript_messages = [
         {"id": "assistant", "role": "assistant", "content": "done", "createdAt": "2026-06-30T03:04:58.9215662+00:00"},
         {"id": "user-transcript", "role": "user", "content": "確認して", "createdAt": "2026-06-30T03:04:40.0758495+00:00"},
@@ -195,7 +195,7 @@ def test_merge_messages_dedupes_local_echoes_by_content_occurrence_and_sorts_by_
         {
             "id": "user-local",
             "role": "user",
-            "content": "確認して\n\nAttachments:\n- image.png: /tmp/image.png",
+            "content": "確認して",
             "createdAt": "2026-06-30T03:04:40Z",
         }
     ]
@@ -203,6 +203,19 @@ def test_merge_messages_dedupes_local_echoes_by_content_occurrence_and_sorts_by_
     merged = _merge_messages(transcript_messages, local_messages)
 
     assert [message["id"] for message in merged] == ["user-transcript", "assistant"]
+
+
+def test_merge_messages_keeps_same_text_at_different_seconds() -> None:
+    transcript_messages = [
+        {"id": "user-transcript", "role": "user", "content": "確認して", "createdAt": "2026-06-30T03:04:41Z"},
+    ]
+    local_messages = [
+        {"id": "user-local", "role": "user", "content": "確認して", "createdAt": "2026-06-30T03:04:40Z"},
+    ]
+
+    merged = _merge_messages(transcript_messages, local_messages)
+
+    assert [message["id"] for message in merged] == ["user-local", "user-transcript"]
 
 
 def test_merge_messages_skips_exact_same_id() -> None:
