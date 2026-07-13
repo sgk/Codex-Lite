@@ -555,11 +555,25 @@
                                     <RotateTransform/>
                                 </Viewbox.RenderTransform>
                                 <Canvas Width="12" Height="12">
-                                    <Path Stroke="#2F6FED"
-                                          StrokeThickness="2"
+                                    <Path StrokeThickness="2"
                                           StrokeStartLineCap="Round"
                                           StrokeEndLineCap="Round"
-                                          Data="M 6,1 A 5,5 0 1 1 2.46,9.54"/>
+                                          Data="M 6,1 A 5,5 0 1 1 2.46,9.54">
+                                        <Path.Style>
+                                            <Style TargetType="{x:Type Path}">
+                                                <Setter Property="Stroke" Value="#2F6FED"/>
+                                                <Style.Triggers>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="True"/>
+                                                            <Condition Binding="{Binding IsKeyboardFocusWithin, RelativeSource={RelativeSource AncestorType={x:Type TreeView}}}" Value="True"/>
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Stroke" Value="#FFFFFF"/>
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Path.Style>
+                                    </Path>
                                 </Canvas>
                                 <Viewbox.Triggers>
                                     <EventTrigger RoutedEvent="Loaded">
