@@ -51,6 +51,7 @@ class MessageCreate(BaseModel):
 
 class RunSteer(BaseModel):
     content: str = Field(min_length=1)
+    attachments: list[MessageAttachment] = Field(default_factory=list)
 
 
 def project_out(row: dict) -> dict:

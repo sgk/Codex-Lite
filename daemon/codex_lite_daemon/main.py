@@ -312,7 +312,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     async def steer_run(run_id: str, body: RunSteer) -> dict:
         if not use_app_server:
             raise AppError("steer_not_supported", "Steering is only supported with Codex app-server.", 409)
-        return await app_runs.steer_run(run_id, body.content)
+        return await app_runs.steer_run(run_id, body.content, [item.model_dump() for item in body.attachments])
 
     @app.get("/projects/{project_id}/files")
     async def list_files(project_id: str, path: str = "") -> dict:

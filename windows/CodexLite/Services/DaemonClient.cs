@@ -480,8 +480,8 @@ public sealed class DaemonClient
     public Task<RunDto?> CancelRunAsync(string runId, CancellationToken cancellationToken = default) =>
         PostAsync<RunDto>($"/runs/{runId}/cancel", new { }, cancellationToken);
 
-    public Task<RunDto?> SteerRunAsync(string runId, string content, CancellationToken cancellationToken = default) =>
-        PostAsync<RunDto>($"/runs/{runId}/steer", new { content }, cancellationToken);
+    public Task<RunDto?> SteerRunAsync(string runId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default) =>
+        PostAsync<RunDto>($"/runs/{runId}/steer", new { content, attachments = attachments ?? Array.Empty<MessageAttachmentDto>() }, cancellationToken);
 
     public Task<FileListDto?> ListFilesAsync(string projectId, string path, CancellationToken cancellationToken = default) =>
         _http.GetFromJsonAsync<FileListDto>($"/projects/{projectId}/files?path={Uri.EscapeDataString(path)}", JsonOptions, cancellationToken);

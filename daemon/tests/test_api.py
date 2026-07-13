@@ -1378,6 +1378,10 @@ async def test_app_server_cancel_treats_already_finished_turn_as_cancelled(linux
 async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
+    image_path = linux_tmp_path / "image.png"
+    image_path.write_bytes(b"png")
+    note_path = linux_tmp_path / "note.txt"
+    note_path.write_text("hello", encoding="utf-8")
     cfg = make_test_config(linux_tmp_path)
     db = Database(cfg.database_path)
     db.migrate()
@@ -1393,7 +1397,14 @@ async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
     chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
     result = await runs.start_message_run(project_id, chat_id, "hello")
 
-    steered = await runs.steer_run(result["runId"], "please continue with more detail")
+    steered = await runs.steer_run(
+        result["runId"],
+        "please continue with more detail",
+        [
+            {"path": str(image_path), "name": "image.png", "kind": "image"},
+            {"path": str(note_path), "name": "note.txt", "kind": "file"},
+        ],
+    )
 
     assert steered["status"] == "running"
     assert app_server.requests[-1] == (
@@ -1401,11 +1412,15 @@ async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
         {
             "threadId": "thread_1",
             "expectedTurnId": "turn_1",
-            "input": [{"type": "text", "text": "please continue with more detail"}],
+            "input": [
+                {"type": "text", "text": "please continue with more detail"},
+                {"type": "localImage", "path": str(image_path.resolve())},
+                {"type": "mention", "name": "note.txt", "path": str(note_path.resolve())},
+            ],
         },
     )
     stored_messages = messages.list_messages(project_id, chat_id)
-    assert stored_messages[-1]["content"] == "please continue with more detail"
+    assert stored_messages[-1]["content"] == f"please continue with more detail\n\nAttachments:\n- image.png: {image_path}\n- note.txt: {note_path}"
     db.close()
 
 

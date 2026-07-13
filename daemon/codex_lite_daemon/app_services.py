@@ -293,7 +293,7 @@ class AppServerRunService:
         await self.events.publish(run_id, "done", {"status": "cancelled", "exitCode": None})
         return _run_out(run_id, run)
 
-    async def steer_run(self, run_id: str, content: str) -> dict:
+    async def steer_run(self, run_id: str, content: str, attachments: list[dict[str, Any]] | None = None) -> dict:
         run = self.runs.get(run_id)
         if run is None:
             raise AppError("steer_failed", "Run is not active.", 409)
@@ -302,6 +302,7 @@ class AppServerRunService:
         clean_content = content.strip()
         if not clean_content:
             raise AppError("validation_error", "Steer content must not be empty.", 400)
+        input_items = _build_turn_input(clean_content, attachments or [])
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "sending additional instructions"})
         try:
             await self.app_server.request(
@@ -309,13 +310,13 @@ class AppServerRunService:
                 {
                     "threadId": run.thread_id,
                     "expectedTurnId": run.turn_id,
-                    "input": [{"type": "text", "text": clean_content}],
+                    "input": input_items,
                 },
             )
         except AppError as exc:
             await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": exc.message})
             raise
-        self.messages.insert_message(run.chat_id, "user", clean_content, run_id=run_id, kind="instruction")
+        self.messages.insert_message(run.chat_id, "user", _content_with_attachment_summary(clean_content, attachments or []), run_id=run_id, kind="instruction")
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
         return _run_out(run_id, run)
 

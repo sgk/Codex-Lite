@@ -4403,17 +4403,18 @@ public partial class MainWindow : Window
         }
         var runId = activeRun.RunId;
         var content = MessageBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(content))
+        var attachments = _pendingAttachments.ToArray();
+        if (string.IsNullOrWhiteSpace(content) && attachments.Length == 0)
         {
             return;
         }
-        if (_pendingAttachments.Count > 0)
+        if (string.IsNullOrWhiteSpace(content))
         {
-            StatusText.Text = "追加指示では添付ファイルを送れません";
-            return;
+            content = "添付ファイルを確認してください。";
         }
 
         MessageBox.Text = "";
+        _pendingAttachments.Clear();
         AddComposerHistory(content);
         var localMessageId = $"local-steer-{Guid.NewGuid():N}";
         AppendMessage(new MessageDto(
@@ -4423,13 +4424,14 @@ public partial class MainWindow : Window
             content,
             runId,
             DateTimeOffset.UtcNow.ToString("O"),
-            "instruction"),
+            "instruction",
+            attachments),
             scrollToEnd: true);
         try
         {
             SendButton.IsEnabled = false;
             ShowRunProgressForChat(chat.Id, "追加指示を送信中");
-            await _client.SteerRunAsync(runId, content);
+            await _client.SteerRunAsync(runId, content, attachments);
             ShowRunProgressForChat(chat.Id, "追加指示を送信済み");
         }
         catch (Exception ex)
@@ -4440,6 +4442,10 @@ public partial class MainWindow : Window
                 _messages.Remove(localMessage);
             }
             MessageBox.Text = content;
+            foreach (var attachment in attachments)
+            {
+                _pendingAttachments.Add(attachment);
+            }
             StatusText.Text = $"steer error | {ShortError(ex)}";
             ShowRunProgressForChat(chat.Id, $"追加指示エラー | {ShortError(ex)}");
         }
