@@ -887,7 +887,7 @@
                                                                 </Border.Style>
                                                                 <Image Source="{Binding Uri}" MaxHeight="300" Stretch="Uniform"/>
                                                             </Border>
-                                                            <TextBlock Grid.Row="2" Text="{Binding Path}" Foreground="#666" FontSize="11" TextWrapping="Wrap"/>
+                                                            <TextBlock Grid.Row="2" Text="{Binding Path}" Foreground="#666" FontSize="11" TextWrapping="Wrap" Visibility="{Binding PathVisibility}"/>
                                                         </Grid>
                                                     </Border>
                                                 </DataTemplate>

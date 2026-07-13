@@ -175,7 +175,16 @@ public sealed record MessageAttachmentDto(
     string Path,
     string Name,
     string Kind,
-    string? Uri = null);
+    string? Uri = null)
+{
+    public Visibility PathVisibility => IsClipboardAttachmentName(Name) ? Visibility.Collapsed : Visibility.Visible;
+
+    private static bool IsClipboardAttachmentName(string name)
+    {
+        return name.StartsWith("clipboard-", StringComparison.OrdinalIgnoreCase)
+            || name.StartsWith("codex-clipboard-", StringComparison.OrdinalIgnoreCase);
+    }
+}
 
 public sealed record RunDto(
     string Id,

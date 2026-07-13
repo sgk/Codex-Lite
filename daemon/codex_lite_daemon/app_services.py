@@ -637,8 +637,16 @@ def _content_with_attachment_summary(content: str, attachments: list[dict[str, A
     for attachment in attachments:
         name = str(attachment.get("name") or Path(str(attachment.get("path") or "")).name or "attachment")
         path = str(attachment.get("path") or "")
-        lines.append(f"- {name}: {path}")
+        if _is_clipboard_attachment_name(name):
+            lines.append(f"- {name}")
+        else:
+            lines.append(f"- {name}: {path}")
     return "\n".join(lines)
+
+
+def _is_clipboard_attachment_name(name: str) -> bool:
+    value = name.lower()
+    return value.startswith("clipboard-") or value.startswith("codex-clipboard-")
 
 
 async def _apply_codex_lite_thread_settings(app_server: AppServerClient, thread_id: str, settings: AppServerRuntimeSettings) -> None:

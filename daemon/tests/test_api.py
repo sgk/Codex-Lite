@@ -11,7 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from codex_lite_daemon.app_server import AppServerNotification
-from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _merge_messages, _notification_summary
+from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _merge_messages, _notification_summary
 from codex_lite_daemon.automation_service import AutomationService, _run_due_automations
 from codex_lite_daemon.codex_state import CodexStateService
 from codex_lite_daemon.config import Config, default_config
@@ -172,6 +172,18 @@ def test_app_server_progress_notifications_have_readable_summaries() -> None:
     assert _notification_summary(AppServerNotification("mcp_tool_call_begin", {"name": "filesystem.read", "arguments": {"path": "AGENTS.md"}})) == "ファイルを読み取っています: AGENTS.md"
     assert _notification_summary(AppServerNotification("mcp_tool_call_end", {"name": "filesystem.write", "arguments": "{\"path\":\"notes.md\"}"})) == "ファイルを編集しました: notes.md"
     assert _notification_summary(AppServerNotification("exec_command_begin", {"command": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz' https://example.test"})) == "コマンドを開始しました: curl -H 'Authorization=<redacted>' https://example.test"
+
+
+def test_clipboard_attachment_summary_hides_path() -> None:
+    summary = _content_with_attachment_summary(
+        "確認して",
+        [
+            {"name": "clipboard-20260713-174210-abcd.png", "path": "/mnt/c/Users/sgk/AppData/Local/CodexLite/attachments/clipboard-20260713-174210-abcd.png"},
+            {"name": "note.txt", "path": "/home/sgk/project/note.txt"},
+        ],
+    )
+
+    assert summary == "確認して\n\nAttachments:\n- clipboard-20260713-174210-abcd.png\n- note.txt: /home/sgk/project/note.txt"
 
 
 def test_merge_messages_dedupes_by_id_and_sorts_by_time() -> None:
