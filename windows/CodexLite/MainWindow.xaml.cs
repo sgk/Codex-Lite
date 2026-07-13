@@ -115,6 +115,7 @@ public partial class MainWindow : Window
     private bool _isSavingAutomation;
     private bool _isRunningAutomationNow;
     private bool _isLoadingAutomationSelection;
+    private bool _isComposerTextCompositionActive;
     private bool _isRestoringMessageScrollOffset;
     private bool _pendingMessageScrollOffsetRestore;
     private bool _isCheckingDaemonHealth;
@@ -143,6 +144,8 @@ public partial class MainWindow : Window
         _client.CodexHomeMode = _codexHomeMode;
         _client.StatusChanged += Client_StatusChanged;
         ProjectTree.ItemsSource = _projectTree;
+        RegisterComposerImeHandlers(MessageBox);
+        RegisterComposerImeHandlers(NewChatMessageBox);
         _streamingTextTimer.Tick += StreamingTextTimer_Tick;
         _messageRefreshTimer.Tick += MessageRefreshTimer_Tick;
         _messageRefreshTimer.Start();
@@ -3873,6 +3876,10 @@ public partial class MainWindow : Window
 
     private async Task ComposerPreviewKeyDownAsync(System.Windows.Input.KeyEventArgs e)
     {
+        if (IsComposerImeInputActive(e))
+        {
+            return;
+        }
         if (e.OriginalSource is TextBox textBox && HandleComposerHistoryKey(textBox, e))
         {
             return;
@@ -3888,6 +3895,34 @@ public partial class MainWindow : Window
             e.Handled = true;
             await SubmitMessageBoxAsync();
         }
+    }
+
+    private void RegisterComposerImeHandlers(TextBox textBox)
+    {
+        textBox.AddHandler(TextCompositionManager.PreviewTextInputStartEvent, new TextCompositionEventHandler(Composer_TextInputStart), true);
+        textBox.AddHandler(TextCompositionManager.PreviewTextInputUpdateEvent, new TextCompositionEventHandler(Composer_TextInputUpdate), true);
+        textBox.AddHandler(TextCompositionManager.PreviewTextInputEvent, new TextCompositionEventHandler(Composer_TextInput), true);
+        textBox.LostKeyboardFocus += (_, _) => _isComposerTextCompositionActive = false;
+    }
+
+    private void Composer_TextInputStart(object sender, TextCompositionEventArgs e)
+    {
+        _isComposerTextCompositionActive = !string.IsNullOrEmpty(e.TextComposition.CompositionText);
+    }
+
+    private void Composer_TextInputUpdate(object sender, TextCompositionEventArgs e)
+    {
+        _isComposerTextCompositionActive = !string.IsNullOrEmpty(e.TextComposition.CompositionText);
+    }
+
+    private void Composer_TextInput(object sender, TextCompositionEventArgs e)
+    {
+        _isComposerTextCompositionActive = false;
+    }
+
+    private bool IsComposerImeInputActive(System.Windows.Input.KeyEventArgs e)
+    {
+        return _isComposerTextCompositionActive || e.Key is Key.ImeProcessed or Key.DeadCharProcessed;
     }
 
     private void MessageBox_TextChanged(object sender, TextChangedEventArgs e)
