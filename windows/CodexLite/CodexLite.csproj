@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>CodexLite</RootNamespace>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="..\..\scripts\run-daemon.sh"
+             Link="run-daemon.sh"
+             CopyToOutputDirectory="PreserveNewest"/>
+    <Content Include="..\..\daemon\**\*"
+             Exclude="..\..\daemon\.venv\**;..\..\daemon\.pytest_cache\**;..\..\daemon\tests\**;..\..\daemon\codex_lite_daemon.egg-info\**;..\..\daemon\**\__pycache__\**"
+             Link="daemon\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"/>
+  </ItemGroup>
+</Project>

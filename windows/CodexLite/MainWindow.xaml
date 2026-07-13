@@ -1,0 +1,1454 @@
+<Window
+    x:Class="CodexLite.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="clr-namespace:CodexLite"
+    xmlns:viewModels="clr-namespace:CodexLite.ViewModels"
+    Title="Codex Lite"
+    Width="1200"
+    Height="760"
+    MinWidth="900"
+    MinHeight="560">
+
+    <Window.Resources>
+        <local:SubtractConverter x:Key="SubtractConverter"/>
+        <local:ScaleConverter x:Key="ScaleConverter"/>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+        <Style x:Key="InlineIconButton" TargetType="{x:Type Button}">
+            <Setter Property="MinWidth" Value="20"/>
+            <Setter Property="Height" Value="22"/>
+            <Setter Property="Padding" Value="4,0"/>
+            <Setter Property="Margin" Value="4,0,0,0"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="KeyboardNavigation.IsTabStop" Value="False"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#666"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Border x:Name="Border"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="2">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              RecognizesAccessKey="True"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="#EEE"/>
+                                <Setter TargetName="Border" Property="BorderBrush" Value="#DDD"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="#DDD"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="#222"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="TreeInlineIconButton" TargetType="{x:Type Button}" BasedOn="{StaticResource InlineIconButton}">
+            <Style.Triggers>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="True"/>
+                        <Condition Binding="{Binding IsKeyboardFocusWithin, RelativeSource={RelativeSource AncestorType={x:Type TreeView}}}" Value="True"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Foreground" Value="White"/>
+                </MultiDataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="ProjectTreeExpander" TargetType="{x:Type ToggleButton}">
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Width" Value="18"/>
+            <Setter Property="Height" Value="22"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#555"/>
+            <Setter Property="Content" Value="▸"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ToggleButton}">
+                        <Border Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsChecked" Value="True">
+                    <Setter Property="Content" Value="▾"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="ActivityExpander" TargetType="{x:Type Expander}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Expander}">
+                        <StackPanel>
+                            <ToggleButton x:Name="HeaderSite"
+                                          IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}}"
+                                          Focusable="False"
+                                          Background="Transparent"
+                                          BorderBrush="Transparent"
+                                          BorderThickness="0"
+                                          Padding="0"
+                                          HorizontalContentAlignment="Stretch">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="{x:Type ToggleButton}">
+                                        <Border Background="{TemplateBinding Background}">
+                                            <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center"/>
+                                        </Border>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                                <Grid MinHeight="24">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="18"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="ActivityExpanderArrow"
+                                               Text="▸"
+                                               Foreground="#6A737D"
+                                               FontSize="12"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"/>
+                                    <ContentPresenter Grid.Column="1"
+                                                      ContentSource="Header"
+                                                      RecognizesAccessKey="True"
+                                                      VerticalAlignment="Center"/>
+                                </Grid>
+                            </ToggleButton>
+                            <ContentPresenter x:Name="ExpandSite"
+                                              ContentSource="Content"
+                                              Visibility="Collapsed"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsExpanded" Value="True">
+                                <Setter TargetName="ActivityExpanderArrow" Property="Text" Value="▾"/>
+                                <Setter TargetName="ExpandSite" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="ProjectTreeItemContainer" TargetType="{x:Type TreeViewItem}">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TreeViewItem}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Border x:Name="RowBorder" Background="Transparent">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="18"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ToggleButton x:Name="Expander"
+                                                  Style="{StaticResource ProjectTreeExpander}"
+                                                  IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}}"
+                                                  ClickMode="Press"/>
+                                    <ContentPresenter x:Name="PART_Header"
+                                                      Grid.Column="1"
+                                                      ContentSource="Header"
+                                                      HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                      VerticalAlignment="Center"/>
+                                </Grid>
+                            </Border>
+                            <ItemsPresenter x:Name="ItemsHost" Grid.Row="1"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="HasItems" Value="False">
+                                <Setter TargetName="Expander" Property="Visibility" Value="Hidden"/>
+                            </Trigger>
+                            <Trigger Property="IsExpanded" Value="False">
+                                <Setter TargetName="ItemsHost" Property="Visibility" Value="Collapsed"/>
+                            </Trigger>
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsSelected" Value="True"/>
+                                    <Condition Property="IsKeyboardFocusWithin" Value="True"/>
+                                </MultiTrigger.Conditions>
+                                <Setter TargetName="RowBorder" Property="Background" Value="#2F6FED"/>
+                            </MultiTrigger>
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsSelected" Value="True"/>
+                                    <Condition Property="IsKeyboardFocusWithin" Value="False"/>
+                                </MultiTrigger.Conditions>
+                                <Setter TargetName="RowBorder" Property="Background" Value="#DCE3EC"/>
+                            </MultiTrigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="FileTreeItemContainer" TargetType="{x:Type TreeViewItem}">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TreeViewItem}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Border x:Name="RowBorder" Background="Transparent">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="18"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ToggleButton x:Name="Expander"
+                                                  Style="{StaticResource ProjectTreeExpander}"
+                                                  IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}}"
+                                                  ClickMode="Press"/>
+                                    <ContentPresenter Grid.Column="1"
+                                                      ContentSource="Header"
+                                                      HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                      VerticalAlignment="Center"/>
+                                </Grid>
+                            </Border>
+                            <ItemsPresenter x:Name="ItemsHost" Grid.Row="1" Grid.Column="1" Margin="18,0,0,0"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="HasItems" Value="False">
+                                <Setter TargetName="Expander" Property="Visibility" Value="Hidden"/>
+                            </Trigger>
+                            <Trigger Property="IsExpanded" Value="False">
+                                <Setter TargetName="ItemsHost" Property="Visibility" Value="Collapsed"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="RowBorder" Property="Background" Value="#F2F5F9"/>
+                            </Trigger>
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsSelected" Value="True"/>
+                                    <Condition Property="IsKeyboardFocusWithin" Value="True"/>
+                                </MultiTrigger.Conditions>
+                                <Setter TargetName="RowBorder" Property="Background" Value="#2F6FED"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </MultiTrigger>
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsSelected" Value="True"/>
+                                    <Condition Property="IsKeyboardFocusWithin" Value="False"/>
+                                </MultiTrigger.Conditions>
+                                <Setter TargetName="RowBorder" Property="Background" Value="#DCE3EC"/>
+                                <Setter Property="Foreground" Value="#222"/>
+                            </MultiTrigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="WatermarkTextBox" TargetType="{x:Type TextBox}">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type TextBox}">
+                        <Border BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Background="{TemplateBinding Background}">
+                            <Grid>
+                                <ScrollViewer x:Name="PART_ContentHost"/>
+                                <TextBlock x:Name="Watermark"
+                                           Text="{TemplateBinding Tag}"
+                                           Foreground="#777"
+                                           Margin="5,0,0,0"
+                                           VerticalAlignment="Center"
+                                           IsHitTestVisible="False"
+                                           Visibility="Collapsed"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Text" Value="">
+                                <Setter TargetName="Watermark" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="MessageContentBorder" TargetType="{x:Type Border}">
+            <Setter Property="Background" Value="#FCFCFC"/>
+            <Setter Property="Padding" Value="6"/>
+            <Setter Property="CornerRadius" Value="2"/>
+        </Style>
+        <Style x:Key="MessageContentTextBlock" TargetType="{x:Type TextBlock}">
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="LineHeight" Value="20"/>
+            <Setter Property="LineStackingStrategy" Value="BlockLineHeight"/>
+        </Style>
+        <Style x:Key="MessageMarkdownViewer" TargetType="{x:Type local:MarkdownViewer}">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#111"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="Focusable" Value="True"/>
+            <Setter Property="IsSelectionEnabled" Value="True"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Disabled"/>
+            <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/>
+        </Style>
+        <Style x:Key="FileMarkdownViewer" TargetType="{x:Type local:MarkdownViewer}">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="Foreground" Value="#111"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="Focusable" Value="True"/>
+            <Setter Property="IsSelectionEnabled" Value="True"/>
+            <Setter Property="BubbleMouseWheel" Value="False"/>
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="TreePaneColumn" Width="320" MinWidth="220"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*" MinWidth="420"/>
+        </Grid.ColumnDefinitions>
+
+        <Grid Grid.Row="0" Grid.Column="0" Margin="0,0,8,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8" VerticalAlignment="Center">
+                <TextBlock Text="プロジェクト" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <Button Content="新規作成" Click="AddProject_Click" Margin="0,0,8,0"/>
+                <Button Content="ディレクトリ登録" Click="RegisterDirectoryProject_Click" Margin="0,0,8,0"/>
+                <Button Content="履歴読み込み" Click="RegisterExistingProject_Click"/>
+            </StackPanel>
+            <Grid Grid.Row="1" Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="ChatFilterBox"
+                         Style="{StaticResource WatermarkTextBox}"
+                         Tag="チャットのフィルター"
+                         TextChanged="ChatFilterBox_TextChanged"/>
+            </Grid>
+            <Grid Grid.Row="2">
+                <TreeView x:Name="ProjectTree"
+                          AllowDrop="True"
+                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                          ScrollViewer.VerticalScrollBarVisibility="Visible"
+                          SelectedItemChanged="ProjectTree_SelectedItemChanged"
+                          KeyDown="ProjectTree_KeyDown"
+                          PreviewMouseDown="ProjectTree_PreviewMouseDown"
+                          PreviewMouseMove="ProjectTree_PreviewMouseMove"
+                          DragOver="ProjectTree_DragOver"
+                          Drop="ProjectTree_Drop">
+                    <TreeView.Resources>
+                    <Style TargetType="{x:Type TreeViewItem}" BasedOn="{StaticResource ProjectTreeItemContainer}"/>
+                    <HierarchicalDataTemplate DataType="{x:Type viewModels:ProjectTreeItem}" ItemsSource="{Binding Chats}">
+                        <Grid Tag="{Binding}"
+                              MinWidth="0"
+                              MinHeight="30"
+                              HorizontalAlignment="Stretch"
+                              Width="{Binding ActualWidth, ElementName=ProjectTree, Converter={StaticResource SubtractConverter}, ConverterParameter=42}">
+                            <Grid.Style>
+                                <Style TargetType="{x:Type Grid}">
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="Opacity" Value="1"/>
+                                    <Style.Triggers>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="True"/>
+                                                <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="False"/>
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter Property="Background" Value="#F2F5F9"/>
+                                        </MultiDataTrigger>
+                                        <DataTrigger Binding="{Binding IsPending}" Value="True">
+                                            <Setter Property="Opacity" Value="0.55"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+                            <Grid.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem Header="プロジェクト名の変更" Click="RenameProjectMenu_Click"
+                                              Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                                    <MenuItem Header="プロジェクト登録解除" Click="DeleteProjectMenu_Click"
+                                              Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                                </ContextMenu>
+                            </Grid.ContextMenu>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" MinWidth="0"/>
+                                <ColumnDefinition Width="24"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Height="2"
+                                    Background="#2F6FED"
+                                    VerticalAlignment="Top"
+                                    Panel.ZIndex="2"
+                                    Grid.ColumnSpan="3"
+                                    Visibility="{Binding ShowDropBefore, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            <Border Height="2"
+                                    Background="#2F6FED"
+                                    VerticalAlignment="Bottom"
+                                    Panel.ZIndex="2"
+                                    Grid.ColumnSpan="3"
+                                    Visibility="{Binding ShowDropAfter, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            <TextBlock Grid.Column="0" Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" MinWidth="0" Margin="0,0,6,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="{x:Type TextBlock}">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsEditing}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <TextBox Text="{Binding EditName, UpdateSourceTrigger=PropertyChanged}"
+                                     Grid.Column="0"
+                                     FontWeight="SemiBold"
+                                     VerticalAlignment="Center"
+                                     MinWidth="0"
+                                     Margin="0,0,6,0"
+                                     KeyDown="ProjectNameEdit_KeyDown"
+                                     LostKeyboardFocus="ProjectNameEdit_LostKeyboardFocus">
+                                <TextBox.Style>
+                                    <Style TargetType="{x:Type TextBox}">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsEditing}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBox.Style>
+                            </TextBox>
+                            <Button Grid.Column="1" Content="..." Style="{StaticResource TreeInlineIconButton}" Click="ProjectMenu_Click" Tag="{Binding}" IsEnabled="{Binding IsAvailable}">
+                                <Button.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="プロジェクト名の変更" Click="RenameProjectMenu_Click"
+                                                  Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                                        <MenuItem Header="プロジェクト登録解除" Click="DeleteProjectMenu_Click"
+                                                  Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                            </Button>
+                        </Grid>
+                    </HierarchicalDataTemplate>
+                    <DataTemplate DataType="{x:Type viewModels:ChatTreeItem}">
+                        <Grid Tag="{Binding}"
+                              MinWidth="0"
+                              MinHeight="28"
+                              HorizontalAlignment="Stretch"
+                              Width="{Binding ActualWidth, ElementName=ProjectTree, Converter={StaticResource SubtractConverter}, ConverterParameter=42}">
+                            <Grid.Style>
+                                <Style TargetType="{x:Type Grid}">
+                                    <Setter Property="Background" Value="Transparent"/>
+                                    <Setter Property="Opacity" Value="1"/>
+                                    <Style.Triggers>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="True"/>
+                                                <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="False"/>
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter Property="Background" Value="#F2F5F9"/>
+                                        </MultiDataTrigger>
+                                        <DataTrigger Binding="{Binding IsArchiving}" Value="True">
+                                            <Setter Property="Opacity" Value="0.45"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
+                            <Grid.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem Header="変更 (F2)" Click="RenameChatMenu_Click"
+                                              Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                                    <MenuItem Header="アーカイブ" Click="ArchiveChatMenu_Click"
+                                              Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                                </ContextMenu>
+                            </Grid.ContextMenu>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" MinWidth="0"/>
+                                <ColumnDefinition Width="14"/>
+                                <ColumnDefinition Width="24"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Height="2"
+                                    Background="#2F6FED"
+                                    VerticalAlignment="Bottom"
+                                    Panel.ZIndex="2"
+                                    Grid.ColumnSpan="3"
+                                    Visibility="{Binding ShowDropAfter, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            <TextBlock Grid.Column="0" Text="{Binding Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" MinWidth="0" Margin="16,0,6,0">
+                                <TextBlock.Style>
+                                    <Style TargetType="{x:Type TextBlock}">
+                                        <Setter Property="Visibility" Value="Visible"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsEditing}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                            <TextBox Text="{Binding EditTitle, UpdateSourceTrigger=PropertyChanged}"
+                                     Grid.Column="0"
+                                     VerticalAlignment="Center"
+                                     MinWidth="0"
+                                     Margin="16,0,6,0"
+                                     KeyDown="ChatTitleEdit_KeyDown"
+                                     LostKeyboardFocus="ChatTitleEdit_LostKeyboardFocus">
+                                <TextBox.Style>
+                                    <Style TargetType="{x:Type TextBox}">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsEditing}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBox.Style>
+                            </TextBox>
+                            <Border Grid.Column="1"
+                                    Width="7"
+                                    Height="7"
+                                    CornerRadius="4"
+                                    VerticalAlignment="Center"
+                                    HorizontalAlignment="Center"
+                                    ToolTip="未ロードの履歴があります"
+                                    Visibility="{Binding ShowUnreadIndicator, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <Border.Style>
+                                    <Style TargetType="{x:Type Border}">
+                                        <Setter Property="Background" Value="#2F6FED"/>
+                                        <Style.Triggers>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="True"/>
+                                                    <Condition Binding="{Binding IsKeyboardFocusWithin, RelativeSource={RelativeSource AncestorType={x:Type TreeView}}}" Value="True"/>
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Background" Value="#FFFFFF"/>
+                                            </MultiDataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                            </Border>
+                            <Viewbox Grid.Column="1"
+                                     Width="12"
+                                     Height="12"
+                                     ToolTip="処理中"
+                                     VerticalAlignment="Center"
+                                     HorizontalAlignment="Center"
+                                     RenderTransformOrigin="0.5,0.5"
+                                     Visibility="{Binding IsRunning, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <Viewbox.RenderTransform>
+                                    <RotateTransform/>
+                                </Viewbox.RenderTransform>
+                                <Canvas Width="12" Height="12">
+                                    <Path Stroke="#2F6FED"
+                                          StrokeThickness="2"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          Data="M 6,1 A 5,5 0 1 1 2.46,9.54"/>
+                                </Canvas>
+                                <Viewbox.Triggers>
+                                    <EventTrigger RoutedEvent="Loaded">
+                                        <BeginStoryboard>
+                                            <Storyboard RepeatBehavior="Forever">
+                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                                 From="0"
+                                                                 To="360"
+                                                                 Duration="0:0:1"/>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </EventTrigger>
+                                </Viewbox.Triggers>
+                            </Viewbox>
+                            <Button Grid.Column="2" Content="..." Style="{StaticResource TreeInlineIconButton}" Click="ChatMenu_Click" Tag="{Binding}" IsEnabled="{Binding IsAvailable}">
+                                <Button.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="変更 (F2)" Click="RenameChatMenu_Click"
+                                                  Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                                        <MenuItem Header="アーカイブ" Click="ArchiveChatMenu_Click"
+                                                  Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                            </Button>
+                        </Grid>
+                    </DataTemplate>
+                    </TreeView.Resources>
+                </TreeView>
+                <Border x:Name="ProjectTreeLoadingOverlay"
+                        Background="#AAFFFFFF"
+                        Visibility="Collapsed"
+                        Panel.ZIndex="20">
+                    <Border HorizontalAlignment="Stretch"
+                            VerticalAlignment="Top"
+                            Background="#F6F8FA"
+                            BorderBrush="#D6DCE5"
+                            BorderThickness="1"
+                            Padding="10"
+                            Margin="8">
+                        <TextBlock x:Name="ProjectTreeLoadingText"
+                                   Text="プロジェクトを読み込み中..."
+                                   Foreground="#555"
+                                   TextWrapping="Wrap"
+                                   VerticalAlignment="Center"/>
+                    </Border>
+                </Border>
+            </Grid>
+        </Grid>
+
+        <GridSplitter Grid.Row="0" Grid.Column="1"
+                      Width="6"
+                      HorizontalAlignment="Stretch"
+                      VerticalAlignment="Stretch"
+                      Background="#DDD"
+                      ShowsPreview="True"
+                      DragCompleted="MainGridSplitter_DragCompleted"/>
+
+        <Grid Grid.Row="0" Grid.Column="2">
+            <TextBlock x:Name="NoChatPlaceholder"
+                       Text="プロジェクトを選んでください"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Foreground="#666"
+                       FontSize="18"
+                       Visibility="Collapsed"/>
+
+            <TabControl x:Name="MainTabs" SelectionChanged="MainTabs_SelectionChanged">
+                <TabItem x:Name="ConversationTab" Header="会話">
+                    <Grid>
+                    <Grid x:Name="ProjectComposerPanel"
+                          Margin="16"
+                          Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Grid HorizontalAlignment="Center" VerticalAlignment="Center" Width="560" MaxWidth="680">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid Margin="0,0,0,16">
+                        <TextBlock Text="使用状況"
+                                   HorizontalAlignment="Center"
+                                   Foreground="#333"
+                                   FontSize="18"
+                                   FontWeight="SemiBold"/>
+                        <Button x:Name="RefreshUsageButton"
+                                Content="再読み込み"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                Click="RefreshUsage_Click"/>
+                    </Grid>
+                    <Border Grid.Row="1" BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="12" Margin="0,0,0,10">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="96"/>
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="5時間容量" Foreground="#333"/>
+                            <TextBlock x:Name="FiveHourUsageText" Grid.Column="1" Text="未取得" Foreground="#666"/>
+                            <Canvas x:Name="FiveHourUsageGraph" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,8,0,0" SizeChanged="UsageGraph_SizeChanged"/>
+                        </Grid>
+                    </Border>
+                    <Border Grid.Row="2" BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="12">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="96"/>
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="1週間容量" Foreground="#333"/>
+                            <TextBlock x:Name="WeeklyUsageText" Grid.Column="1" Text="未取得" Foreground="#666"/>
+                            <Canvas x:Name="WeeklyUsageGraph" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,8,0,0" SizeChanged="UsageGraph_SizeChanged"/>
+                        </Grid>
+                    </Border>
+                </Grid>
+                <Grid Grid.Row="1"
+                      AllowDrop="True"
+                      PreviewDragOver="Composer_PreviewDragOver"
+                      PreviewDrop="Composer_PreviewDrop">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <ItemsControl x:Name="NewChatPendingAttachmentsList" Grid.Row="0" Grid.ColumnSpan="4" ItemsSource="{Binding}" Margin="0,0,0,6">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="6" Margin="0,0,6,4" Width="220" CornerRadius="2">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                        <Button Grid.Column="1"
+                                                Content="×"
+                                                ToolTip="添付を削除"
+                                                Style="{StaticResource InlineIconButton}"
+                                                Click="RemoveAttachment_Click"/>
+                                        <Border Grid.Row="1" Grid.ColumnSpan="2" BorderBrush="#E1E4E8" BorderThickness="1" Background="White" Margin="0,6,0,0" MaxHeight="120">
+                                            <Border.Style>
+                                                <Style TargetType="{x:Type Border}">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Kind}" Value="image">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <Image Source="{Binding Uri}" MaxHeight="110" Stretch="Uniform"/>
+                                        </Border>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock x:Name="NewChatComposerHintText"
+                               Grid.Row="1"
+                               Grid.ColumnSpan="4"
+                               Visibility="Hidden"
+                               Foreground="#666"
+                               Margin="2,0,0,6"
+                               TextWrapping="Wrap"/>
+                    <TextBox x:Name="NewChatMessageBox" Grid.Row="2" AcceptsReturn="True" TextWrapping="Wrap" Height="72" VerticalScrollBarVisibility="Auto" PreviewKeyDown="NewChatMessageBox_PreviewKeyDown" TextChanged="MessageBox_TextChanged" AllowDrop="True" PreviewDragOver="Composer_PreviewDragOver" PreviewDrop="Composer_PreviewDrop" Margin="0,0,8,0"/>
+                    <Button Grid.Row="2" Grid.Column="1" Content="添付" Click="AttachFiles_Click" Margin="0,0,8,0" MinHeight="32" VerticalAlignment="Bottom"/>
+                    <Button Grid.Row="2" Grid.Column="2" Content="画像貼付" Click="PasteImage_Click" Margin="0,0,8,0" MinHeight="32" VerticalAlignment="Bottom"/>
+                    <Button x:Name="NewChatSendButton"
+                            Grid.Row="2"
+                            Grid.Column="3"
+                            Content="送信"
+                            Click="NewChatSend_Click"
+                            MinHeight="32"
+                            VerticalAlignment="Bottom"/>
+                </Grid>
+                    </Grid>
+                    <Grid x:Name="ChatConversationPanel" Margin="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <ListBox x:Name="MessagesList"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.CanContentScroll="False"
+                             ScrollViewer.ScrollChanged="MessagesList_ScrollChanged"
+                             VirtualizingPanel.IsVirtualizing="True"
+                             VirtualizingPanel.ScrollUnit="Pixel"
+                             VirtualizingPanel.VirtualizationMode="Recycling"
+                             HorizontalContentAlignment="Stretch"
+                             PreviewKeyDown="MessagesList_PreviewKeyDown"
+                             PreviewMouseWheel="MessagesList_PreviewMouseWheel"
+                             PreviewMouseDown="MessagesList_PreviewMouseDown">
+                        <ListBox.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel/>
+                            </ItemsPanelTemplate>
+                        </ListBox.ItemsPanel>
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="{x:Type ListBoxItem}">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                <Setter Property="Focusable" Value="False"/>
+                                <Setter Property="Padding" Value="0"/>
+                                <Setter Property="Margin" Value="0"/>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="0,6">
+                                    <local:UnloadedHistorySpacer Height="{Binding SpacerHeight}"
+                                                                 IsLoading="{Binding SpacerIsLoading}"
+                                                                 Visibility="{Binding SpacerVisibility}"
+                                                                 IsHitTestVisible="False"/>
+                                    <StackPanel x:Name="MessageBlock" Visibility="{Binding MessageVisibility}">
+                                        <StackPanel.Style>
+                                            <Style TargetType="{x:Type StackPanel}">
+                                                <Setter Property="HorizontalAlignment" Value="Stretch"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Role}" Value="user">
+                                                        <Setter Property="HorizontalAlignment" Value="Right"/>
+                                                        <Setter Property="Width" Value="{Binding ActualWidth, ElementName=MessagesList, Converter={StaticResource ScaleConverter}, ConverterParameter=0.75}"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </StackPanel.Style>
+                                        <Border>
+                                            <Border.Style>
+                                                <Style TargetType="{x:Type Border}" BasedOn="{StaticResource MessageContentBorder}">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Role}" Value="user">
+                                                            <Setter Property="Background" Value="#EAF2FF"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding IsConclusionMessage}" Value="True">
+                                                            <Setter Property="Background" Value="#F7FFF8"/>
+                                                            <Setter Property="BorderBrush" Value="#9BC89A"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding IsWaitingMessage}" Value="True">
+                                                            <Setter Property="Background" Value="#F6F8FA"/>
+                                                            <Setter Property="BorderBrush" Value="#D6DCE5"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding IsWorkProgressMessage}" Value="True">
+                                                            <Setter Property="Background" Value="#FFF8E7"/>
+                                                            <Setter Property="BorderBrush" Value="#E7C56B"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <Grid>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto"/>
+                                                </Grid.RowDefinitions>
+                                                <Border Width="3"
+                                                        HorizontalAlignment="Left"
+                                                        Background="#D7A928"
+                                                        Margin="-6,-6,0,-6"
+                                                        Visibility="{Binding IsWorkProgressMessage, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                                <local:MarkdownViewer Markdown="{Binding Content}" LinkClicked="MarkdownViewer_LinkClicked">
+                                                    <local:MarkdownViewer.Style>
+                                                        <Style TargetType="{x:Type local:MarkdownViewer}" BasedOn="{StaticResource MessageMarkdownViewer}">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsWorkProgressMessage}" Value="True">
+                                                                    <Setter Property="Foreground" Value="#3F3A2A"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </local:MarkdownViewer.Style>
+                                                </local:MarkdownViewer>
+                                                <Rectangle Stroke="#D6DCE5"
+                                                           StrokeThickness="1"
+                                                           StrokeDashArray="2 2"
+                                                           RadiusX="2"
+                                                           RadiusY="2"
+                                                           IsHitTestVisible="False"
+                                                           SnapsToDevicePixels="True"
+                                                           Margin="-6"/>
+                                            </Grid>
+                                        </Border>
+                                        <ItemsControl ItemsSource="{Binding Attachments}" Margin="0,6,0,0">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="6" Margin="0,2,0,4" CornerRadius="2">
+                                                        <Grid>
+                                                            <Grid.RowDefinitions>
+                                                                <RowDefinition Height="Auto"/>
+                                                                <RowDefinition Height="Auto"/>
+                                                                <RowDefinition Height="Auto"/>
+                                                            </Grid.RowDefinitions>
+                                                            <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                                            <Border Grid.Row="1" BorderBrush="#E1E4E8" BorderThickness="1" Background="White" Margin="0,6,0,4" MaxHeight="320">
+                                                                <Border.Style>
+                                                                    <Style TargetType="{x:Type Border}">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding Kind}" Value="image">
+                                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </Border.Style>
+                                                                <Image Source="{Binding Uri}" MaxHeight="300" Stretch="Uniform"/>
+                                                            </Border>
+                                                            <TextBlock Grid.Row="2" Text="{Binding Path}" Foreground="#666" FontSize="11" TextWrapping="Wrap"/>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <TextBlock HorizontalAlignment="Right" Foreground="#666" FontSize="11" Margin="0,-1,0,0">
+                                            <Run Text="{Binding MessageKindLabel, Mode=OneWay}"/>
+                                            <Run Text=" "/>
+                                            <Run Text="{Binding DisplayCreatedAt, Mode=OneWay}"/>
+                                        </TextBlock>
+                                    </StackPanel>
+                                    <Expander Visibility="{Binding InlineStatusVisibility}"
+                                              Style="{StaticResource ActivityExpander}"
+                                              Margin="6,1,6,1"
+                                              Foreground="#6A737D"
+                                              FontSize="12"
+                                              IsExpanded="False">
+                                        <Expander.Header>
+                                            <TextBlock Text="{Binding Content}"
+                                                       Foreground="#6A737D"
+                                                       TextWrapping="NoWrap"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       VerticalAlignment="Center"/>
+                                        </Expander.Header>
+                                        <Border Background="#F6F8FA"
+                                                BorderBrush="#E1E4E8"
+                                                BorderThickness="1"
+                                                Padding="8"
+                                                Margin="22,2,0,4"
+                                                CornerRadius="2">
+                                            <TextBox Text="{Binding ActivityDetailText, Mode=OneWay}"
+                                                     IsReadOnly="True"
+                                                     BorderThickness="0"
+                                                     Background="Transparent"
+                                                     Foreground="#4B5563"
+                                                     FontFamily="Consolas"
+                                                     FontSize="11"
+                                                     TextWrapping="Wrap"
+                                                     AcceptsReturn="True"
+                                                     VerticalScrollBarVisibility="Auto"
+                                                     MaxHeight="180"/>
+                                        </Border>
+                                    </Expander>
+                                    <Border Visibility="{Binding ActivityIndicatorVisibility}"
+                                            Background="#F6F8FA"
+                                            BorderBrush="#D6DCE5"
+                                            BorderThickness="1"
+                                            Padding="10,8"
+                                            Margin="0,4,0,2"
+                                            CornerRadius="2">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="48"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <ProgressBar Width="34"
+                                                         Height="6"
+                                                         IsIndeterminate="True"
+                                                         VerticalAlignment="Center"/>
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{Binding Content}"
+                                                       Foreground="#333"
+                                                       FontSize="12"
+                                                       TextWrapping="Wrap"
+                                                       VerticalAlignment="Center"/>
+                                        </Grid>
+                                    </Border>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <StackPanel Grid.Row="1" Margin="0,8,0,0">
+                        <Border x:Name="RunProgressPanel"
+                                Visibility="Collapsed"
+                                Background="#F6F8FA"
+                                BorderBrush="#D6DCE5"
+                                BorderThickness="1"
+                                Padding="8,0"
+                                Height="34">
+                            <TextBlock x:Name="RunProgressText"
+                                       Text="実行中"
+                                       Foreground="#333"
+                                       TextWrapping="NoWrap"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center"/>
+                        </Border>
+                    </StackPanel>
+                    <Grid Grid.Row="2" Margin="0,8,0,0"
+                          AllowDrop="True"
+                          PreviewDragOver="Composer_PreviewDragOver"
+                          PreviewDrop="Composer_PreviewDrop">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <ItemsControl x:Name="PendingAttachmentsList" Grid.Row="0" Grid.ColumnSpan="5" ItemsSource="{Binding}" Margin="0,0,0,6">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="6" Margin="0,0,6,4" Width="220" CornerRadius="2">
+                                        <Grid>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                            </Grid.RowDefinitions>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                            <Button Grid.Column="1"
+                                                    Content="×"
+                                                    ToolTip="添付を削除"
+                                                    Style="{StaticResource InlineIconButton}"
+                                                    Click="RemoveAttachment_Click"/>
+                                            <Border Grid.Row="1" Grid.ColumnSpan="2" BorderBrush="#E1E4E8" BorderThickness="1" Background="White" Margin="0,6,0,0" MaxHeight="120">
+                                                <Border.Style>
+                                                    <Style TargetType="{x:Type Border}">
+                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Kind}" Value="image">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                                <Image Source="{Binding Uri}" MaxHeight="110" Stretch="Uniform"/>
+                                            </Border>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock x:Name="ComposerHintText"
+                                   Grid.Row="1"
+                                   Grid.ColumnSpan="5"
+                                   Visibility="Hidden"
+                                   Foreground="#666"
+                                   Margin="2,0,0,6"
+                                   TextWrapping="Wrap"/>
+                        <TextBox x:Name="MessageBox" Grid.Row="2" AcceptsReturn="True" TextWrapping="Wrap" Height="72" VerticalScrollBarVisibility="Auto" PreviewKeyDown="MessageBox_PreviewKeyDown" TextChanged="MessageBox_TextChanged" AllowDrop="True" PreviewDragOver="Composer_PreviewDragOver" PreviewDrop="Composer_PreviewDrop" Margin="0,0,8,0"/>
+                        <Button Grid.Row="2" Grid.Column="1" Content="添付" Click="AttachFiles_Click" Margin="0,0,8,0" MinHeight="32" VerticalAlignment="Bottom"/>
+                        <Button Grid.Row="2" Grid.Column="2" Content="画像貼付" Click="PasteImage_Click" Margin="0,0,8,0" MinHeight="32" VerticalAlignment="Bottom"/>
+                        <Button x:Name="SendButton"
+                                Grid.Row="2"
+                                Grid.Column="3"
+                                Content="送信"
+                                Click="Send_Click"
+                                Margin="0,0,8,0"
+                                MinHeight="32"
+                                VerticalAlignment="Bottom"/>
+                        <Button x:Name="CancelButton"
+                                Grid.Row="2"
+                                Grid.Column="4"
+                                Content="停止"
+                                Click="Cancel_Click"
+                                IsEnabled="False"
+                                ToolTipService.ShowOnDisabled="True"
+                                MinHeight="32"
+                                VerticalAlignment="Bottom"/>
+                    </Grid>
+                    </Grid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem x:Name="FilesTab" Header="ファイル">
+                    <Grid Margin="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="280"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid Margin="0,0,8,0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <TreeView x:Name="FilesTree"
+                                  Grid.Row="0"
+                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                  ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                  SelectedItemChanged="FilesTree_SelectedItemChanged">
+                            <TreeView.Resources>
+                                <Style TargetType="{x:Type TreeViewItem}" BasedOn="{StaticResource FileTreeItemContainer}"/>
+                                <HierarchicalDataTemplate DataType="{x:Type viewModels:FileTreeItem}" ItemsSource="{Binding Children}">
+                                    <Grid MinHeight="24">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="26"/>
+                                            <ColumnDefinition Width="*" MinWidth="0"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Grid Width="20" Height="18" VerticalAlignment="Center">
+                                            <Viewbox Stretch="Uniform">
+                                                <Grid Width="20" Height="18">
+                                                    <Path x:Name="FileIconPaper"
+                                                          Fill="{Binding IconPaperFill}"
+                                                          Stroke="{Binding IconPaperStroke}"
+                                                          StrokeThickness="1"
+                                                          Data="M4,1 L12,1 L16,5 L16,17 L4,17 Z">
+                                                        <Path.Style>
+                                                            <Style TargetType="{x:Type Path}">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsDirectory}" Value="True">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </Path.Style>
+                                                    </Path>
+                                                    <Path x:Name="FileIconDogEar"
+                                                          Fill="{Binding IconDogEarFill}"
+                                                          Stroke="{Binding IconPaperStroke}"
+                                                          StrokeThickness="1"
+                                                          Data="M12,1 L12,5 L16,5 Z">
+                                                        <Path.Style>
+                                                            <Style TargetType="{x:Type Path}">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsDirectory}" Value="True">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </Path.Style>
+                                                    </Path>
+                                                    <Path x:Name="FileIconFolder"
+                                                          Fill="#D69E2E"
+                                                          Stroke="#B7791F"
+                                                          StrokeThickness="1"
+                                                          Data="M2,5 L8,5 L10,7 L18,7 L18,16 L2,16 Z">
+                                                        <Path.Style>
+                                                            <Style TargetType="{x:Type Path}">
+                                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsDirectory}" Value="True">
+                                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </Path.Style>
+                                                    </Path>
+                                                    <TextBlock x:Name="FileIconText"
+                                                               Text="{Binding IconText}"
+                                                               Foreground="{Binding IconForeground}"
+                                                               FontSize="{Binding IconFontSize}"
+                                                               FontWeight="SemiBold"
+                                                               HorizontalAlignment="Center"
+                                                               VerticalAlignment="Center"
+                                                               Margin="0,3,0,0">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="{x:Type TextBlock}">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsDirectory}" Value="True">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
+                                                </Grid>
+                                            </Viewbox>
+                                            <Grid.Style>
+                                                <Style TargetType="{x:Type Grid}">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsPlaceholder}" Value="True">
+                                                            <Setter Property="Visibility" Value="Hidden"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Grid.Style>
+                                        </Grid>
+                                        <TextBlock Grid.Column="1" Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="{x:Type TextBlock}">
+                                                    <Setter Property="Foreground" Value="#222"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsPlaceholder}" Value="True">
+                                                            <Setter Property="Text" Value="読み込み中..."/>
+                                                            <Setter Property="Foreground" Value="#777"/>
+                                                            <Setter Property="FontStyle" Value="Italic"/>
+                                                        </DataTrigger>
+                                                        <MultiDataTrigger>
+                                                            <MultiDataTrigger.Conditions>
+                                                                <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="True"/>
+                                                                <Condition Binding="{Binding IsKeyboardFocusWithin, RelativeSource={RelativeSource AncestorType={x:Type TreeView}}}" Value="True"/>
+                                                            </MultiDataTrigger.Conditions>
+                                                            <Setter Property="Foreground" Value="White"/>
+                                                        </MultiDataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </Grid>
+                                </HierarchicalDataTemplate>
+                            </TreeView.Resources>
+                        </TreeView>
+                    </Grid>
+                    <Grid Grid.Column="1">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <Grid Margin="0,0,0,8">
+                            <TextBlock x:Name="FilePathText" Visibility="Collapsed"/>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="OpenFileInCodeButton" Content="VS" ToolTip="VS Codeで開く" Click="OpenFileInCode_Click" Margin="0,0,8,0"/>
+                                <Button x:Name="OpenFileExternalButton" Content="開く" Click="OpenFileExternal_Click" Margin="0,0,16,0"/>
+                                <CheckBox x:Name="FileWrapCheckBox"
+                                          Content="折り返し"
+                                          VerticalAlignment="Center"
+                                          Checked="FileWrapCheckBox_Changed"
+                                          Unchecked="FileWrapCheckBox_Changed"/>
+                            </StackPanel>
+                        </Grid>
+                        <Grid Grid.Row="1">
+                            <TextBox x:Name="FileContentBox"
+                                     IsReadOnly="True"
+                                     AcceptsReturn="True"
+                                     TextWrapping="NoWrap"
+                                     HorizontalScrollBarVisibility="Auto"
+                                     VerticalScrollBarVisibility="Auto"
+                                     IsReadOnlyCaretVisible="True"
+                                     PreviewMouseWheel="FileContentBox_PreviewMouseWheel"/>
+                            <local:MarkdownViewer x:Name="FileMarkdownPreview" Style="{StaticResource FileMarkdownViewer}" Visibility="Collapsed" LinkClicked="MarkdownViewer_LinkClicked"/>
+                            <Border x:Name="FileImagePanel" Background="#FAFAFA" Visibility="Collapsed">
+                                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                                    <Image x:Name="FileImagePreview" Stretch="None"/>
+                                </ScrollViewer>
+                            </Border>
+                        </Grid>
+                    </Grid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem x:Name="AutomationTab" Header="オートメーション">
+                    <Grid Margin="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="150"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <Border Background="#F6F8FA"
+                                Grid.Row="1"
+                                BorderBrush="#D6DCE5"
+                                BorderThickness="1"
+                                Padding="8"
+                                Margin="0,8,0,0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="72"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBox x:Name="AutomationNameBox"
+                                         Grid.Column="0"
+                                         Margin="0,0,8,6"
+                                         Style="{StaticResource WatermarkTextBox}"
+                                         Tag="名前"
+                                         TextChanged="AutomationInput_TextChanged"/>
+                                <TextBlock Grid.Column="1"
+                                           Text="実行間隔（分）"
+                                           VerticalAlignment="Center"
+                                           Foreground="#555"
+                                           Margin="0,0,6,6"/>
+                                <TextBox x:Name="AutomationIntervalBox"
+                                         Grid.Column="2"
+                                         Margin="0,0,8,6"
+                                         Style="{StaticResource WatermarkTextBox}"
+                                         Tag="分"
+                                         Text="60"
+                                         TextChanged="AutomationInput_TextChanged"/>
+                                <CheckBox x:Name="AutomationEnabledBox"
+                                          Grid.Column="3"
+                                          Content="有効"
+                                          IsChecked="True"
+                                          VerticalAlignment="Center"
+                                          Margin="0,0,8,6"
+                                          Checked="AutomationEnabledBox_Changed"
+                                          Unchecked="AutomationEnabledBox_Changed"/>
+                                <TextBox x:Name="AutomationPromptBox"
+                                         Grid.Row="1"
+                                         Grid.ColumnSpan="4"
+                                         MinHeight="180"
+                                         VerticalAlignment="Stretch"
+                                         AcceptsReturn="True"
+                                         AcceptsTab="True"
+                                         TextWrapping="Wrap"
+                                         VerticalScrollBarVisibility="Auto"
+                                         Style="{StaticResource WatermarkTextBox}"
+                                         Tag="定期実行する指示（Markdown）"
+                                         TextChanged="AutomationInput_TextChanged"/>
+                                <StackPanel Grid.Row="2" Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                                    <Button x:Name="RefreshAutomationsButton" Content="再読み込み" Click="RefreshAutomations_Click" Margin="0,0,8,0"/>
+                                    <Button x:Name="SaveAutomationButton" Content="保存" Click="SaveAutomation_Click" Margin="0,0,8,0"/>
+                                    <Button x:Name="RunAutomationNowButton" Content="今すぐ実行" Click="RunAutomationNow_Click" Margin="0,0,8,0"/>
+                                    <Button x:Name="ToggleAutomationButton" Content="有効/無効" Click="ToggleAutomation_Click" Margin="0,0,8,0"/>
+                                    <Button x:Name="DeleteAutomationButton" Content="削除" Click="DeleteAutomation_Click"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <Grid Grid.Row="0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,6">
+                                <Button x:Name="CreateAutomationButton"
+                                        Content="新規"
+                                        Click="NewAutomation_Click"/>
+                            </StackPanel>
+                            <DataGrid x:Name="AutomationsGrid"
+                                      Grid.Row="1"
+                                      AutoGenerateColumns="False"
+                                      IsReadOnly="True"
+                                      SelectionMode="Single"
+                                      CanUserAddRows="False"
+                                      CanUserDeleteRows="False"
+                                      SelectionChanged="AutomationsGrid_SelectionChanged">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="状態" Binding="{Binding DisplayState}" Width="70"/>
+                                    <DataGridTextColumn Header="名前" Binding="{Binding Name}" Width="160"/>
+                                    <DataGridTextColumn Header="間隔（分）" Binding="{Binding IntervalMinutes}" Width="80"/>
+                                    <DataGridTextColumn Header="次回実行" Binding="{Binding DisplayNextRunAt}" Width="150"/>
+                                    <DataGridTextColumn Header="最終実行" Binding="{Binding DisplayLastRunAt}" Width="150"/>
+                                    <DataGridTextColumn Header="エラー" Binding="{Binding LastError}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </Grid>
+                </TabItem>
+
+                <TabItem x:Name="DiagnosticsTab" Header="診断">
+                    <Grid Margin="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Text="モデル" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <ComboBox x:Name="ModelBox"
+                                      Width="150"
+                                      Margin="0,0,12,0"
+                                      IsEditable="True"
+                                      IsTextSearchEnabled="False">
+                                <ComboBoxItem Content="既定" Tag=""/>
+                                <ComboBoxItem Content="gpt-5" Tag="gpt-5"/>
+                                <ComboBoxItem Content="gpt-5-codex" Tag="gpt-5-codex"/>
+                            </ComboBox>
+                            <TextBlock Text="承認方法" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <ComboBox x:Name="ApprovalPolicyBox" Width="140" Margin="0,0,12,0">
+                                <ComboBoxItem Content="未信頼時に確認" Tag="untrusted"/>
+                                <ComboBoxItem Content="失敗時に確認" Tag="on-failure"/>
+                                <ComboBoxItem Content="必要時に確認" Tag="on-request"/>
+                                <ComboBoxItem Content="確認しない" Tag="never"/>
+                            </ComboBox>
+                            <TextBlock Text="アクセスポリシー" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                            <ComboBox x:Name="PermissionProfileBox" Width="160" Margin="0,0,8,0">
+                                <ComboBoxItem Content="読み取り専用" Tag=":read-only"/>
+                                <ComboBoxItem Content="ワークスペース" Tag=":workspace"/>
+                                <ComboBoxItem Content="フルアクセス" Tag=":danger-full-access"/>
+                            </ComboBox>
+                            <Button Content="適用" Click="ApplyRuntimeSettings_Click"/>
+                        </StackPanel>
+                        <Border Grid.Row="1"
+                                Background="#F6F8FA"
+                                BorderBrush="#D6DCE5"
+                                BorderThickness="1"
+                                Padding="8"
+                                Margin="0,0,0,8">
+                            <UniformGrid Columns="6">
+                                <StackPanel Margin="0,0,12,0">
+                                    <TextBlock Text="app-server" Foreground="#666" FontSize="11"/>
+                                    <TextBlock x:Name="DiagnosticsAppServerText" Text="-" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <StackPanel Margin="0,0,12,0">
+                                    <TextBlock Text="実行中" Foreground="#666" FontSize="11"/>
+                                    <TextBlock x:Name="DiagnosticsActiveRunText" Text="-" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <StackPanel Margin="0,0,12,0">
+                                    <TextBlock Text="権限" Foreground="#666" FontSize="11"/>
+                                    <TextBlock x:Name="DiagnosticsPermissionText" Text="-" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <StackPanel Margin="0,0,12,0">
+                                    <TextBlock Text="承認" Foreground="#666" FontSize="11"/>
+                                    <TextBlock x:Name="DiagnosticsApprovalText" Text="-" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <StackPanel Margin="0,0,12,0">
+                                    <TextBlock Text="モデル" Foreground="#666" FontSize="11"/>
+                                    <TextBlock x:Name="DiagnosticsModelText" Text="-" TextTrimming="CharacterEllipsis" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <StackPanel>
+                                    <TextBlock Text="Codex" Foreground="#666" FontSize="11"/>
+                                    <TextBlock x:Name="DiagnosticsCodexText" Text="-" TextTrimming="CharacterEllipsis" FontWeight="SemiBold"/>
+                                </StackPanel>
+                            </UniformGrid>
+                        </Border>
+                        <TextBox x:Name="DiagnosticsBox" Grid.Row="2" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+                    </Grid>
+                </TabItem>
+            </TabControl>
+        </Grid>
+
+        <Grid Grid.Row="1" Grid.ColumnSpan="3" Margin="0,8,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="StatusText" Text="起動中" VerticalAlignment="Center"/>
+            <ProgressBar x:Name="ActivityProgress"
+                         Grid.Column="1"
+                         Width="92"
+                         Height="6"
+                         Margin="8,0,12,0"
+                         VerticalAlignment="Center"
+                         IsIndeterminate="True"
+                         Visibility="Collapsed"/>
+            <Button x:Name="OpenProjectExplorerButton" Grid.Column="2" Content="Explorer" Click="OpenProjectExplorer_Click" Margin="0,0,8,0"/>
+            <Button x:Name="OpenProjectCodeButton" Grid.Column="3" Content="VS Code" Click="OpenProjectCode_Click" Margin="0,0,8,0"/>
+            <Button Grid.Column="4" Content="設定" Click="Settings_Click"/>
+        </Grid>
+
+        <Grid x:Name="BusyOverlay"
+              Grid.RowSpan="2"
+              Grid.ColumnSpan="3"
+              Background="#55FFFFFF"
+              Visibility="Collapsed"
+              Panel.ZIndex="1000">
+            <Border HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="White"
+                    BorderBrush="#CCC"
+                    BorderThickness="1"
+                    Padding="18"
+                    CornerRadius="4">
+                <StackPanel Width="300">
+                    <TextBlock x:Name="BusyText"
+                               Text="Loading..."
+                               FontWeight="SemiBold"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>
