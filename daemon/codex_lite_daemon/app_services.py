@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections import Counter
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -672,9 +673,22 @@ def _chat_out(project_id: str, thread: dict[str, Any]) -> dict:
 
 
 def _merge_messages(transcript_messages: list[dict], local_messages: list[dict]) -> list[dict]:
+    transcript_occurrences = Counter(
+        key
+        for key in (_message_occurrence_key(message) for message in transcript_messages)
+        if key is not None
+    )
+    filtered_local_messages: list[dict] = []
+    for message in sorted(local_messages, key=_message_sort_key):
+        key = _message_occurrence_key(message)
+        if key is not None and transcript_occurrences[key] > 0:
+            transcript_occurrences[key] -= 1
+            continue
+        filtered_local_messages.append(message)
+
     seen_ids: set[str] = set()
     merged: list[dict] = []
-    for message in [*transcript_messages, *local_messages]:
+    for message in [*transcript_messages, *filtered_local_messages]:
         message_id = str(message.get("id") or "")
         if message_id and message_id in seen_ids:
             continue
@@ -682,6 +696,19 @@ def _merge_messages(transcript_messages: list[dict], local_messages: list[dict])
             seen_ids.add(message_id)
         merged.append(message)
     return sorted(merged, key=_message_sort_key)
+
+
+def _message_occurrence_key(message: dict) -> tuple[str, str] | None:
+    role = str(message.get("role") or "").strip().lower()
+    content = _message_content_key(str(message.get("content") or ""))
+    if not role or not content:
+        return None
+    return (role, content)
+
+
+def _message_content_key(content: str) -> str:
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.split("\n\nAttachments:\n", 1)[0].strip()
 
 
 def _message_sort_key(message: dict) -> tuple[datetime, str]:

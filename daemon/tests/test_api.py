@@ -186,7 +186,7 @@ def test_clipboard_attachment_summary_hides_path() -> None:
     assert summary == "確認して\n\nAttachments:\n- clipboard-20260713-174210-abcd.png\n- note.txt: /home/sgk/project/note.txt"
 
 
-def test_merge_messages_dedupes_by_id_and_sorts_by_time() -> None:
+def test_merge_messages_dedupes_local_echoes_by_content_occurrence_and_sorts_by_time() -> None:
     transcript_messages = [
         {"id": "assistant", "role": "assistant", "content": "done", "createdAt": "2026-06-30T03:04:58.9215662+00:00"},
         {"id": "user-transcript", "role": "user", "content": "確認して", "createdAt": "2026-06-30T03:04:40.0758495+00:00"},
@@ -202,7 +202,7 @@ def test_merge_messages_dedupes_by_id_and_sorts_by_time() -> None:
 
     merged = _merge_messages(transcript_messages, local_messages)
 
-    assert [message["id"] for message in merged] == ["user-local", "user-transcript", "assistant"]
+    assert [message["id"] for message in merged] == ["user-transcript", "assistant"]
 
 
 def test_merge_messages_skips_exact_same_id() -> None:
@@ -231,6 +231,21 @@ def test_merge_messages_keeps_repeated_automation_prompts() -> None:
     merged = _merge_messages(transcript_messages, local_messages)
 
     assert [message["id"] for message in merged] == ["automation-1", "assistant-1", "automation-2", "assistant-2"]
+
+
+def test_merge_messages_preserves_repeated_transcript_prompts_without_local_echoes() -> None:
+    transcript_messages = [
+        {"id": "user-transcript-1", "role": "user", "content": "確認して", "createdAt": "2026-06-30T03:00:00Z"},
+        {"id": "user-transcript-2", "role": "user", "content": "確認して", "createdAt": "2026-06-30T03:10:00Z"},
+    ]
+    local_messages = [
+        {"id": "user-local-1", "role": "user", "content": "確認して", "createdAt": "2026-06-30T03:00:00Z"},
+        {"id": "user-local-2", "role": "user", "content": "確認して", "createdAt": "2026-06-30T03:10:00Z"},
+    ]
+
+    merged = _merge_messages(transcript_messages, local_messages)
+
+    assert [message["id"] for message in merged] == ["user-transcript-1", "user-transcript-2"]
 
 
 def test_message_page_returns_latest_and_before_cursor() -> None:
