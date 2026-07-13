@@ -3909,9 +3909,9 @@ public partial class MainWindow : Window
         if (e.Key == Key.Up)
         {
             e.Handled = true;
-            if (!IsCaretAtCurrentLineStart(textBox))
+            if (!IsCaretAtTextStart(textBox))
             {
-                MoveCaretToCurrentLineStart(textBox);
+                MoveCaretToTextStart(textBox);
                 return true;
             }
             ShowPreviousComposerHistory(textBox);
@@ -3920,9 +3920,9 @@ public partial class MainWindow : Window
         if (e.Key == Key.Down)
         {
             e.Handled = true;
-            if (!IsCaretAtCurrentLineEnd(textBox))
+            if (!IsCaretAtTextEnd(textBox))
             {
-                MoveCaretToCurrentLineEnd(textBox);
+                MoveCaretToTextEnd(textBox);
                 return true;
             }
             ShowNextComposerHistory(textBox);
@@ -3931,48 +3931,26 @@ public partial class MainWindow : Window
         return false;
     }
 
-    private static bool IsCaretAtCurrentLineStart(TextBox textBox)
+    private static bool IsCaretAtTextStart(TextBox textBox)
     {
-        return textBox.CaretIndex <= CurrentLineStartIndex(textBox);
+        return textBox.CaretIndex <= 0;
     }
 
-    private static bool IsCaretAtCurrentLineEnd(TextBox textBox)
+    private static bool IsCaretAtTextEnd(TextBox textBox)
     {
-        return textBox.CaretIndex >= CurrentLineEndIndex(textBox);
+        return textBox.CaretIndex >= textBox.Text.Length;
     }
 
-    private static void MoveCaretToCurrentLineStart(TextBox textBox)
+    private static void MoveCaretToTextStart(TextBox textBox)
     {
-        textBox.CaretIndex = CurrentLineStartIndex(textBox);
+        textBox.CaretIndex = 0;
         textBox.SelectionLength = 0;
     }
 
-    private static void MoveCaretToCurrentLineEnd(TextBox textBox)
+    private static void MoveCaretToTextEnd(TextBox textBox)
     {
-        textBox.CaretIndex = CurrentLineEndIndex(textBox);
+        textBox.CaretIndex = textBox.Text.Length;
         textBox.SelectionLength = 0;
-    }
-
-    private static int CurrentLineStartIndex(TextBox textBox)
-    {
-        var line = textBox.GetLineIndexFromCharacterIndex(textBox.CaretIndex);
-        return line < 0 ? 0 : textBox.GetCharacterIndexFromLineIndex(line);
-    }
-
-    private static int CurrentLineEndIndex(TextBox textBox)
-    {
-        var line = textBox.GetLineIndexFromCharacterIndex(textBox.CaretIndex);
-        if (line < 0)
-        {
-            return textBox.Text.Length;
-        }
-        var lineStart = textBox.GetCharacterIndexFromLineIndex(line);
-        var lineEnd = Math.Min(textBox.Text.Length, lineStart + textBox.GetLineLength(line));
-        while (lineEnd > lineStart && (textBox.Text[lineEnd - 1] == '\r' || textBox.Text[lineEnd - 1] == '\n'))
-        {
-            lineEnd--;
-        }
-        return lineEnd;
     }
 
     private void ShowPreviousComposerHistory(TextBox textBox)
