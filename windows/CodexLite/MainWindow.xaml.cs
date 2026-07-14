@@ -88,6 +88,7 @@ public partial class MainWindow : Window
     private bool _wrapFileText;
     private readonly Dictionary<string, ActiveUiRun> _activeRunsByChat = new(StringComparer.Ordinal);
     private CancellationTokenSource? _usageCapacityCts;
+    private DateTimeOffset _nextBackgroundMessagePollAt = DateTimeOffset.MinValue;
     private UsageWindowDto? _fiveHourUsageWindow;
     private UsageWindowDto? _weeklyUsageWindow;
     private System.Windows.Point? _projectDragStart;
@@ -2065,6 +2066,10 @@ public partial class MainWindow : Window
         {
             return;
         }
+        if (DateTimeOffset.Now < _nextBackgroundMessagePollAt)
+        {
+            return;
+        }
         if (_selectedProject is not ProjectDto project || _selectedChat is not ChatDto chat)
         {
             return;
@@ -2100,12 +2105,14 @@ public partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
-            StatusText.Text = "history refresh timeout | 次回再試行";
+            _nextBackgroundMessagePollAt = DateTimeOffset.Now.AddSeconds(30);
+            WritePerformanceLog("history-refresh-timeout", $"chatId={LogText(_selectedChat?.Id ?? "")} backoffSeconds=30");
             UpdateCommandButtonState();
         }
         catch (Exception ex)
         {
-            StatusText.Text = $"history refresh error | {ShortError(ex)}";
+            _nextBackgroundMessagePollAt = DateTimeOffset.Now.AddSeconds(15);
+            WritePerformanceLog("history-refresh-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)} backoffSeconds=15");
             UpdateCommandButtonState();
         }
         finally
