@@ -23,6 +23,8 @@ class Config:
     permission_profile: str
     approval_policy: str
     model: str
+    auto_compact_token_limit: int
+    auto_compact_token_limit_scope: str
 
 
 def default_config() -> Config:
@@ -45,6 +47,8 @@ def default_config() -> Config:
         permission_profile=os.environ.get("CODEX_LITE_PERMISSION_PROFILE", ":danger-full-access"),
         approval_policy=os.environ.get("CODEX_LITE_APPROVAL_POLICY", "never"),
         model=os.environ.get("CODEX_LITE_MODEL", ""),
+        auto_compact_token_limit=int(os.environ.get("CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT", "100000")),
+        auto_compact_token_limit_scope=os.environ.get("CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT_SCOPE", "total"),
     )
 
 
@@ -73,6 +77,8 @@ def load_config(path: Path | None = None) -> Config:
         "permission_profile": data.get("permission_profile", base.permission_profile),
         "approval_policy": data.get("approval_policy", base.approval_policy),
         "model": data.get("model", base.model),
+        "auto_compact_token_limit": int(data.get("auto_compact_token_limit", base.auto_compact_token_limit)),
+        "auto_compact_token_limit_scope": data.get("auto_compact_token_limit_scope", base.auto_compact_token_limit_scope),
     }
     return _with_env_overrides(Config(**values))
 
@@ -82,6 +88,8 @@ def _with_env_overrides(config: Config) -> Config:
     permission_profile = os.environ.get("CODEX_LITE_PERMISSION_PROFILE", config.permission_profile)
     approval_policy = os.environ.get("CODEX_LITE_APPROVAL_POLICY", config.approval_policy)
     model = os.environ.get("CODEX_LITE_MODEL", config.model)
+    auto_compact_token_limit = int(os.environ.get("CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT", config.auto_compact_token_limit))
+    auto_compact_token_limit_scope = os.environ.get("CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT_SCOPE", config.auto_compact_token_limit_scope)
     database_path = Path(os.environ.get("CODEX_LITE_DATABASE", str(config.database_path)))
     app_data_dir = Path(os.environ.get("CODEX_LITE_APP_DATA_DIR", str(config.app_data_dir)))
     run_log_dir = Path(os.environ.get("CODEX_LITE_RUN_LOG_DIR", str(config.run_log_dir)))
@@ -101,4 +109,6 @@ def _with_env_overrides(config: Config) -> Config:
         permission_profile=permission_profile,
         approval_policy=approval_policy,
         model=model,
+        auto_compact_token_limit=auto_compact_token_limit,
+        auto_compact_token_limit_scope=auto_compact_token_limit_scope,
     )

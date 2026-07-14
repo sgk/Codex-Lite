@@ -135,6 +135,8 @@ def create_app(config: Config | None = None) -> FastAPI:
             "permissionProfile": app_settings.permission_profile,
             "approvalPolicy": app_settings.approval_policy,
             "model": app_settings.model,
+            "autoCompactTokenLimit": cfg.auto_compact_token_limit,
+            "autoCompactTokenLimitScope": cfg.auto_compact_token_limit_scope,
             "appServerRunning": app_server.is_running,
             "appServerEnvironment": app_server.environment_diagnostics(),
             "appServerStderrTail": app_server.stderr_tail,

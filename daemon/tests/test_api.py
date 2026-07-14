@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from codex_lite_daemon.app_server import AppServerNotification
+from codex_lite_daemon.app_server import AppServerClient, AppServerNotification
 from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _merge_messages, _notification_summary
 from codex_lite_daemon.automation_service import AutomationService, _run_due_automations
 from codex_lite_daemon.codex_state import CodexStateService
@@ -55,6 +55,8 @@ def make_test_config(tmp_path: Path) -> Config:
         permission_profile=base.permission_profile,
         approval_policy=base.approval_policy,
         model=base.model,
+        auto_compact_token_limit=base.auto_compact_token_limit,
+        auto_compact_token_limit_scope=base.auto_compact_token_limit_scope,
     )
 
 
@@ -89,6 +91,34 @@ def test_codex_runner_prefers_desktop_bundle_then_vscode_before_path(linux_tmp_p
     candidates = runner._candidate_paths()
 
     assert candidates[:5] == [str(explicit_codex), str(codex_home_codex), str(desktop_codex), str(vscode_codex), str(path_codex)]
+
+
+def test_app_server_command_enables_auto_compaction(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    client = AppServerClient(cfg, CodexRunner(cfg))
+
+    args = client._command_args("/opt/codex")
+
+    assert args == [
+        "/opt/codex",
+        "-c",
+        "model_auto_compact_token_limit=100000",
+        "-c",
+        'model_auto_compact_token_limit_scope="total"',
+        "app-server",
+        "--listen",
+        "stdio://",
+    ]
+
+
+def test_app_server_command_can_disable_auto_compaction(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    cfg = Config(**{**cfg.__dict__, "auto_compact_token_limit": 0})
+    client = AppServerClient(cfg, CodexRunner(cfg))
+
+    args = client._command_args("/opt/codex")
+
+    assert args == ["/opt/codex", "app-server", "--listen", "stdio://"]
 
 
 @pytest.mark.asyncio

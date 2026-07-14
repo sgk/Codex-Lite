@@ -94,10 +94,7 @@ class AppServerClient:
             env = self._env()
             self._last_env = dict(env)
             self._process = await asyncio.create_subprocess_exec(
-                codex,
-                "app-server",
-                "--listen",
-                "stdio://",
+                *self._command_args(codex),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -207,6 +204,20 @@ class AppServerClient:
 
     def _env(self) -> dict[str, str]:
         return codex_process_env(self.config)
+
+    def _command_args(self, codex: str) -> list[str]:
+        args = [codex]
+        if self.config.auto_compact_token_limit > 0:
+            args.extend(
+                [
+                    "-c",
+                    f"model_auto_compact_token_limit={self.config.auto_compact_token_limit}",
+                    "-c",
+                    f'model_auto_compact_token_limit_scope="{self.config.auto_compact_token_limit_scope}"',
+                ]
+            )
+        args.extend(["app-server", "--listen", "stdio://"])
+        return args
 
     def environment_diagnostics(self) -> dict[str, Any]:
         env = self._last_env

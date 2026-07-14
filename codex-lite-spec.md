@@ -88,6 +88,10 @@ Codexの実行設定はWSL側の `settings.json` に保存し、スレッド作�
 
 モデルは「既定」または任意入力のモデルIDから選択する。「既定」の場合はモデル値を送らず、app-server/Codex側の既定に従う。代表候補として `gpt-5`、`gpt-5-codex` を表示するが、候補の自動取得や複数経路のフォールバックは行わない。
 
+自動圧縮は app-server 起動時の Codex config として有効化する。既定では
+`model_auto_compact_token_limit=100000` と
+`model_auto_compact_token_limit_scope="total"` を指定し、同じ app-server 上で継続・新規作成される全チャットセッションに適用する。`CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT=0` を指定した場合は Codex Lite から自動圧縮設定を渡さない。
+
 承認方法は次から選択する。
 
 - 未信頼時に確認: `untrusted`
