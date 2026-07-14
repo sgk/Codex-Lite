@@ -1,59 +1,5 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
-
-class ProjectCreate(BaseModel):
-    name: str | None = None
-    path: str
-
-
-class ProjectUpdate(BaseModel):
-    name: str | None = None
-
-
-class ProjectCandidateImport(BaseModel):
-    paths: list[str] | None = None
-
-
-class ChatCreate(BaseModel):
-    title: str | None = None
-
-
-class ChatUpdate(BaseModel):
-    title: str | None = None
-
-
-class AutomationCreate(BaseModel):
-    name: str
-    prompt: str = Field(min_length=1)
-    interval_minutes: int = Field(ge=1)
-    enabled: bool = True
-
-
-class AutomationUpdate(BaseModel):
-    name: str | None = None
-    prompt: str | None = None
-    interval_minutes: int | None = Field(default=None, ge=1)
-    enabled: bool | None = None
-
-
-class MessageAttachment(BaseModel):
-    path: str
-    name: str | None = None
-    kind: str = "file"
-
-
-class MessageCreate(BaseModel):
-    content: str = Field(min_length=1)
-    attachments: list[MessageAttachment] = Field(default_factory=list)
-
-
-class RunSteer(BaseModel):
-    content: str = Field(min_length=1)
-    attachments: list[MessageAttachment] = Field(default_factory=list)
-
-
 def project_out(row: dict) -> dict:
     return {
         "id": row["id"],

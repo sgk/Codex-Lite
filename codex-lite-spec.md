@@ -19,7 +19,7 @@ Windows
 WSL
   run-daemon.sh
     └─ Python仮想環境
-        └─ FastAPIデーモン
+        └─ Starletteデーモン
             ├─ Codex Lite SQLite
             ├─ Codex state SQLite（読み取り専用）
             ├─ Codex JSONL履歴（読み取り専用）
@@ -33,7 +33,7 @@ Windowsアプリはビルド成果物に同梱された `run-daemon.sh` と `dae
 - Windows 11、WSL 2
 - WSLディストリビューションはWindows側で設定された既定環境を起動時に自動検出する
 - Windows側: .NET 8 WPF
-- WSL側: Python 3.11以上、FastAPI、uvicorn、SQLite
+- WSL側: Python 3.11以上、Starlette、uvicorn、SQLite
 - WSLから実行可能で、ユーザーによる認証が完了した Codex CLI
 
 プロジェクトは実在する絶対パスに限る。Linuxパスに加え、設定で許可されている場合は `/mnt/c` 上のパスも扱う。
@@ -110,6 +110,8 @@ Codexの実行設定はWSL側の `settings.json` に保存し、スレッド作�
 ### 5.1 起動と終了
 
 Windowsアプリは `wsl.exe -d <ディストリビューション> -- bash -lc ...` で同梱スクリプトを起動する。スクリプトは `$HOME/.local/share/codex-lite/daemon-venv` を作成または再利用し、同梱 `pyproject.toml` のハッシュが変わった場合だけパッケージを再導入する。
+
+初回起動時間と Python バージョン差の影響を抑えるため、デーモンのHTTP層は Starlette と標準 uvicorn を使い、FastAPI/Pydantic や `uvicorn[standard]` のようなネイティブ拡張を含みやすい依存には頼らない。配布ZIPには仮想環境そのものを同梱しない。仮想環境は起動先WSLのPythonで作成し、Python 3.11以上の複数バージョンに対応する。
 
 デーモンは必ず `127.0.0.1` にbindし、既定ではOSが選んだ空きポートを使う。待受完了時、標準出力へ `{"event":"ready","host":"127.0.0.1","port":...}` を1行出す。Windowsアプリはこの行を読んでHTTP接続先を決める。標準エラーはログとして回収する。
 

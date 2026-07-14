@@ -56,7 +56,7 @@ Start-Process -FilePath $dotnet -ArgumentList @($dll) -WindowStyle Hidden
 
 `\\wsl.localhost\...` 上の `CodexLite.exe` を直接起動すると、Windows がネットワーク上の実行ファイルと判断して警告する場合があります。開発時は上記のDLL起動を推奨します。Windows側へ出力一式をコピーした場合は、`CodexLite.exe` を直接起動できます。
 
-起動すると、アプリが `wsl.exe` 経由で同梱の `run-daemon.sh` を実行します。初回は WSL の `$HOME/.local/share/codex-lite/daemon-venv` に仮想環境を作成し、必要なPythonパッケージを導入するため、完了まで時間がかかることがあります。以後は `pyproject.toml` が変わったときだけ再導入します。
+起動すると、アプリが `wsl.exe` 経由で同梱の `run-daemon.sh` を実行します。初回は WSL の `$HOME/.local/share/codex-lite/daemon-venv` に仮想環境を作成し、必要なPythonパッケージを導入するため、少し時間がかかることがあります。デーモン依存は Python 3.11以上の複数バージョンで動かしやすいよう、Starlette と標準 uvicorn を中心にした軽量構成です。以後は `pyproject.toml` が変わったときだけ再導入します。
 
 ## デーモンだけを起動する方法
 

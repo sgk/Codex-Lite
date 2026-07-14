@@ -8,8 +8,8 @@ version = "0.1.0"
 description = "WSL daemon for Codex Lite"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.111",
-  "uvicorn[standard]>=0.30",
+  "starlette>=0.37",
+  "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]
