@@ -2290,8 +2290,10 @@ async def test_app_server_list_chats_syncs_codex_state(linux_tmp_path: Path) -> 
     service = AppServerThreadService(projects, chats, messages, transcripts, RecordingAppServer(), make_runtime_settings())  # type: ignore[arg-type]
 
     project = projects.create_project(str(project_dir))
-    listed = await service.list_chats(project["id"])
+    cached = await service.list_chats(project["id"])
+    listed = await service.list_chats(project["id"], sync=True)
 
+    assert cached == []
     assert [(chat["id"], chat["title"], chat["canContinue"]) for chat in listed] == [("thr_from_db", "Synced from DB with a very long title that should be collapsed before it reac...", True)]
     db.close()
 
@@ -2409,7 +2411,7 @@ async def test_configured_codex_home_threads_are_continuable(linux_tmp_path: Pat
     runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
 
     project = projects.create_project(str(project_dir))
-    listed = await threads.list_chats(project["id"])
+    listed = await threads.list_chats(project["id"], sync=True)
 
     assert listed[0]["canContinue"] is True
     await runs.start_message_run(project["id"], "thr_windows", "hello")

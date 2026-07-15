@@ -414,8 +414,8 @@ public sealed class DaemonClient
         }
     }
 
-    public Task<List<ChatDto>?> ListChatsAsync(string projectId, CancellationToken cancellationToken = default) =>
-        _http.GetFromJsonAsync<List<ChatDto>>($"/projects/{projectId}/chats", JsonOptions, cancellationToken);
+    public Task<List<ChatDto>?> ListChatsAsync(string projectId, bool sync = false, CancellationToken cancellationToken = default) =>
+        _http.GetFromJsonAsync<List<ChatDto>>($"/projects/{projectId}/chats?sync={sync.ToString().ToLowerInvariant()}", JsonOptions, cancellationToken);
 
     public Task<ChatDto?> CreateChatAsync(string projectId, string title, CancellationToken cancellationToken = default) =>
         PostAsync<ChatDto>($"/projects/{projectId}/chats", new { title }, cancellationToken);

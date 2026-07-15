@@ -213,9 +213,9 @@ def create_app(config: Config | None = None) -> Starlette:
         return transcript_import.import_project_candidates(_optional_str_list(body, "paths") if body else None)
 
     @get("/projects/{project_id}/chats")
-    async def list_chats(project_id: str) -> list[dict]:
+    async def list_chats(project_id: str, sync: bool = False) -> list[dict]:
         if use_app_server:
-            return await app_threads.list_chats(project_id)
+            return await app_threads.list_chats(project_id, sync)
         return chats.list_chats(project_id)
 
     @post("/projects/{project_id}/chats")
@@ -396,6 +396,13 @@ def _query_param(request: Request, name: str, parameter: inspect.Parameter):
         return parameter.default
     else:
         raise _validation_error(f"Query parameter is required: {name}", {"field": name})
+    if isinstance(parameter.default, bool):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise _validation_error(f"Query parameter must be a boolean: {name}", {"field": name})
     if isinstance(parameter.default, int):
         try:
             return int(value)

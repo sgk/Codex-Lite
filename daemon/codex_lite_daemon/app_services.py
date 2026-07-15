@@ -34,9 +34,10 @@ class AppServerThreadService:
         self.app_server = app_server
         self.settings = settings
 
-    async def list_chats(self, project_id: str) -> list[dict]:
+    async def list_chats(self, project_id: str, sync: bool = False) -> list[dict]:
         project = self.projects.get_project_row(project_id)
-        self.transcripts.index_project(project)
+        if sync:
+            self.transcripts.index_project(project)
         return self.chats.list_chats(project_id)
 
     async def get_chat(self, project_id: str, chat_id: str) -> dict:

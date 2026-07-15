@@ -554,6 +554,7 @@ public partial class MainWindow : Window
     private async Task RefreshProjectsAsync(string? preferredChatId)
     {
         BeginProjectTreeLoading("プロジェクトを読み込み中...");
+        var projectTreeLoadingEnded = false;
         var selectedProjectId = _selectedProject?.Id ?? _persistedSelectedProjectId;
         var selectedChatId = preferredChatId ?? _selectedChat?.Id ?? (selectedProjectId == _persistedSelectedProjectId ? _persistedSelectedChatId : null);
         var expandedProjectIds = GetExpandedProjectIds();
@@ -589,8 +590,16 @@ public partial class MainWindow : Window
             UpdateCommandButtonState();
             UpdateRightPaneVisibility();
             await Dispatcher.Yield(DispatcherPriority.Background);
+            EndProjectTreeLoading();
+            projectTreeLoadingEnded = true;
 
-            await LoadProjectChatsForTreeAsync(selectedChatId);
+            var selectedProjectItem = selectedProjectId is null
+                ? null
+                : _projectTree.FirstOrDefault(item => item.Project.Id == selectedProjectId);
+            if (selectedProjectItem is not null && selectedChatId is not null)
+            {
+                await LoadProjectChatsAsync(selectedProjectItem, selectedChatId);
+            }
             if (selectedProjectId is not null && selectedChatId is not null)
             {
                 var selectedChatItem = _projectTree
@@ -614,11 +623,15 @@ public partial class MainWindow : Window
             ApplySavedTabSelection();
             _hasCompletedInitialProjectRestore = true;
             SaveUiState();
+            _ = LoadProjectChatsForTreeInBackgroundAsync(selectedChatId, selectedProjectItem?.Project.Id);
         }
         finally
         {
             _isRefreshingTree = false;
-            EndProjectTreeLoading();
+            if (!projectTreeLoadingEnded)
+            {
+                EndProjectTreeLoading();
+            }
         }
     }
 
@@ -662,12 +675,12 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task LoadProjectChatsAsync(ProjectTreeItem projectItem, string? preferredChatId = null)
+    private async Task LoadProjectChatsAsync(ProjectTreeItem projectItem, string? preferredChatId = null, bool sync = false)
     {
         var projectId = projectItem.Project.Id;
         var version = _chatLoadVersions.TryGetValue(projectId, out var previousVersion) ? previousVersion + 1 : 1;
         _chatLoadVersions[projectId] = version;
-        var chats = await GetProjectChatsAsync(projectItem, _client.ListChatsAsync(projectId)) ?? [];
+        var chats = await GetProjectChatsAsync(projectItem, _client.ListChatsAsync(projectId, sync)) ?? [];
         if (!_chatLoadVersions.TryGetValue(projectId, out var currentVersion) || currentVersion != version)
         {
             return;
@@ -692,16 +705,17 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task LoadProjectChatsForTreeAsync(string? preferredChatId)
+    private async Task LoadProjectChatsForTreeAsync(string? preferredChatId, string? skipProjectId = null, bool sync = false)
     {
         using var gate = new SemaphoreSlim(6);
         var tasks = _projectTree
+            .Where(projectItem => projectItem.Project.Id != skipProjectId)
             .Select(async projectItem =>
             {
                 await gate.WaitAsync();
                 try
                 {
-                    await LoadProjectChatsAsync(projectItem, preferredChatId);
+                    await LoadProjectChatsAsync(projectItem, preferredChatId, sync);
                 }
                 finally
                 {
@@ -710,6 +724,19 @@ public partial class MainWindow : Window
             })
             .ToArray();
         await Task.WhenAll(tasks);
+    }
+
+    private async Task LoadProjectChatsForTreeInBackgroundAsync(string? preferredChatId, string? skipProjectId = null)
+    {
+        try
+        {
+            await LoadProjectChatsForTreeAsync(preferredChatId, skipProjectId);
+            await LoadProjectChatsForTreeAsync(preferredChatId, null, sync: true);
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog("background-chat-list-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+        }
     }
 
     private bool ChatMatchesFilter(ChatDto chat)
