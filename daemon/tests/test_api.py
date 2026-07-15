@@ -1495,6 +1495,38 @@ async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_app_server_run_uses_steered_turn_id_for_notifications(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = SteerReturnsTurnAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+    await runs.steer_run(result["runId"], "please continue")
+    await app_server.subscribers[-1].put(AppServerNotification("item/agentMessage/delta", {"threadId": "thread_1", "turnId": "turn_2", "delta": "continued"}))
+
+    events = []
+    async for event in runs.stream_events(result["runId"]):
+        events.append(event)
+        if "continued" in event:
+            break
+
+    assert any("continued" in event for event in events)
+    assert runs.get_run(result["runId"])["turnId"] == "turn_2"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_agent_message_boundary_is_published(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
@@ -2535,6 +2567,16 @@ class FailingSteerAppServer(TurnStartAppServer):
             return {"turn": {"id": "turn_1"}}
         if method == "turn/steer":
             raise AppError("app_server_error", "no active turn to steer", 502)
+        return {}
+
+
+class SteerReturnsTurnAppServer(TurnStartAppServer):
+    async def request(self, method: str, params: dict) -> dict:
+        self.requests.append((method, params))
+        if method == "turn/start":
+            return {"turn": {"id": "turn_1"}}
+        if method == "turn/steer":
+            return {"turn": {"id": "turn_2"}}
         return {}
 
 

@@ -4455,6 +4455,9 @@ public partial class MainWindow : Window
             content = "添付ファイルを確認してください。";
         }
 
+        WritePerformanceLog(
+            "steer-request",
+            $"chatId={LogText(chat.Id)} runId={LogText(runId)} content={LogText(content)} attachments={LogText(AttachmentLogText(attachments), 12000)}");
         MessageBox.Text = "";
         _pendingAttachments.Clear();
         AddComposerHistory(content);
@@ -4474,10 +4477,12 @@ public partial class MainWindow : Window
             SendButton.IsEnabled = false;
             ShowRunProgressForChat(chat.Id, "追加指示を送信中");
             await _client.SteerRunAsync(runId, content, attachments);
+            WritePerformanceLog("steer-sent", $"chatId={LogText(chat.Id)} runId={LogText(runId)}");
             ShowRunProgressForChat(chat.Id, "追加指示を送信済み");
         }
         catch (Exception ex)
         {
+            WritePerformanceLog("steer-error", $"chatId={LogText(chat.Id)} runId={LogText(runId)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
             var localMessage = _messages.FirstOrDefault(message => message.Id == localMessageId);
             if (localMessage is not null)
             {

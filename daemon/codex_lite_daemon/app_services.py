@@ -211,8 +211,10 @@ class AppServerRunService:
         except Exception:
             self.app_server.unsubscribe_queue(notification_queue)
             raise
-        turn = response["turn"]
-        self.runs[run_id] = AppServerActiveRun(thread_id, turn["id"], chat_id, started_at=utc_now())
+        turn_id = _turn_id_from_response(response)
+        if not turn_id:
+            raise AppError("app_server_error", "turn/start did not return a turn id.", 502)
+        self.runs[run_id] = AppServerActiveRun(thread_id, turn_id, chat_id, started_at=utc_now())
         await self.events.publish(run_id, "status", {"status": "running"})
         asyncio.create_task(self._watch_run(run_id, notification_queue))
         return {"messageId": user_message["id"], "runId": run_id}
@@ -305,7 +307,7 @@ class AppServerRunService:
         input_items = _build_turn_input(clean_content, attachments or [])
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "sending additional instructions"})
         try:
-            await self.app_server.request(
+            response = await self.app_server.request(
                 "turn/steer",
                 {
                     "threadId": run.thread_id,
@@ -316,6 +318,9 @@ class AppServerRunService:
         except AppError as exc:
             await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": exc.message})
             raise
+        steered_turn_id = _turn_id_from_response(response)
+        if steered_turn_id:
+            run.turn_id = steered_turn_id
         self.messages.insert_message(run.chat_id, "user", _content_with_attachment_summary(clean_content, attachments or []), run_id=run_id, kind="instruction")
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
         return _run_out(run_id, run)
@@ -414,6 +419,19 @@ def _notification_matches(notification: AppServerNotification, run: AppServerAct
         turn = params.get("turn") or {}
         return turn.get("id") == run.turn_id
     return params.get("turnId") == run.turn_id
+
+
+def _turn_id_from_response(response: dict[str, Any]) -> str | None:
+    turn = response.get("turn")
+    if isinstance(turn, dict):
+        turn_id = turn.get("id")
+        if isinstance(turn_id, str) and turn_id:
+            return turn_id
+    for key in ("turnId", "turn_id"):
+        turn_id = response.get(key)
+        if isinstance(turn_id, str) and turn_id:
+            return turn_id
+    return None
 
 
 def _notification_summary(notification: AppServerNotification) -> str:
@@ -729,6 +747,8 @@ def _run_out(run_id: str, run: AppServerActiveRun) -> dict:
     return {
         "id": run_id,
         "chatId": run.chat_id,
+        "threadId": run.thread_id,
+        "turnId": run.turn_id,
         "status": run.status,
         "pid": None,
         "exitCode": 0 if run.status == "succeeded" else None,
