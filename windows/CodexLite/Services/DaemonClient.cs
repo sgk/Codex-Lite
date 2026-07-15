@@ -32,7 +32,8 @@ public sealed class DaemonClient
         };
         startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add("bash");
-        startInfo.ArgumentList.Add("-lc");
+        // Do not use a login shell here. User startup files may run ssh-add and block on passphrase input.
+        startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add("printf '%s\\n%s\\n' \"$WSL_DISTRO_NAME\" \"$HOME\"");
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("failed to inspect the default WSL environment");
         var distroName = (await process.StandardOutput.ReadLineAsync(cancellationToken))?.Trim();
@@ -194,7 +195,8 @@ public sealed class DaemonClient
         startInfo.ArgumentList.Add(distroName);
         startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add("bash");
-        startInfo.ArgumentList.Add("-lc");
+        // The daemon itself must start without login-shell side effects. Codex child process env is captured separately.
+        startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add(command);
 
         var process = Process.Start(startInfo) ?? throw new InvalidOperationException("failed to start daemon process");

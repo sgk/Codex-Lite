@@ -109,7 +109,7 @@ Codexの実行設定はWSL側の `settings.json` に保存し、スレッド作�
 
 ### 5.1 起動と終了
 
-Windowsアプリは `wsl.exe -d <ディストリビューション> -- bash -lc ...` で同梱スクリプトを起動する。スクリプトは `$HOME/.local/share/codex-lite/daemon-venv` を作成または再利用し、同梱 `pyproject.toml` のハッシュが変わった場合だけパッケージを再導入する。
+Windowsアプリは `wsl.exe -d <ディストリビューション> -- bash -c ...` で同梱スクリプトを起動する。起動時に login shell は使わない。これは `.bash_profile` 等で ssh-agent や ssh-add がパスフレーズ入力待ちになり、デーモン起動が止まることを避けるためである。スクリプトは `$HOME/.local/share/codex-lite/daemon-venv` を作成または再利用し、同梱 `pyproject.toml` のハッシュが変わった場合だけパッケージを再導入する。
 
 初回起動時間と Python バージョン差の影響を抑えるため、デーモンのHTTP層は Starlette と標準 uvicorn を使い、FastAPI/Pydantic や `uvicorn[standard]` のようなネイティブ拡張を含みやすい依存には頼らない。配布ZIPには仮想環境そのものを同梱しない。仮想環境は起動先WSLのPythonで作成し、Python 3.11以上の複数バージョンに対応する。
 
