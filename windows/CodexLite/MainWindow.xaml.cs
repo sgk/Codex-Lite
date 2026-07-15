@@ -590,17 +590,17 @@ public partial class MainWindow : Window
             UpdateRightPaneVisibility();
             await Dispatcher.Yield(DispatcherPriority.Background);
 
-            foreach (var projectItem in _projectTree)
+            await LoadProjectChatsForTreeAsync(selectedChatId);
+            if (selectedProjectId is not null && selectedChatId is not null)
             {
-                await LoadProjectChatsAsync(projectItem, selectedChatId);
-                if (projectItem.Project.Id == selectedProjectId && selectedChatId is not null)
+                var selectedChatItem = _projectTree
+                    .FirstOrDefault(item => item.Project.Id == selectedProjectId)?
+                    .Chats
+                    .FirstOrDefault(item => item.Chat.Id == selectedChatId);
+                if (selectedChatItem is not null)
                 {
-                    var selectedChatItem = projectItem.Chats.FirstOrDefault(item => item.Chat.Id == selectedChatId);
-                    if (selectedChatItem is not null)
-                    {
-                        _selectedProject = selectedChatItem.Project;
-                        _selectedChat = selectedChatItem.Chat;
-                    }
+                    _selectedProject = selectedChatItem.Project;
+                    _selectedChat = selectedChatItem.Chat;
                 }
             }
             await RefreshMessagesAsync();
@@ -690,6 +690,26 @@ public partial class MainWindow : Window
                 _selectedChat = chat;
             }
         }
+    }
+
+    private async Task LoadProjectChatsForTreeAsync(string? preferredChatId)
+    {
+        using var gate = new SemaphoreSlim(6);
+        var tasks = _projectTree
+            .Select(async projectItem =>
+            {
+                await gate.WaitAsync();
+                try
+                {
+                    await LoadProjectChatsAsync(projectItem, preferredChatId);
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            })
+            .ToArray();
+        await Task.WhenAll(tasks);
     }
 
     private bool ChatMatchesFilter(ChatDto chat)
