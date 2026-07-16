@@ -5503,7 +5503,7 @@ public partial class MainWindow : Window
     {
         if (_selectedProject is ProjectDto project)
         {
-            StartShell("explorer.exe", $"\"{ToUncPath(project.Path, "")}\"");
+            StartShell(ToWindowsPath(project.Path), "");
         }
     }
 
