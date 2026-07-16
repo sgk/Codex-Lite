@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -447,7 +448,7 @@ def _notification_summary(notification: AppServerNotification) -> str:
             return f"ファイルを{action}: {_short_text(path)}"
         return f"ファイルを{action}"
     if method == "exec_command_begin":
-        command = _first_string(params, ("command", "cmd", "args"))
+        command = _command_text(params)
         return f"コマンドを開始しました: {_short_text(command)}" if command else "コマンドを開始しました"
     if method == "exec_command_output_delta":
         stream = _first_string(params, ("stream", "channel"))
@@ -525,6 +526,69 @@ def _first_string(data: dict[str, Any], keys: tuple[str, ...]) -> str | None:
             if nested:
                 return _redact_sensitive(nested)
     return None
+
+
+def _command_text(data: dict[str, Any]) -> str | None:
+    for container in _command_containers(data):
+        combined = _command_from_container(container)
+        if combined:
+            return _redact_sensitive(combined)
+    return None
+
+
+def _command_containers(data: dict[str, Any]) -> list[dict[str, Any]]:
+    containers: list[dict[str, Any]] = [data]
+    for key in ("command", "arguments", "args", "input", "params", "payload", "item"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+        elif isinstance(value, str):
+            parsed = _json_object(value)
+            if parsed is not None:
+                containers.append(parsed)
+    return containers
+
+
+def _command_from_container(data: dict[str, Any]) -> str | None:
+    command_value = data.get("command")
+    if isinstance(command_value, str) and command_value.strip():
+        return command_value
+    if isinstance(command_value, list):
+        return _join_command_parts(command_value)
+    if isinstance(command_value, dict):
+        nested = _command_from_container(command_value)
+        if nested:
+            return nested
+
+    cmd = data.get("cmd")
+    args = data.get("args")
+    argv = data.get("argv")
+    if isinstance(cmd, str) and cmd.strip():
+        if isinstance(args, list) and args:
+            return _join_command_parts([cmd, *args])
+        if isinstance(argv, list) and argv:
+            return _join_command_parts([cmd, *argv])
+        return cmd
+    if isinstance(args, list) and args:
+        return _join_command_parts(args)
+    if isinstance(argv, list) and argv:
+        return _join_command_parts(argv)
+    return None
+
+
+def _join_command_parts(parts: list[Any]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in parts if str(part))
+
+
+def _json_object(value: str) -> dict[str, Any] | None:
+    text = value.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _json_string_value(value: str, keys: tuple[str, ...]) -> str | None:
