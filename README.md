@@ -36,6 +36,12 @@ WSL のプロジェクトルートで、Windows の .NET SDKを使ってビル�
 '/mnt/c/Program Files/dotnet/dotnet.exe' build windows/CodexLite.sln
 ```
 
+開発中に Codex Lite 自身からビルドする場合は、実行中の自分自身を終了しないよう、次の補助ターゲットを使います。このターゲットは Windows 側で親プロセスを辿り、その親系譜に含まれる `CodexLite.exe` は終了対象から除外します。
+
+```bash
+make debug-build
+```
+
 出力先は通常、次のディレクトリです。
 
 ```text

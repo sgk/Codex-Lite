@@ -11,7 +11,13 @@ RELEASE_NAME ?= CodexLite-$(RELEASE_STAMP)
 RELEASE_DIR := $(ARTIFACTS_DIR)/$(RELEASE_NAME)
 RELEASE_ZIP := $(ARTIFACTS_DIR)/$(RELEASE_NAME).zip
 
-.PHONY: release-zip clean-release
+.PHONY: debug-build debug-build-launch release-zip clean-release
+
+debug-build:
+	"$(POWERSHELL)" -NoProfile -ExecutionPolicy Bypass -File scripts/build-debug.ps1
+
+debug-build-launch:
+	"$(POWERSHELL)" -NoProfile -ExecutionPolicy Bypass -File scripts/build-debug.ps1 -Launch
 
 release-zip:
 	mkdir -p "$(ARTIFACTS_DIR)"
