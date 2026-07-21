@@ -117,6 +117,7 @@ public partial class MainWindow : Window
     private bool _isRunningAutomationNow;
     private bool _isLoadingAutomationSelection;
     private bool _isComposerTextCompositionActive;
+    private bool _isPreparingSend;
     private bool _isRestoringMessageScrollOffset;
     private bool _pendingMessageScrollOffsetRestore;
     private bool _isCheckingDaemonHealth;
@@ -1682,8 +1683,8 @@ public partial class MainWindow : Window
     private void UpdateCommandButtonState()
     {
         var hasProjectContext = _selectedProject is not null;
-        var canContinueChat = _selectedChat is { CanContinue: true };
-        var canStartNewChat = _selectedProject is not null && _selectedChat is null;
+        var canContinueChat = _selectedChat is { CanContinue: true } && !_isPreparingSend;
+        var canStartNewChat = _selectedProject is not null && _selectedChat is null && !_isPreparingSend;
         var selectedRun = SelectedActiveRun();
         var hasLiteRun = _activeRunsByChat.Count > 0;
         var isViewingActiveRunChat = selectedRun is not null;
@@ -1701,6 +1702,8 @@ public partial class MainWindow : Window
         OpenFileInCodeButton.IsEnabled = hasProjectContext && _currentFilePath.Length > 0;
         OpenFileExternalButton.IsEnabled = hasProjectContext && _currentFilePath.Length > 0;
         MessageBox.IsEnabled = canContinueChat;
+        AttachButton.IsEnabled = canContinueChat && !externalProcessing;
+        PasteImageButton.IsEnabled = canContinueChat && !externalProcessing;
         SendButton.Content = isViewingActiveRunChat ? "追加指示" : "送信";
         SendButton.IsEnabled = canSendOrSteer;
         SendButton.ToolTip = !canContinueChat
@@ -1713,6 +1716,8 @@ public partial class MainWindow : Window
             ? "Codex Liteで開始した応答へ追加指示を送ります。"
             : "新しいメッセージを送信します。Codexアプリ側で開始した処理への追加指示にはなりません。";
         NewChatMessageBox.IsEnabled = canStartNewChat;
+        NewChatAttachButton.IsEnabled = canStartNewChat;
+        NewChatPasteImageButton.IsEnabled = canStartNewChat;
         NewChatSendButton.IsEnabled = canCreateAndSend;
         NewChatSendButton.ToolTip = !canStartNewChat
             ? "プロジェクトを選択してください。"
@@ -4297,6 +4302,8 @@ public partial class MainWindow : Window
             "send-request",
             $"projectId={LogText(project.Id)} selectedChatId={LogText(_selectedChat?.Id)} startsNewChat={startsNewChat} content={LogText(content)} attachments={LogText(AttachmentLogText(attachments), 12000)}");
         AddComposerHistory(content);
+        _isPreparingSend = true;
+        UpdateCommandButtonState();
         ChatDto? chat;
         using (EnterUiPhase("SendCurrentMessage/EnsureChat"))
         {
@@ -4304,6 +4311,8 @@ public partial class MainWindow : Window
         }
         if (chat is null)
         {
+            _isPreparingSend = false;
+            UpdateCommandButtonState();
             WritePerformanceLog("send-aborted", "reason=chat-null");
             return;
         }
@@ -4313,7 +4322,12 @@ public partial class MainWindow : Window
         _runProgress.Clear();
         SendButton.IsEnabled = false;
         NewChatSendButton.IsEnabled = false;
+        AttachButton.IsEnabled = false;
+        PasteImageButton.IsEnabled = false;
+        NewChatAttachButton.IsEnabled = false;
+        NewChatPasteImageButton.IsEnabled = false;
         CancelButton.IsEnabled = true;
+        _isPreparingSend = false;
         RemoveComposerHint();
         RemoveNewChatComposerHint();
         if (startsNewChat)
