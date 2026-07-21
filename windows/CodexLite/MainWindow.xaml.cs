@@ -687,21 +687,62 @@ public partial class MainWindow : Window
             return;
         }
 
-        projectItem.Chats.Clear();
+        ApplyProjectChats(projectItem, chats, preferredChatId);
+    }
+
+    private void ApplyProjectChats(ProjectTreeItem projectItem, IEnumerable<ChatDto> chats, string? preferredChatId)
+    {
+        var existingById = projectItem.Chats
+            .GroupBy(item => item.Chat.Id)
+            .ToDictionary(group => group.Key, group => group.First());
+        var targetItems = new HashSet<ChatTreeItem>();
+        var targetIndex = 0;
+
         foreach (var chat in chats)
         {
             if (!ChatMatchesFilter(chat))
             {
                 continue;
             }
-            var chatItem = new ChatTreeItem(projectItem.Project, chat);
+            if (!existingById.TryGetValue(chat.Id, out var chatItem))
+            {
+                chatItem = new ChatTreeItem(projectItem.Project, chat);
+                projectItem.Chats.Insert(targetIndex, chatItem);
+            }
+            else
+            {
+                chatItem.SetChat(chat);
+                var currentIndex = projectItem.Chats.IndexOf(chatItem);
+                if (currentIndex < 0)
+                {
+                    projectItem.Chats.Insert(targetIndex, chatItem);
+                }
+                else if (currentIndex != targetIndex)
+                {
+                    projectItem.Chats.Move(currentIndex, targetIndex);
+                }
+            }
             chatItem.HasUnloadedHistory = _chatsWithUnloadedHistory.Contains(chat.Id);
             chatItem.IsRunning = IsChatRunning(chat.Id);
-            projectItem.Chats.Add(chatItem);
-            if (chat.Id == preferredChatId)
+            targetItems.Add(chatItem);
+            if (_selectedChat?.Id == chat.Id)
             {
                 _selectedProject = projectItem.Project;
                 _selectedChat = chat;
+            }
+            else if (_selectedChat is null && chat.Id == preferredChatId)
+            {
+                _selectedProject = projectItem.Project;
+                _selectedChat = chat;
+            }
+            targetIndex++;
+        }
+
+        for (var index = projectItem.Chats.Count - 1; index >= 0; index--)
+        {
+            if (!targetItems.Contains(projectItem.Chats[index]))
+            {
+                projectItem.Chats.RemoveAt(index);
             }
         }
     }
@@ -731,8 +772,8 @@ public partial class MainWindow : Window
     {
         try
         {
-            await LoadProjectChatsForTreeAsync(preferredChatId, skipProjectId);
-            await LoadProjectChatsForTreeAsync(preferredChatId, null, sync: true);
+            await LoadProjectChatsForTreeAsync(null, skipProjectId);
+            await LoadProjectChatsForTreeAsync(null, null, sync: true);
         }
         catch (Exception ex)
         {

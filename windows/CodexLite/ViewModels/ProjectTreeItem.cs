@@ -239,8 +239,25 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
     {
         Chat = Chat with { Title = title };
         EditTitle = title;
+        OnPropertyChanged(nameof(Chat));
         OnPropertyChanged(nameof(Title));
         OnPropertyChanged(nameof(EditTitle));
+    }
+
+    public void SetChat(ChatDto chat)
+    {
+        var titleChanged = Chat.Title != chat.Title;
+        Chat = chat;
+        if (titleChanged)
+        {
+            EditTitle = chat.Title;
+        }
+        OnPropertyChanged(nameof(Chat));
+        OnPropertyChanged(nameof(Title));
+        if (titleChanged)
+        {
+            OnPropertyChanged(nameof(EditTitle));
+        }
     }
 
     public void ResetEditTitle()
