@@ -43,6 +43,9 @@ public partial class MainWindow : Window
     private const int StreamingCharactersPerTick = 512;
     private static readonly TimeSpan StreamingTextInterval = TimeSpan.FromMilliseconds(120);
     private static readonly TimeSpan AutoScrollInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan ProjectListLoadTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ChatListLoadTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan InitialMessageLoadTimeout = TimeSpan.FromSeconds(10);
 
     private sealed record ActiveUiRun(string RunId, string ProjectId, string ChatId, CancellationTokenSource Cancellation);
     private static readonly TimeSpan BackgroundMessagePollTimeout = TimeSpan.FromSeconds(5);
@@ -150,7 +153,6 @@ public partial class MainWindow : Window
         RegisterComposerImeHandlers(NewChatMessageBox);
         _streamingTextTimer.Tick += StreamingTextTimer_Tick;
         _messageRefreshTimer.Tick += MessageRefreshTimer_Tick;
-        _messageRefreshTimer.Start();
         _daemonHealthTimer.Tick += DaemonHealthTimer_Tick;
         StartUiWatchdog();
         ProjectTree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(ProjectTreeItem_Expanded));
@@ -273,6 +275,7 @@ public partial class MainWindow : Window
                 SetBusyMessage("診断情報を読み込み中...");
                 await RefreshDiagnosticsAsync();
                 StatusText.Text = "待機中 | daemon ok";
+                _messageRefreshTimer.Start();
                 _daemonHealthTimer.Start();
             });
         }
@@ -567,12 +570,13 @@ public partial class MainWindow : Window
         _isRefreshingTree = true;
         try
         {
+            using var projectListTimeout = new CancellationTokenSource(ProjectListLoadTimeout);
+            var projects = OrderProjects(await _client.ListProjectsAsync(projectListTimeout.Token) ?? []);
             _projectTree.Clear();
             _selectedProject = null;
             _selectedChat = null;
             _messages.Clear();
             UpdateCommandButtonState();
-            var projects = OrderProjects(await _client.ListProjectsAsync() ?? []);
             foreach (var project in projects)
             {
                 var projectItem = new ProjectTreeItem(project, expandedProjectIds.Contains(project.Id));
@@ -613,17 +617,16 @@ public partial class MainWindow : Window
                     _selectedChat = selectedChatItem.Chat;
                 }
             }
-            await RefreshMessagesAsync();
-            await RefreshFilesAsync("");
             await RestoreProjectTreeStateAsync(expandedProjectIds, selectedProjectId, selectedChatId);
             if (selectedProjectId is null && selectedChatId is null && _projectTree.FirstOrDefault() is ProjectTreeItem firstProject)
             {
                 await FocusProjectItemInTreeAsync(firstProject);
-                await SelectProjectAsync(firstProject.Project);
+                SelectProjectWithoutLoading(firstProject.Project);
             }
             ApplySavedTabSelection();
             _hasCompletedInitialProjectRestore = true;
             SaveUiState();
+            _ = RefreshSelectedPaneContentAsync(_selectedProject?.Id, _selectedChat?.Id);
             _ = LoadProjectChatsForTreeInBackgroundAsync(selectedChatId, selectedProjectItem?.Project.Id);
         }
         finally
@@ -633,6 +636,40 @@ public partial class MainWindow : Window
             {
                 EndProjectTreeLoading();
             }
+        }
+    }
+
+    private async Task RefreshSelectedPaneContentAsync(string? projectId, string? chatId)
+    {
+        try
+        {
+            if (projectId is null || _selectedProject?.Id != projectId || _selectedChat?.Id != chatId)
+            {
+                return;
+            }
+
+            if (chatId is null)
+            {
+                _ = RefreshUsageCapacityAsync();
+                await RefreshFilesAsync("");
+                return;
+            }
+
+            await RefreshMessagesAsync();
+            if (_selectedProject?.Id != projectId || _selectedChat?.Id != chatId)
+            {
+                return;
+            }
+            await RefreshFilesAsync("");
+            if (_selectedProject?.Id != projectId || _selectedChat?.Id != chatId)
+            {
+                return;
+            }
+            await RefreshAutomationsAsync();
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog("selected-pane-refresh-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
         }
     }
 
@@ -648,7 +685,8 @@ public partial class MainWindow : Window
         var selectedChatId = _selectedChat?.Id;
         var expandedProjectIds = GetExpandedProjectIds();
         expandedProjectIds.UnionWith(_persistedExpandedProjectIds);
-        var projects = OrderProjects(await _client.ListProjectsAsync() ?? []);
+        using var projectListTimeout = new CancellationTokenSource(ProjectListLoadTimeout);
+        var projects = OrderProjects(await _client.ListProjectsAsync(projectListTimeout.Token) ?? []);
         _isRefreshingTree = true;
         try
         {
@@ -757,10 +795,15 @@ public partial class MainWindow : Window
         {
             return await task;
         }
+        catch (OperationCanceledException)
+        {
+            StatusText.Text = $"chat list timeout | {projectItem.Name}";
+            return null;
+        }
         catch (Exception ex)
         {
             StatusText.Text = $"chat list error | {projectItem.Name} | {ex.Message}";
-            return [];
+            return null;
         }
     }
 
@@ -769,7 +812,12 @@ public partial class MainWindow : Window
         var projectId = projectItem.Project.Id;
         var version = _chatLoadVersions.TryGetValue(projectId, out var previousVersion) ? previousVersion + 1 : 1;
         _chatLoadVersions[projectId] = version;
-        var chats = await GetProjectChatsAsync(projectItem, _client.ListChatsAsync(projectId, sync)) ?? [];
+        using var chatListTimeout = new CancellationTokenSource(ChatListLoadTimeout);
+        var chats = await GetProjectChatsAsync(projectItem, _client.ListChatsAsync(projectId, sync, chatListTimeout.Token));
+        if (chats is null)
+        {
+            return;
+        }
         if (!_chatLoadVersions.TryGetValue(projectId, out var currentVersion) || currentVersion != version)
         {
             return;
@@ -1505,6 +1553,20 @@ public partial class MainWindow : Window
         SaveUiState();
     }
 
+    private void SelectProjectWithoutLoading(ProjectDto project)
+    {
+        _selectedProject = project;
+        _selectedChat = null;
+        _messages.Clear();
+        _automations.Clear();
+        UpdateCommandButtonState();
+        UpdateAutomationButtonState();
+        UpdateRightPaneVisibility();
+        StatusText.Text = $"project | {project.Name} | {project.Path}";
+        NewChatMessageBox.Focus();
+        SaveUiState();
+    }
+
     private async Task SelectChatAsync(ChatTreeItem item)
     {
         if (FindProjectItem(item.Project.Id) is ProjectTreeItem projectItem)
@@ -2188,7 +2250,8 @@ public partial class MainWindow : Window
         heartbeat.Start();
         try
         {
-            var page = await _client.ListMessagePageAsync(project.Id, chat.Id, InitialMessagePageSize);
+            using var timeout = new CancellationTokenSource(InitialMessageLoadTimeout);
+            var page = await _client.ListMessagePageAsync(project.Id, chat.Id, InitialMessagePageSize, cancellationToken: timeout.Token);
             if (_selectedProject?.Id != project.Id || _selectedChat?.Id != chat.Id)
             {
                 return;
@@ -2204,6 +2267,11 @@ public partial class MainWindow : Window
             ScrollMessagesToEnd();
             var elapsed = DateTimeOffset.Now - startedAt;
             StatusText.Text = $"history loaded | {LoadedHistoryMessageCount()}/{_messageTotalCount} message(s) | {elapsed.TotalSeconds:F1}s";
+            UpdateCommandButtonState();
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText.Text = $"message load timeout | {chat.Title}";
             UpdateCommandButtonState();
         }
         catch (Exception ex)
@@ -2337,7 +2405,6 @@ public partial class MainWindow : Window
         }
         if (existingLocalSignatures.Contains(MessageSignature(message)))
         {
-            WritePerformanceLog("message-local-skip", MessageDebugText(message, "signature"));
             return true;
         }
 
@@ -2356,7 +2423,6 @@ public partial class MainWindow : Window
         }
         if (localMessages.Any(item => MessageContentSignature(item.Content) == incomingSignature))
         {
-            WritePerformanceLog("message-local-skip", MessageDebugText(message, "content"));
             return true;
         }
         if (!string.IsNullOrWhiteSpace(message.RunId) &&
