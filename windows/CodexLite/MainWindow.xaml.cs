@@ -226,7 +226,7 @@ public partial class MainWindow : Window
             var restarted = await _client.EnsureHealthyOrRestartAsync(_wslDistroName);
             _daemonHealthFailureCount = 0;
             StatusText.Text = "daemon restarted";
-            await RefreshProjectsAsync();
+            await RefreshProjectsAfterDaemonRestartAsync();
             await RefreshDiagnosticsAsync();
         }
         catch (Exception ex)
@@ -632,6 +632,94 @@ public partial class MainWindow : Window
             if (!projectTreeLoadingEnded)
             {
                 EndProjectTreeLoading();
+            }
+        }
+    }
+
+    private async Task RefreshProjectsAfterDaemonRestartAsync()
+    {
+        if (_projectTree.Count == 0)
+        {
+            await RefreshProjectsAsync();
+            return;
+        }
+
+        var selectedProjectId = _selectedProject?.Id;
+        var selectedChatId = _selectedChat?.Id;
+        var expandedProjectIds = GetExpandedProjectIds();
+        expandedProjectIds.UnionWith(_persistedExpandedProjectIds);
+        var projects = OrderProjects(await _client.ListProjectsAsync() ?? []);
+        _isRefreshingTree = true;
+        try
+        {
+            ApplyProjectsToTree(projects, expandedProjectIds);
+            if (selectedProjectId is not null && FindProjectItem(selectedProjectId) is ProjectTreeItem selectedProjectItem)
+            {
+                _selectedProject = selectedProjectItem.Project;
+                if (selectedChatId is not null)
+                {
+                    _selectedChat = selectedProjectItem.Chats
+                        .FirstOrDefault(item => item.Chat.Id == selectedChatId)?
+                        .Chat;
+                }
+            }
+            else if (_selectedProject is not null)
+            {
+                _selectedProject = null;
+                _selectedChat = null;
+                _messages.Clear();
+                _automations.Clear();
+            }
+            UpdateCommandButtonState();
+            UpdateAutomationButtonState();
+            UpdateRightPaneVisibility();
+            SaveUiState();
+            _ = LoadProjectChatsForTreeInBackgroundAsync(null, null);
+        }
+        finally
+        {
+            _isRefreshingTree = false;
+        }
+    }
+
+    private void ApplyProjectsToTree(IEnumerable<ProjectDto> projects, HashSet<string> expandedProjectIds)
+    {
+        var existingById = _projectTree
+            .GroupBy(item => item.Project.Id)
+            .ToDictionary(group => group.Key, group => group.First());
+        var targetItems = new HashSet<ProjectTreeItem>();
+        var targetIndex = 0;
+
+        foreach (var project in projects)
+        {
+            if (!existingById.TryGetValue(project.Id, out var projectItem))
+            {
+                projectItem = new ProjectTreeItem(project, expandedProjectIds.Contains(project.Id));
+                _projectTree.Insert(targetIndex, projectItem);
+            }
+            else
+            {
+                projectItem.SetProject(project);
+                projectItem.IsExpanded = projectItem.IsExpanded || expandedProjectIds.Contains(project.Id);
+                var currentIndex = _projectTree.IndexOf(projectItem);
+                if (currentIndex < 0)
+                {
+                    _projectTree.Insert(targetIndex, projectItem);
+                }
+                else if (currentIndex != targetIndex)
+                {
+                    _projectTree.Move(currentIndex, targetIndex);
+                }
+            }
+            targetItems.Add(projectItem);
+            targetIndex++;
+        }
+
+        for (var index = _projectTree.Count - 1; index >= 0; index--)
+        {
+            if (!targetItems.Contains(_projectTree[index]))
+            {
+                _projectTree.RemoveAt(index);
             }
         }
     }
