@@ -1486,7 +1486,15 @@ async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
             "threadId": "thread_1",
             "expectedTurnId": "turn_1",
             "input": [
-                {"type": "text", "text": "please continue with more detail"},
+                {
+                    "type": "text",
+                    "text": (
+                        "please continue with more detail\n\n"
+                        "添付ファイルは次の絶対パスにあります。記載されたファイルを直接確認し、"
+                        "同名ファイルをプロジェクト内や他の場所から探さないでください。\n"
+                        f"- {note_path.resolve()}"
+                    ),
+                },
                 {"type": "localImage", "path": str(image_path.resolve())},
                 {"type": "mention", "name": "note.txt", "path": str(note_path.resolve())},
             ],
@@ -1627,7 +1635,15 @@ async def test_app_server_run_sends_attachments_to_turn(linux_tmp_path: Path) ->
                 "threadId": "thread_1",
                 "cwd": str(project_dir),
                 "input": [
-                    {"type": "text", "text": "hello"},
+                    {
+                        "type": "text",
+                        "text": (
+                            "hello\n\n"
+                            "添付ファイルは次の絶対パスにあります。記載されたファイルを直接確認し、"
+                            "同名ファイルをプロジェクト内や他の場所から探さないでください。\n"
+                            f"- {note_path.resolve()}"
+                        ),
+                    },
                     {"type": "localImage", "path": str(image_path.resolve())},
                     {"type": "mention", "name": "note.txt", "path": str(note_path.resolve())},
                 ],

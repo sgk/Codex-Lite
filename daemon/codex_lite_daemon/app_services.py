@@ -682,6 +682,7 @@ def _candidate_thread_ids(chat_id: str, codex_session_id: Any) -> list[str]:
 
 def _build_turn_input(content: str, attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     input_items: list[dict[str, Any]] = [{"type": "text", "text": content}]
+    file_paths: list[Path] = []
     for attachment in attachments:
         path = _validated_attachment_path(attachment)
         name = str(attachment.get("name") or path.name)
@@ -690,7 +691,20 @@ def _build_turn_input(content: str, attachments: list[dict[str, Any]]) -> list[d
             input_items.append({"type": "localImage", "path": str(path)})
         else:
             input_items.append({"type": "mention", "name": name, "path": str(path)})
+            file_paths.append(path)
+    if file_paths:
+        input_items[0]["text"] = _content_with_direct_attachment_instruction(content, file_paths)
     return input_items
+
+
+def _content_with_direct_attachment_instruction(content: str, file_paths: list[Path]) -> str:
+    lines = [
+        content.rstrip(),
+        "",
+        "添付ファイルは次の絶対パスにあります。記載されたファイルを直接確認し、同名ファイルをプロジェクト内や他の場所から探さないでください。",
+    ]
+    lines.extend(f"- {path}" for path in file_paths)
+    return "\n".join(lines)
 
 
 def _validated_attachment_path(attachment: dict[str, Any]) -> Path:
