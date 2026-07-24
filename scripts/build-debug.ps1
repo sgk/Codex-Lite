@@ -67,7 +67,7 @@ function Stop-UnprotectedCodexLite {
 
 function Get-RepoRoot {
     $scriptDir = Split-Path -Parent $PSCommandPath
-    return (Resolve-Path (Join-Path $scriptDir "..")).Path
+    return (Resolve-Path (Join-Path $scriptDir "..")).ProviderPath
 }
 
 $repoRoot = Get-RepoRoot
