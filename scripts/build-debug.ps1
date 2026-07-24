@@ -38,18 +38,29 @@ function Stop-UnprotectedCodexLite {
         $protected[$id] = $true
     }
 
-    $candidates = @(Get-CimInstance Win32_Process -Filter "Name='CodexLite.exe'")
+    $candidates = @(
+        Get-CimInstance Win32_Process |
+            Where-Object {
+                $_.Name -eq "CodexLite.exe" -or
+                ($_.Name -eq "dotnet.exe" -and $_.CommandLine -match '(?i)(^|[\\/"\s])CodexLite\.dll(?:["\s]|$)')
+            }
+    )
     foreach ($candidate in $candidates) {
         $candidatePid = [int]$candidate.ProcessId
+        $candidateDescription = if ($candidate.Name -eq "dotnet.exe") {
+            "dotnet.exe CodexLite.dll"
+        } else {
+            "CodexLite.exe"
+        }
         if ($protected.ContainsKey($candidatePid)) {
-            Write-Host "protect CodexLite.exe PID $candidatePid because it is in this command's parent process chain"
+            Write-Host "protect $candidateDescription PID $candidatePid because it is in this command's parent process chain"
             continue
         }
         if ($DryRun) {
-            Write-Host "would stop CodexLite.exe PID $candidatePid"
+            Write-Host "would stop $candidateDescription PID $candidatePid"
             continue
         }
-        Write-Host "stop CodexLite.exe PID $candidatePid"
+        Write-Host "stop $candidateDescription PID $candidatePid"
         Stop-Process -Id $candidatePid -Force
     }
 }
