@@ -95,5 +95,10 @@ if ($LASTEXITCODE -ne 0) {
 
 if ($Launch) {
     $dllPath = Join-Path $repoRoot "windows/CodexLite/bin/$Configuration/net8.0-windows/CodexLite.dll"
-    Start-Process -FilePath $Dotnet -ArgumentList @($dllPath) -WindowStyle Hidden
+    $launchedProcess = Start-Process -FilePath $Dotnet -ArgumentList @($dllPath) -WindowStyle Hidden -PassThru
+    Start-Sleep -Seconds 1
+    if ($launchedProcess.HasExited) {
+        throw "Codex Lite exited immediately after launch with exit code $($launchedProcess.ExitCode)."
+    }
+    Write-Host "started dotnet.exe CodexLite.dll PID $($launchedProcess.Id)"
 }
