@@ -89,7 +89,7 @@ if ($DryRun) {
 }
 
 & $Dotnet build $Solution -c $Configuration
-if ($LASTEXITCODE -ne 0) {
+if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
