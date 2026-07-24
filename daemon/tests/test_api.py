@@ -1506,7 +1506,7 @@ async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_server_run_uses_steered_turn_id_for_notifications(linux_tmp_path: Path) -> None:
+async def test_app_server_run_keeps_active_turn_id_after_steer(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
     cfg = make_test_config(linux_tmp_path)
@@ -1524,7 +1524,16 @@ async def test_app_server_run_uses_steered_turn_id_for_notifications(linux_tmp_p
     chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
     result = await runs.start_message_run(project_id, chat_id, "hello")
     await runs.steer_run(result["runId"], "please continue")
-    await app_server.subscribers[-1].put(AppServerNotification("item/agentMessage/delta", {"threadId": "thread_1", "turnId": "turn_2", "delta": "continued"}))
+    await runs.steer_run(result["runId"], "and keep going")
+    assert app_server.requests[-1] == (
+        "turn/steer",
+        {
+            "threadId": "thread_1",
+            "expectedTurnId": "turn_1",
+            "input": [{"type": "text", "text": "and keep going"}],
+        },
+    )
+    await app_server.subscribers[-1].put(AppServerNotification("item/agentMessage/delta", {"threadId": "thread_1", "turnId": "turn_1", "delta": "continued"}))
 
     events = []
     async for event in runs.stream_events(result["runId"]):
@@ -1533,7 +1542,7 @@ async def test_app_server_run_uses_steered_turn_id_for_notifications(linux_tmp_p
             break
 
     assert any("continued" in event for event in events)
-    assert runs.get_run(result["runId"])["turnId"] == "turn_2"
+    assert runs.get_run(result["runId"])["turnId"] == "turn_1"
     db.close()
 
 

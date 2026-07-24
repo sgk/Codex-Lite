@@ -618,6 +618,9 @@ public partial class MainWindow : Window
                 }
             }
             await RestoreProjectTreeStateAsync(expandedProjectIds, selectedProjectId, selectedChatId);
+            UpdateCommandButtonState();
+            UpdateAutomationButtonState();
+            UpdateRightPaneVisibility();
             if (selectedProjectId is null && selectedChatId is null && _projectTree.FirstOrDefault() is ProjectTreeItem firstProject)
             {
                 await FocusProjectItemInTreeAsync(firstProject);
@@ -4770,6 +4773,7 @@ public partial class MainWindow : Window
         var reconnectingMessage = "";
         var heartbeat = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         var receivedOutput = false;
+        var receivedOutputChars = 0;
         var completed = false;
         heartbeat.Tick += (_, _) =>
         {
@@ -4797,8 +4801,14 @@ public partial class MainWindow : Window
                 {
                     reconnectingMessage = "";
                     var text = ExtractSseText(item.Data);
-                    WritePerformanceLog("stream-output", $"runId={LogText(runId)} chars={text.Length} text={LogText(text)}");
+                    if (!receivedOutput && !string.IsNullOrEmpty(text))
+                    {
+                        WritePerformanceLog(
+                            "stream-first-output",
+                            $"runId={LogText(runId)} elapsedMs={(DateTimeOffset.Now - sendStartedAt).TotalMilliseconds:F0}");
+                    }
                     receivedOutput |= !string.IsNullOrEmpty(text);
+                    receivedOutputChars += text.Length;
                     AppendOrUpdateAssistantMessage(chatId, currentAssistantMessageId, runId, text);
                 }
                 else if (item.Event == "error")
@@ -4857,7 +4867,9 @@ public partial class MainWindow : Window
                 }
                 if (item.Event is "done" or "error")
                 {
-                    WritePerformanceLog("stream-terminal", $"runId={LogText(runId)} event={LogText(item.Event)} raw={LogText(item.Data)}");
+                    WritePerformanceLog(
+                        "stream-terminal",
+                        $"runId={LogText(runId)} event={LogText(item.Event)} outputChars={receivedOutputChars} raw={LogText(item.Data)}");
                     MarkChatUnreadIfConversationNotVisible(chatId);
                     FlushAssistantMessageText(currentAssistantMessageId);
                     completed = item.Event == "done";

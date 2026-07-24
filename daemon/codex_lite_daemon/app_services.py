@@ -309,7 +309,7 @@ class AppServerRunService:
         input_items = _build_turn_input(clean_content, attachments or [])
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "sending additional instructions"})
         try:
-            response = await self.app_server.request(
+            await self.app_server.request(
                 "turn/steer",
                 {
                     "threadId": run.thread_id,
@@ -320,9 +320,6 @@ class AppServerRunService:
         except AppError as exc:
             await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": exc.message})
             raise
-        steered_turn_id = _turn_id_from_response(response)
-        if steered_turn_id:
-            run.turn_id = steered_turn_id
         self.messages.insert_message(run.chat_id, "user", _content_with_attachment_summary(clean_content, attachments or []), run_id=run_id, kind="instruction")
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
         return _run_out(run_id, run)
