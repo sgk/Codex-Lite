@@ -4159,19 +4159,19 @@ public partial class MainWindow : Window
             return false;
         }
 
-        // Rich clipboard data can contain both text and an image. Preserve the
-        // normal TextBox paste behavior whenever text is available.
-        if (System.Windows.Clipboard.ContainsText())
-        {
-            return false;
-        }
         if (!CanAttachToComposer() || !System.Windows.Clipboard.ContainsImage())
         {
             return false;
         }
 
-        e.Handled = true;
         AddClipboardImageAttachment();
+        if (System.Windows.Clipboard.ContainsText())
+        {
+            // Leave the event unhandled so the TextBox also pastes the text.
+            return false;
+        }
+
+        e.Handled = true;
         return true;
     }
 
