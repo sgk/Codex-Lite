@@ -1888,8 +1888,7 @@ public partial class MainWindow : Window
         var canAttach = CanAttachToComposer();
         var canSendOrSteer = canContinueChat
             && hasChatComposerContent
-            && !externalProcessing
-            && (_selectedChat is null || selectedRun is null || isViewingActiveRunChat);
+            && !externalProcessing;
         var canCreateAndSend = canStartNewChat
             && hasNewChatComposerContent;
         OpenProjectExplorerButton.IsEnabled = hasProjectContext;
@@ -4134,6 +4133,10 @@ public partial class MainWindow : Window
 
     private async Task ComposerPreviewKeyDownAsync(System.Windows.Input.KeyEventArgs e)
     {
+        if (TryHandleComposerPaste(e))
+        {
+            return;
+        }
         if (IsComposerImeInputActive(e))
         {
             return;
@@ -4142,17 +4145,34 @@ public partial class MainWindow : Window
         {
             return;
         }
-        if (e.Key == Key.V && e.KeyboardDevice.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Control) && System.Windows.Clipboard.ContainsImage())
-        {
-            e.Handled = true;
-            AddClipboardImageAttachment();
-            return;
-        }
         if (e.Key == Key.Enter && !e.KeyboardDevice.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Shift))
         {
             e.Handled = true;
             await SubmitMessageBoxAsync();
         }
+    }
+
+    private bool TryHandleComposerPaste(System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != Key.V || e.KeyboardDevice.Modifiers != System.Windows.Input.ModifierKeys.Control)
+        {
+            return false;
+        }
+
+        // Rich clipboard data can contain both text and an image. Preserve the
+        // normal TextBox paste behavior whenever text is available.
+        if (System.Windows.Clipboard.ContainsText())
+        {
+            return false;
+        }
+        if (!CanAttachToComposer() || !System.Windows.Clipboard.ContainsImage())
+        {
+            return false;
+        }
+
+        e.Handled = true;
+        AddClipboardImageAttachment();
+        return true;
     }
 
     private void RegisterComposerImeHandlers(TextBox textBox)
