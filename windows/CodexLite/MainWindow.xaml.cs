@@ -1885,6 +1885,7 @@ public partial class MainWindow : Window
         var hasChatComposerContent = HasChatComposerContent();
         var hasNewChatComposerContent = HasNewChatComposerContent();
         var externalProcessing = IsLikelyExternalProcessing();
+        var canAttach = CanAttachToComposer();
         var canSendOrSteer = canContinueChat
             && hasChatComposerContent
             && !externalProcessing
@@ -1896,8 +1897,8 @@ public partial class MainWindow : Window
         OpenFileInCodeButton.IsEnabled = hasProjectContext && _currentFilePath.Length > 0;
         OpenFileExternalButton.IsEnabled = hasProjectContext && _currentFilePath.Length > 0;
         MessageBox.IsEnabled = canContinueChat;
-        AttachButton.IsEnabled = canContinueChat && !externalProcessing;
-        PasteImageButton.IsEnabled = canContinueChat && !externalProcessing;
+        AttachButton.IsEnabled = canAttach && _selectedChat is not null;
+        PasteImageButton.IsEnabled = canAttach && _selectedChat is not null;
         SendButton.Content = isViewingActiveRunChat ? "追加指示" : "送信";
         SendButton.IsEnabled = canSendOrSteer;
         SendButton.ToolTip = !canContinueChat
@@ -1910,8 +1911,8 @@ public partial class MainWindow : Window
             ? "Codex Liteで開始した応答へ追加指示を送ります。"
             : "新しいメッセージを送信します。Codexアプリ側で開始した処理への追加指示にはなりません。";
         NewChatMessageBox.IsEnabled = canStartNewChat;
-        NewChatAttachButton.IsEnabled = canStartNewChat;
-        NewChatPasteImageButton.IsEnabled = canStartNewChat;
+        NewChatAttachButton.IsEnabled = canAttach && _selectedChat is null;
+        NewChatPasteImageButton.IsEnabled = canAttach && _selectedChat is null;
         NewChatSendButton.IsEnabled = canCreateAndSend;
         NewChatSendButton.ToolTip = !canStartNewChat
             ? "プロジェクトを選択してください。"
@@ -4412,7 +4413,12 @@ public partial class MainWindow : Window
         {
             return false;
         }
-        if (_selectedProject is null || SelectedActiveRun() is not null || IsLikelyExternalProcessing())
+        return CanAttachToComposer();
+    }
+
+    private bool CanAttachToComposer()
+    {
+        if (_selectedProject is null || _isPreparingSend || IsLikelyExternalProcessing())
         {
             return false;
         }
