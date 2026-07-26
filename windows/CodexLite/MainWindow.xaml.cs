@@ -4388,7 +4388,12 @@ public partial class MainWindow : Window
     private void Composer_PreviewDrop(object sender, System.Windows.DragEventArgs e)
     {
         e.Handled = true;
-        if (!CanAcceptComposerFileDrop(e))
+        var hasFileDrop = e.Data.GetDataPresent(System.Windows.DataFormats.FileDrop);
+        var canAttach = CanAttachToComposer();
+        WritePerformanceLog(
+            "composer-file-drop",
+            $"source={LogText(sender.GetType().Name)} hasFileDrop={hasFileDrop} canAttach={canAttach} preparingSend={_isPreparingSend} projectId={LogText(_selectedProject?.Id)} chatId={LogText(_selectedChat?.Id)} canContinue={_selectedChat?.CanContinue}");
+        if (!hasFileDrop || !canAttach)
         {
             StatusText.Text = "ここには添付できません";
             return;
