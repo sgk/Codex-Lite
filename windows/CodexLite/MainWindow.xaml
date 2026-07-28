@@ -1088,12 +1088,23 @@
                     </Grid.ColumnDefinitions>
                     <Grid Margin="0,0,8,0">
                         <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                            <Button Content="コピー"
+                                    ToolTip="選択項目をコピー (Ctrl+C)"
+                                    Click="FilesCopy_Click"
+                                    Margin="0,0,8,0"/>
+                            <Button Content="貼り付け"
+                                    ToolTip="Explorerから貼り付け (Ctrl+V)"
+                                    Click="FilesPaste_Click"/>
+                        </StackPanel>
                         <TreeView x:Name="FilesTree"
-                                  Grid.Row="0"
+                                  Grid.Row="1"
                                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                   ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                  PreviewKeyDown="FilesTree_PreviewKeyDown"
                                   SelectedItemChanged="FilesTree_SelectedItemChanged">
                             <TreeView.Resources>
                                 <Style TargetType="{x:Type TreeViewItem}" BasedOn="{StaticResource FileTreeItemContainer}"/>

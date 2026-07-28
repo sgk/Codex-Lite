@@ -2562,10 +2562,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (e.RemovedItems.Contains(ConversationTab))
-        {
-            SaveMessagesScrollOffset();
-        }
         if (ReferenceEquals(MainTabs.SelectedItem, ConversationTab))
         {
             MarkSelectedConversationSeen();
@@ -2574,13 +2570,6 @@ public partial class MainWindow : Window
         SaveUiState();
     }
 
-    private void SaveMessagesScrollOffset()
-    {
-        if (FindVisualChild<ScrollViewer>(MessagesList, _ => true) is ScrollViewer scrollViewer)
-        {
-            _savedMessageVerticalOffset = scrollViewer.VerticalOffset;
-        }
-    }
 
     private void RestoreMessagesScrollOffset()
     {
@@ -5570,6 +5559,192 @@ public partial class MainWindow : Window
             SetFileWrapControl(enabled: false, isChecked: false);
             FileContentBox.Text = PreviewUnavailableText(item.ViewerKind);
             FileContentBox.Visibility = Visibility.Visible;
+        }
+    }
+
+    private void FilesTree_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (Keyboard.Modifiers != ModifierKeys.Control)
+        {
+            return;
+        }
+
+        if (e.Key == Key.C)
+        {
+            e.Handled = true;
+            CopySelectedFileTreeItemToClipboard();
+        }
+        else if (e.Key == Key.V)
+        {
+            e.Handled = true;
+            _ = PasteFileDropListIntoFileBrowserAsync();
+        }
+    }
+
+    private void FilesCopy_Click(object sender, RoutedEventArgs e) => CopySelectedFileTreeItemToClipboard();
+
+    private void FilesPaste_Click(object sender, RoutedEventArgs e) => _ = PasteFileDropListIntoFileBrowserAsync();
+
+    private void CopySelectedFileTreeItemToClipboard()
+    {
+        if (_selectedProject is not ProjectDto project ||
+            FilesTree.SelectedItem is not FileTreeItem item ||
+            item.IsPlaceholder)
+        {
+            StatusText.Text = "file copy | select a file or directory";
+            return;
+        }
+
+        var sourcePath = ToWindowsPath(JoinWslPath(project.Path, item.Path));
+        if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
+        {
+            StatusText.Text = $"file copy error | not found | {item.Path}";
+            return;
+        }
+
+        try
+        {
+            var paths = new System.Collections.Specialized.StringCollection { sourcePath };
+            System.Windows.Clipboard.SetFileDropList(paths);
+            StatusText.Text = $"file copied | {item.Path}";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"file copy error | {ShortError(ex)}";
+        }
+    }
+
+    private async Task PasteFileDropListIntoFileBrowserAsync()
+    {
+        if (_selectedProject is not ProjectDto project)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!System.Windows.Clipboard.ContainsFileDropList())
+            {
+                StatusText.Text = "file paste | Explorerでファイルまたはフォルダーをコピーしてください";
+                return;
+            }
+
+            var sourcePaths = System.Windows.Clipboard.GetFileDropList().Cast<string>().ToArray();
+            if (sourcePaths.Length == 0)
+            {
+                return;
+            }
+
+            var targetRelativePath = FilePasteTargetRelativePath();
+            var projectDirectory = ToWindowsPath(project.Path);
+            var targetDirectory = ToWindowsPath(JoinWslPath(project.Path, targetRelativePath));
+            if (!Directory.Exists(targetDirectory) || !IsWindowsPathWithinDirectory(targetDirectory, projectDirectory))
+            {
+                StatusText.Text = $"file paste error | invalid destination | {targetRelativePath}";
+                return;
+            }
+
+            var copies = new List<(string Source, string Destination)>();
+            foreach (var sourcePath in sourcePaths)
+            {
+                if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
+                {
+                    StatusText.Text = $"file paste error | source not found | {sourcePath}";
+                    return;
+                }
+
+                var sourceName = Path.GetFileName(sourcePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                if (string.IsNullOrWhiteSpace(sourceName))
+                {
+                    StatusText.Text = $"file paste error | unsupported source | {sourcePath}";
+                    return;
+                }
+
+                var destinationPath = Path.Combine(targetDirectory, sourceName);
+                if (File.Exists(destinationPath) || Directory.Exists(destinationPath) ||
+                    copies.Any(copy => copy.Destination.Equals(destinationPath, StringComparison.OrdinalIgnoreCase)))
+                {
+                    StatusText.Text = $"file paste stopped | already exists | {sourceName}";
+                    return;
+                }
+                if (Directory.Exists(sourcePath) && IsWindowsPathWithinDirectory(destinationPath, sourcePath))
+                {
+                    StatusText.Text = $"file paste stopped | destination is inside source | {sourceName}";
+                    return;
+                }
+                copies.Add((sourcePath, destinationPath));
+            }
+
+            BeginActivity($"ファイルを貼り付け中... | {targetRelativePath}");
+            try
+            {
+                await Task.Run(() =>
+                {
+                    foreach (var copy in copies)
+                    {
+                        if (Directory.Exists(copy.Source))
+                        {
+                            CopyDirectory(copy.Source, copy.Destination);
+                        }
+                        else
+                        {
+                            File.Copy(copy.Source, copy.Destination, overwrite: false);
+                        }
+                    }
+                });
+            }
+            finally
+            {
+                EndActivity();
+            }
+
+            await RefreshFilesAsync(targetRelativePath);
+            StatusText.Text = $"file pasted | {copies.Count} item(s) | {targetRelativePath}";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"file paste error | {ShortError(ex)}";
+        }
+    }
+
+    private string FilePasteTargetRelativePath()
+    {
+        if (FilesTree.SelectedItem is not FileTreeItem item || item.IsPlaceholder)
+        {
+            return _currentDirectoryPath;
+        }
+        if (item.IsDirectory)
+        {
+            return item.Path;
+        }
+
+        var parent = Path.GetDirectoryName(item.Path.Replace('/', Path.DirectorySeparatorChar))?.Replace('\\', '/');
+        return parent is null or "." ? "" : parent;
+    }
+
+    private static bool IsWindowsPathWithinDirectory(string candidatePath, string directoryPath)
+    {
+        var candidateFullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidatePath));
+        var directoryFullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directoryPath));
+        return candidateFullPath.Equals(directoryFullPath, StringComparison.OrdinalIgnoreCase) ||
+               candidateFullPath.StartsWith(directoryFullPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void CopyDirectory(string sourceDirectory, string destinationDirectory)
+    {
+        if ((File.GetAttributes(sourceDirectory) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidOperationException($"リンクされたディレクトリは貼り付けできません: {sourceDirectory}");
+        }
+
+        Directory.CreateDirectory(destinationDirectory);
+        foreach (var filePath in Directory.EnumerateFiles(sourceDirectory))
+        {
+            File.Copy(filePath, Path.Combine(destinationDirectory, Path.GetFileName(filePath)), overwrite: false);
+        }
+        foreach (var directoryPath in Directory.EnumerateDirectories(sourceDirectory))
+        {
+            CopyDirectory(directoryPath, Path.Combine(destinationDirectory, Path.GetFileName(directoryPath)));
         }
     }
 
