@@ -11,7 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from codex_lite_daemon.app_server import AppServerClient, AppServerNotification
-from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _merge_messages, _notification_summary
+from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _merge_messages, _notification_details, _notification_summary
 from codex_lite_daemon.automation_service import AutomationService, _run_due_automations
 from codex_lite_daemon.codex_state import CodexStateService
 from codex_lite_daemon.config import Config, default_config
@@ -205,6 +205,19 @@ def test_app_server_progress_notifications_have_readable_summaries() -> None:
     assert _notification_summary(AppServerNotification("mcp_tool_call_begin", {"name": "filesystem.read", "arguments": {"path": "AGENTS.md"}})) == "ファイルを読み取っています: AGENTS.md"
     assert _notification_summary(AppServerNotification("mcp_tool_call_end", {"name": "filesystem.write", "arguments": "{\"path\":\"notes.md\"}"})) == "ファイルを編集しました: notes.md"
     assert _notification_summary(AppServerNotification("exec_command_begin", {"command": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz' https://example.test"})) == "コマンドを開始しました: curl -H 'Authorization=<redacted>' https://example.test"
+
+
+def test_app_server_progress_notification_details_include_output_and_redact_secrets() -> None:
+    assert _notification_details(AppServerNotification("exec_command_output_delta", {"stream": "stdout", "delta": "line one\nline two\n"})) == "line one\nline two\n"
+    details = _notification_details(
+        AppServerNotification(
+            "mcp_tool_call_begin",
+            {"name": "example.tool", "arguments": {"path": "README.md", "api_key": "do-not-show"}},
+        )
+    )
+    assert '"path": "README.md"' in details
+    assert '"api_key": "<redacted>"' in details
+    assert "do-not-show" not in details
 
 
 def test_clipboard_attachment_summary_hides_path() -> None:
@@ -1039,6 +1052,42 @@ async def test_app_server_messages_include_transcript_command_activity(linux_tmp
     assert loaded[0]["content"] == "コマンドを実行しました: git status --short"
     assert "$ cd /repo" in loaded[0]["activityDetails"]
     assert " M file.txt" in loaded[0]["activityDetails"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_app_server_messages_include_reasoning_summary_and_tool_arguments(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    sessions = cfg.codex_home / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "thread.jsonl").write_text(
+        json_line({"timestamp": "2026-06-27T00:00:00Z", "type": "session_meta", "payload": {"id": "thr_details", "cwd": str(project_dir), "timestamp": "2026-06-27T00:00:00Z"}})
+        + json_line({"timestamp": "2026-06-27T00:00:01Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "調査対象を絞り込みます。"}], "encrypted_content": "not-for-display"}})
+        + json_line({"timestamp": "2026-06-27T00:00:02Z", "type": "response_item", "payload": {"type": "function_call", "name": "filesystem.read", "arguments": "{\"path\":\"README.md\"}", "call_id": "call_1"}})
+        + json_line({"timestamp": "2026-06-27T00:00:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "call_1", "output": "read complete"}}),
+        encoding="utf-8",
+    )
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    service = AppServerThreadService(projects, chats, messages, transcripts, RecordingAppServer(), make_runtime_settings())  # type: ignore[arg-type]
+
+    project = projects.create_project(str(project_dir))
+    chats.upsert_chat_index(project["id"], "thr_details", "details", "thr_details", utc_now(), utc_now(), str(sessions / "thread.jsonl"))
+
+    loaded = await service.list_messages(project["id"], "thr_details")
+
+    assert len(loaded) == 2
+    assert loaded[0]["content"] == "推論の要約"
+    assert loaded[0]["activityDetails"] == "調査対象を絞り込みます。"
+    assert "not-for-display" not in loaded[0]["activityDetails"]
+    assert '"path": "README.md"' in loaded[1]["activityDetails"]
+    assert "read complete" in loaded[1]["activityDetails"]
     db.close()
 
 

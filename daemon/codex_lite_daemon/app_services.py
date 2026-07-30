@@ -351,6 +351,7 @@ class AppServerRunService:
                         {
                             "method": notification.method,
                             "summary": _notification_summary(notification),
+                            "details": _notification_details(notification),
                         },
                     )
                 elif notification.method.startswith("item/") or notification.method in {
@@ -370,6 +371,7 @@ class AppServerRunService:
                         {
                             "method": notification.method,
                             "summary": _notification_summary(notification),
+                            "details": _notification_details(notification),
                         },
                     )
                 elif notification.method == "turn/completed":
@@ -474,6 +476,51 @@ def _notification_summary(notification: AppServerNotification) -> str:
             if isinstance(value, str) and value:
                 return value
     return notification.method
+
+
+def _notification_details(notification: AppServerNotification) -> str:
+    params = notification.params
+    method = notification.method
+    if method == "exec_command_begin":
+        command = _command_text(params)
+        workdir = _first_string(params, ("workdir", "cwd"))
+        lines = []
+        if workdir:
+            lines.append(f"$ cd {workdir}")
+        if command:
+            lines.append(f"$ {command}")
+        return "\n".join(lines)
+    if method == "exec_command_output_delta":
+        return _first_string(params, ("delta", "text", "output")) or ""
+    if method == "exec_command_end":
+        output = _first_string(params, ("output", "text", "stdout", "stderr")) or ""
+        exit_code = params.get("exitCode") if "exitCode" in params else params.get("exit_code")
+        prefix = f"exit: {exit_code}" if exit_code is not None else ""
+        return "\n".join(part for part in (prefix, output) if part)
+    visible = {
+        key: _redact_detail_value(value, key)
+        for key, value in params.items()
+        if key not in {"threadId", "turnId", "conversationId", "encrypted_content", "encryptedContent"}
+    }
+    if not visible:
+        return ""
+    try:
+        return json.dumps(visible, ensure_ascii=False, indent=2, sort_keys=True)
+    except (TypeError, ValueError):
+        return _redact_sensitive(str(visible))
+
+
+def _redact_detail_value(value: Any, key: str = "") -> Any:
+    normalized_key = re.sub(r"[^a-z]", "", key.lower())
+    if any(token in normalized_key for token in ("authorization", "apikey", "accesstoken", "refreshtoken", "idtoken", "cookie", "password", "secret", "encryptedcontent")):
+        return "<redacted>"
+    if isinstance(value, str):
+        return _redact_sensitive(value)
+    if isinstance(value, dict):
+        return {child_key: _redact_detail_value(child_value, str(child_key)) for child_key, child_value in value.items()}
+    if isinstance(value, list):
+        return [_redact_detail_value(item) for item in value]
+    return value
 
 
 def _is_retryable_app_server_error(params: dict[str, Any]) -> bool:

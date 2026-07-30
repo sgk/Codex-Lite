@@ -366,6 +366,20 @@ def _transcript_message(chat_id: str, item: dict[str, Any], index: int, pending_
         return None
     if payload_type == "function_call_output":
         return _transcript_function_call_message(chat_id, payload, index, created_at, pending_calls or {})
+    if payload_type == "reasoning":
+        reasoning = _reasoning_summary_text(payload)
+        if not reasoning:
+            return None
+        return {
+            "id": str(payload.get("id") or f"{chat_id}-reasoning-{index}"),
+            "chatId": chat_id,
+            "role": "status",
+            "content": "推論の要約",
+            "runId": None,
+            "createdAt": created_at,
+            "kind": "status",
+            "activityDetails": reasoning,
+        }
     if payload_type != "message" or payload.get("role") != "assistant":
         return None
     content = _content_text(payload.get("content"))
@@ -440,7 +454,47 @@ def _function_call_summary_and_details(name: str, arguments: Any, output: str) -
             detail_lines.extend(["", output.rstrip()])
         return summary, "\n".join(detail_lines).strip()
     summary = f"ツールを実行しました: {_short_text(name)}" if name else "ツールを実行しました"
-    return summary, output.strip()
+    detail_lines = []
+    formatted_arguments = _format_tool_value(arguments)
+    if formatted_arguments:
+        detail_lines.extend(["引数:", formatted_arguments])
+    if output:
+        if detail_lines:
+            detail_lines.append("")
+        detail_lines.extend(["結果:", output.rstrip()])
+    return summary, "\n".join(detail_lines).strip()
+
+
+def _reasoning_summary_text(payload: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("summary", "content"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+    return "\n\n".join(parts)
+
+
+def _format_tool_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value.strip()
+        value = parsed
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    except (TypeError, ValueError):
+        return str(value).strip()
 
 
 def _short_text(value: str, limit: int = 96) -> str:

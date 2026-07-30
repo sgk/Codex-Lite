@@ -4842,6 +4842,7 @@ public partial class MainWindow : Window
                 {
                     var progress = ExtractSseText(item.Data);
                     var progressMethod = ExtractSseString(item.Data, "method");
+                    var progressDetails = ExtractSseString(item.Data, "details");
                     WritePerformanceLog("stream-progress", $"runId={LogText(runId)} method={LogText(progressMethod)} summary={LogText(progress)} raw={LogText(item.Data)}");
                     if (progressMethod.Equals("app_server/reconnecting", StringComparison.Ordinal))
                     {
@@ -4881,7 +4882,7 @@ public partial class MainWindow : Window
                         {
                             RemoveAssistantPlaceholder(currentAssistantMessageId);
                         }
-                        AddInlineProgressMessage(chatId, runId, progress);
+                        AddInlineProgressMessage(chatId, runId, progressMethod, progress, progressDetails);
                         currentAssistantMessageId = $"local-assistant-progress-{Guid.NewGuid():N}";
                     }
                 }
@@ -5016,34 +5017,36 @@ public partial class MainWindow : Window
         _runProgress.Add(entry);
     }
 
-    private void AddInlineProgressMessage(string chatId, string runId, string content)
+    private void AddInlineProgressMessage(string chatId, string runId, string method, string content, string details)
     {
         if (string.IsNullOrWhiteSpace(content) || _selectedChat?.Id != chatId)
         {
             return;
         }
         var shouldFollow = IsMessagesScrolledNearEnd();
-        var detailLine = InlineProgressDetailLine(content);
-        for (var i = _messages.Count - 1; i >= 0; i--)
+        var detailLine = InlineProgressDetailLine(method, content, details);
+        if (IsLowLevelDeltaProgress(method, content))
         {
-            var message = _messages[i];
-            if (!message.Role.Equals("status", StringComparison.OrdinalIgnoreCase))
+            for (var i = _messages.Count - 1; i >= 0; i--)
             {
-                break;
-            }
-            if (message.RunId == runId)
-            {
-                _messages[i] = message with
+                var message = _messages[i];
+                if (!message.Role.Equals("status", StringComparison.OrdinalIgnoreCase))
                 {
-                    Content = content,
-                    ActivityDetails = AppendActivityDetail(message.ActivityDetails, detailLine),
-                    CreatedAt = DateTimeOffset.UtcNow.ToString("O")
-                };
-                if (shouldFollow)
-                {
-                    ScrollMessagesToEnd();
+                    break;
                 }
-                return;
+                if (message.RunId == runId)
+                {
+                    _messages[i] = message with
+                    {
+                        ActivityDetails = AppendActivityDetail(message.ActivityDetails, detailLine),
+                        CreatedAt = DateTimeOffset.UtcNow.ToString("O")
+                    };
+                    if (shouldFollow)
+                    {
+                        ScrollMessagesToEnd();
+                    }
+                    return;
+                }
             }
         }
         AppendMessage(new MessageDto(
@@ -5058,10 +5061,15 @@ public partial class MainWindow : Window
             scrollToEnd: shouldFollow);
     }
 
-    private static string InlineProgressDetailLine(string content)
+    private static string InlineProgressDetailLine(string method, string content, string details)
     {
         var timestamp = DateTimeOffset.Now.ToString("HH:mm:ss", CultureInfo.CurrentCulture);
-        return $"{timestamp} {content.Trim()}";
+        var header = string.IsNullOrWhiteSpace(method)
+            ? $"{timestamp} {content.Trim()}"
+            : $"{timestamp} [{method.Trim()}] {content.Trim()}";
+        return string.IsNullOrWhiteSpace(details)
+            ? header
+            : header + Environment.NewLine + details.TrimEnd();
     }
 
     private static string AppendActivityDetail(string? current, string next)
@@ -5107,7 +5115,9 @@ public partial class MainWindow : Window
         {
             return false;
         }
-        if (IsLowLevelDeltaProgress(method, content))
+        if (IsLowLevelDeltaProgress(method, content)
+            && !method.Equals("exec_command_output_delta", StringComparison.Ordinal)
+            && !method.Contains("reasoning", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
