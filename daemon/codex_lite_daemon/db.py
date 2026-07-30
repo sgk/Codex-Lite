@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS automations (
   chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   prompt TEXT NOT NULL,
-  schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('interval_minutes')),
+  schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('interval_minutes', 'hourly_minute', 'daily_time')),
   interval_minutes INTEGER NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
   running INTEGER NOT NULL DEFAULT 0,
@@ -108,9 +108,47 @@ class Database:
             if "kind" not in message_columns:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'conclusion'")
                 self._conn.execute("UPDATE messages SET kind = 'instruction' WHERE role = 'user'")
+            automation_sql_row = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'automations'"
+            ).fetchone()
+            automation_sql = str(automation_sql_row["sql"] or "") if automation_sql_row else ""
+            if "hourly_minute" not in automation_sql or "daily_time" not in automation_sql:
+                self._migrate_automation_schedule_kinds()
             if self.fetchone("SELECT version FROM schema_version WHERE version = 1") is None:
                 self.execute("INSERT INTO schema_version(version, applied_at) VALUES (1, datetime('now'))")
             self._conn.commit()
+
+    def _migrate_automation_schedule_kinds(self) -> None:
+        self._conn.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            ALTER TABLE automations RENAME TO automations_legacy;
+            CREATE TABLE automations (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+              chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              prompt TEXT NOT NULL,
+              schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('interval_minutes', 'hourly_minute', 'daily_time')),
+              interval_minutes INTEGER NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              running INTEGER NOT NULL DEFAULT 0,
+              next_run_at TEXT,
+              last_run_at TEXT,
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO automations
+            SELECT id, project_id, chat_id, name, prompt, schedule_kind, interval_minutes,
+                   enabled, running, next_run_at, last_run_at, last_error, created_at, updated_at
+            FROM automations_legacy;
+            DROP TABLE automations_legacy;
+            CREATE INDEX idx_automations_chat ON automations(project_id, chat_id);
+            CREATE INDEX idx_automations_due ON automations(enabled, running, next_run_at);
+            PRAGMA foreign_keys = ON;
+            """
+        )
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:

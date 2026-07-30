@@ -77,6 +77,13 @@ public sealed record AutomationDto(
 
     public string DisplayEnabled => Enabled ? "有効" : "無効";
 
+    public string DisplaySchedule => ScheduleKind switch
+    {
+        "hourly_minute" => $"毎時{IntervalMinutes:D2}分",
+        "daily_time" => $"毎日{IntervalMinutes / 60:D2}:{IntervalMinutes % 60:D2}",
+        _ => $"{IntervalMinutes}分ごと"
+    };
+
     private static string FormatLocalTime(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))

@@ -34,19 +34,28 @@ class AutomationService:
         )
         return [automation_out(row) for row in rows]
 
-    def create_automation(self, project_id: str, chat_id: str, name: str, prompt: str, interval_minutes: int, enabled: bool = True) -> dict:
+    def create_automation(
+        self,
+        project_id: str,
+        chat_id: str,
+        name: str,
+        prompt: str,
+        interval_minutes: int,
+        enabled: bool = True,
+        schedule_kind: str = "interval_minutes",
+    ) -> dict:
         self._ensure_chat_can_automate(project_id, chat_id, enabled)
         now = utc_now()
         clean_name = _clean_required(name, "Automation name must not be empty.")
         clean_prompt = _clean_prompt_required(prompt, "Automation prompt must not be empty.")
-        interval = max(1, int(interval_minutes))
+        kind, schedule_value = _validated_schedule(schedule_kind, interval_minutes)
         automation_id = new_id("aut")
         self.db.execute(
             """
             INSERT INTO automations(id, project_id, chat_id, name, prompt, schedule_kind, interval_minutes, enabled, running, next_run_at, last_run_at, last_error, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'interval_minutes', ?, ?, 0, ?, NULL, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?)
             """,
-            (automation_id, project_id, chat_id, clean_name, clean_prompt, interval, int(enabled), _next_run_at(interval, now) if enabled else None, now, now),
+            (automation_id, project_id, chat_id, clean_name, clean_prompt, kind, schedule_value, int(enabled), _next_run_at(kind, schedule_value, now) if enabled else None, now, now),
         )
         return self.get_automation(project_id, chat_id, automation_id)
 
@@ -69,24 +78,29 @@ class AutomationService:
         prompt: str | None = None,
         interval_minutes: int | None = None,
         enabled: bool | None = None,
+        schedule_kind: str | None = None,
     ) -> dict:
         current = self._get_automation_row(project_id, chat_id, automation_id)
         new_enabled = bool(current["enabled"]) if enabled is None else bool(enabled)
         self._ensure_chat_can_automate(project_id, chat_id, new_enabled)
         clean_name = current["name"] if name is None else _clean_required(name, "Automation name must not be empty.")
         clean_prompt = current["prompt"] if prompt is None else _clean_prompt_required(prompt, "Automation prompt must not be empty.")
-        interval = int(current["interval_minutes"] if interval_minutes is None else max(1, int(interval_minutes)))
+        kind, schedule_value = _validated_schedule(
+            str(current["schedule_kind"] if schedule_kind is None else schedule_kind),
+            int(current["interval_minutes"] if interval_minutes is None else interval_minutes),
+        )
         now = utc_now()
-        next_run_at = _next_run_at(interval, now) if new_enabled and (not bool(current["enabled"]) or interval != int(current["interval_minutes"])) else current.get("next_run_at")
+        schedule_changed = kind != str(current["schedule_kind"]) or schedule_value != int(current["interval_minutes"])
+        next_run_at = _next_run_at(kind, schedule_value, now) if new_enabled and (not bool(current["enabled"]) or schedule_changed) else current.get("next_run_at")
         if not new_enabled:
             next_run_at = None
         self.db.execute(
             """
             UPDATE automations
-            SET name = ?, prompt = ?, interval_minutes = ?, enabled = ?, next_run_at = ?, last_error = CASE WHEN ? THEN NULL ELSE last_error END, updated_at = ?
+            SET name = ?, prompt = ?, schedule_kind = ?, interval_minutes = ?, enabled = ?, next_run_at = ?, last_error = CASE WHEN ? THEN NULL ELSE last_error END, updated_at = ?
             WHERE id = ?
             """,
-            (clean_name, clean_prompt, interval, int(new_enabled), next_run_at, int(new_enabled), now, automation_id),
+            (clean_name, clean_prompt, kind, schedule_value, int(new_enabled), next_run_at, int(new_enabled), now, automation_id),
         )
         return self.get_automation(project_id, chat_id, automation_id)
 
@@ -122,7 +136,7 @@ class AutomationService:
     def mark_running(self, automation_id: str) -> None:
         self.db.execute("UPDATE automations SET running = 1, updated_at = ? WHERE id = ?", (utc_now(), automation_id))
 
-    def mark_finished(self, automation_id: str, interval_minutes: int, error: str | None = None) -> None:
+    def mark_finished(self, automation_id: str, schedule_kind: str, schedule_value: int, error: str | None = None) -> None:
         now = utc_now()
         self.db.execute(
             """
@@ -130,7 +144,7 @@ class AutomationService:
             SET running = 0, last_run_at = ?, next_run_at = ?, last_error = ?, updated_at = ?
             WHERE id = ?
             """,
-            (now, _next_run_at(interval_minutes, now), error, now, automation_id),
+            (now, _next_run_at(schedule_kind, schedule_value, now), error, now, automation_id),
         )
 
     def disable(self, automation_id: str, error: str) -> None:
@@ -193,10 +207,10 @@ async def _execute_automation(service: AutomationService, runner: AutomationRunn
         result = runner.start_message_run(str(automation["project_id"]), str(automation["chat_id"]), str(automation["prompt"]))
         if inspect.isawaitable(result):
             result = await result
-        service.mark_finished(automation_id, int(automation["interval_minutes"]))
+        service.mark_finished(automation_id, str(automation["schedule_kind"]), int(automation["interval_minutes"]))
         return result if isinstance(result, dict) else None
     except Exception as exc:
-        service.mark_finished(automation_id, int(automation["interval_minutes"]), _short_error(exc))
+        service.mark_finished(automation_id, str(automation["schedule_kind"]), int(automation["interval_minutes"]), _short_error(exc))
         _log_scheduler_error("automation_run_error", exc, automation_id)
         return None
 
@@ -215,9 +229,36 @@ def _clean_prompt_required(value: str, message: str) -> str:
     return text
 
 
-def _next_run_at(interval_minutes: int, now: str | None = None) -> str:
+def _validated_schedule(schedule_kind: str, schedule_value: int) -> tuple[str, int]:
+    kind = (schedule_kind or "").strip()
+    value = int(schedule_value)
+    if kind == "interval_minutes" and value >= 1:
+        return kind, value
+    if kind == "hourly_minute" and 0 <= value <= 59:
+        return kind, value
+    if kind == "daily_time" and 0 <= value <= 1439:
+        return kind, value
+    raise AppError("validation_error", "Automation schedule is invalid.", 400)
+
+
+def _next_run_at(schedule_kind: str, schedule_value: int, now: str | None = None) -> str:
     base = _parse_utc(now or utc_now())
-    return (base + timedelta(minutes=max(1, interval_minutes))).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    kind, value = _validated_schedule(schedule_kind, schedule_value)
+    if kind == "interval_minutes":
+        result = base + timedelta(minutes=value)
+    else:
+        local_base = base.astimezone()
+        if kind == "hourly_minute":
+            result_local = local_base.replace(minute=value, second=0, microsecond=0)
+            if result_local <= local_base:
+                result_local += timedelta(hours=1)
+        else:
+            hour, minute = divmod(value, 60)
+            result_local = local_base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if result_local <= local_base:
+                result_local += timedelta(days=1)
+        result = result_local.astimezone(timezone.utc)
+    return result.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _parse_utc(value: str) -> datetime:

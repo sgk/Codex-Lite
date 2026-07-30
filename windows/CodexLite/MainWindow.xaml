@@ -1265,7 +1265,8 @@
                             <RowDefinition Height="150"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <Border Background="#F6F8FA"
+                        <Border x:Name="AutomationEditorPanel"
+                                Background="#F6F8FA"
                                 Grid.Row="1"
                                 BorderBrush="#D6DCE5"
                                 BorderThickness="1"
@@ -1274,13 +1275,12 @@
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                    <ColumnDefinition Width="72"/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBox x:Name="AutomationNameBox"
@@ -1289,29 +1289,42 @@
                                          Style="{StaticResource WatermarkTextBox}"
                                          Tag="名前"
                                          TextChanged="AutomationInput_TextChanged"/>
-                                <TextBlock Grid.Column="1"
-                                           Text="実行間隔（分）"
-                                           VerticalAlignment="Center"
-                                           Foreground="#555"
-                                           Margin="0,0,6,6"/>
-                                <TextBox x:Name="AutomationIntervalBox"
-                                         Grid.Column="2"
-                                         Margin="0,0,8,6"
-                                         Style="{StaticResource WatermarkTextBox}"
-                                         Tag="分"
-                                         Text="60"
-                                         TextChanged="AutomationInput_TextChanged"/>
                                 <CheckBox x:Name="AutomationEnabledBox"
-                                          Grid.Column="3"
+                                          Grid.Column="1"
                                           Content="有効"
                                           IsChecked="True"
                                           VerticalAlignment="Center"
                                           Margin="0,0,8,6"
                                           Checked="AutomationEnabledBox_Changed"
                                           Unchecked="AutomationEnabledBox_Changed"/>
+                                <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,6">
+                                    <TextBlock Text="実行方式" VerticalAlignment="Center" Foreground="#555" Margin="0,0,6,0"/>
+                                    <ComboBox x:Name="AutomationScheduleKindBox" Width="150" Margin="0,0,10,0" SelectionChanged="AutomationScheduleInput_Changed">
+                                        <ComboBoxItem Content="一定間隔" Tag="interval_minutes" IsSelected="True"/>
+                                        <ComboBoxItem Content="毎時の分指定" Tag="hourly_minute"/>
+                                        <ComboBoxItem Content="毎日の時刻指定" Tag="daily_time"/>
+                                    </ComboBox>
+                                    <StackPanel x:Name="AutomationIntervalPanel" Orientation="Horizontal">
+                                        <TextBlock Text="何分ごと" VerticalAlignment="Center" Foreground="#555" Margin="0,0,6,0"/>
+                                        <TextBox x:Name="AutomationIntervalBox" Width="72" Style="{StaticResource WatermarkTextBox}" Tag="60" Text="60" TextChanged="AutomationInput_TextChanged"/>
+                                    </StackPanel>
+                                    <StackPanel x:Name="AutomationHourlyPanel" Orientation="Horizontal" Visibility="Collapsed">
+                                        <TextBlock Text="毎時" VerticalAlignment="Center" Foreground="#555" Margin="0,0,6,0"/>
+                                        <ComboBox x:Name="AutomationMinuteBox" Width="64" SelectionChanged="AutomationScheduleInput_Changed"/>
+                                        <TextBlock Text="分に実行" VerticalAlignment="Center" Foreground="#555" Margin="6,0,0,0"/>
+                                    </StackPanel>
+                                    <StackPanel x:Name="AutomationDailyPanel" Orientation="Horizontal" Visibility="Collapsed">
+                                        <TextBlock Text="毎日" VerticalAlignment="Center" Foreground="#555" Margin="0,0,6,0"/>
+                                        <ComboBox x:Name="AutomationHourBox" Width="64" SelectionChanged="AutomationScheduleInput_Changed"/>
+                                        <TextBlock Text="時" VerticalAlignment="Center" Foreground="#555" Margin="4,0"/>
+                                        <ComboBox x:Name="AutomationDailyMinuteBox" Width="64" SelectionChanged="AutomationScheduleInput_Changed"/>
+                                        <TextBlock Text="分に実行" VerticalAlignment="Center" Foreground="#555" Margin="4,0,0,0"/>
+                                    </StackPanel>
+                                    <TextBlock x:Name="AutomationScheduleHelpText" Text="指定した分数ごとに実行します（1分以上）。" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
+                                </StackPanel>
                                 <TextBox x:Name="AutomationPromptBox"
-                                         Grid.Row="1"
-                                         Grid.ColumnSpan="4"
+                                         Grid.Row="2"
+                                         Grid.ColumnSpan="2"
                                          MinHeight="180"
                                          VerticalAlignment="Stretch"
                                          AcceptsReturn="True"
@@ -1321,7 +1334,7 @@
                                          Style="{StaticResource WatermarkTextBox}"
                                          Tag="定期実行する指示（Markdown）"
                                          TextChanged="AutomationInput_TextChanged"/>
-                                <StackPanel Grid.Row="2" Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                                <StackPanel Grid.Row="3" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
                                     <Button x:Name="RefreshAutomationsButton" Content="再読み込み" Click="RefreshAutomations_Click" Margin="0,0,8,0"/>
                                     <Button x:Name="SaveAutomationButton" Content="保存" Click="SaveAutomation_Click" Margin="0,0,8,0"/>
                                     <Button x:Name="RunAutomationNowButton" Content="今すぐ実行" Click="RunAutomationNow_Click" Margin="0,0,8,0"/>
@@ -1351,7 +1364,7 @@
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="状態" Binding="{Binding DisplayState}" Width="70"/>
                                     <DataGridTextColumn Header="名前" Binding="{Binding Name}" Width="160"/>
-                                    <DataGridTextColumn Header="間隔（分）" Binding="{Binding IntervalMinutes}" Width="80"/>
+                                    <DataGridTextColumn Header="実行予定" Binding="{Binding DisplaySchedule}" Width="120"/>
                                     <DataGridTextColumn Header="次回実行" Binding="{Binding DisplayNextRunAt}" Width="150"/>
                                     <DataGridTextColumn Header="最終実行" Binding="{Binding DisplayLastRunAt}" Width="150"/>
                                     <DataGridTextColumn Header="エラー" Binding="{Binding LastError}" Width="*"/>

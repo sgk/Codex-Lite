@@ -143,6 +143,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        InitializeAutomationScheduleInputs();
         InitializeCommandButtonIcons();
         UpdateCommandButtonState();
         LoadUiState();
@@ -2860,6 +2861,57 @@ public partial class MainWindow : Window
         UpdateAutomationButtonState();
     }
 
+    private void InitializeAutomationScheduleInputs()
+    {
+        AutomationMinuteBox.ItemsSource = Enumerable.Range(0, 60).ToList();
+        AutomationDailyMinuteBox.ItemsSource = Enumerable.Range(0, 60).ToList();
+        AutomationHourBox.ItemsSource = Enumerable.Range(0, 24).ToList();
+        AutomationMinuteBox.SelectedItem = 0;
+        AutomationDailyMinuteBox.SelectedItem = 0;
+        AutomationHourBox.SelectedItem = 9;
+        UpdateAutomationScheduleEditor();
+    }
+
+    private void AutomationScheduleInput_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateAutomationScheduleEditor();
+        if (!_isLoadingAutomationSelection)
+        {
+            UpdateAutomationButtonState();
+        }
+    }
+
+    private void UpdateAutomationScheduleEditor()
+    {
+        if (AutomationIntervalPanel is null)
+        {
+            return;
+        }
+        var kind = AutomationScheduleKind();
+        AutomationIntervalPanel.Visibility = kind == "interval_minutes" ? Visibility.Visible : Visibility.Collapsed;
+        AutomationHourlyPanel.Visibility = kind == "hourly_minute" ? Visibility.Visible : Visibility.Collapsed;
+        AutomationDailyPanel.Visibility = kind == "daily_time" ? Visibility.Visible : Visibility.Collapsed;
+        AutomationScheduleHelpText.Text = kind switch
+        {
+            "hourly_minute" => "例: 15を選ぶと、毎時15分に実行します。",
+            "daily_time" => "選んだ時刻に毎日実行します（このPCのローカル時刻）。",
+            _ => "指定した分数ごとに実行します（1分以上）。"
+        };
+    }
+
+    private string AutomationScheduleKind()
+    {
+        return (AutomationScheduleKindBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "interval_minutes";
+    }
+
+    private void SelectAutomationScheduleKind(string scheduleKind)
+    {
+        AutomationScheduleKindBox.SelectedItem = AutomationScheduleKindBox.Items
+            .OfType<ComboBoxItem>()
+            .FirstOrDefault(item => string.Equals(item.Tag as string, scheduleKind, StringComparison.Ordinal))
+            ?? AutomationScheduleKindBox.Items[0];
+    }
+
     private void AutomationsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (AutomationsGrid.SelectedItem is AutomationDto automation)
@@ -2868,9 +2920,23 @@ public partial class MainWindow : Window
             try
             {
                 AutomationNameBox.Text = automation.Name;
-                AutomationIntervalBox.Text = automation.IntervalMinutes.ToString(CultureInfo.InvariantCulture);
+                SelectAutomationScheduleKind(automation.ScheduleKind);
+                if (automation.ScheduleKind == "hourly_minute")
+                {
+                    AutomationMinuteBox.SelectedItem = automation.IntervalMinutes;
+                }
+                else if (automation.ScheduleKind == "daily_time")
+                {
+                    AutomationHourBox.SelectedItem = automation.IntervalMinutes / 60;
+                    AutomationDailyMinuteBox.SelectedItem = automation.IntervalMinutes % 60;
+                }
+                else
+                {
+                    AutomationIntervalBox.Text = automation.IntervalMinutes.ToString(CultureInfo.InvariantCulture);
+                }
                 AutomationEnabledBox.IsChecked = automation.Enabled;
                 AutomationPromptBox.Text = automation.Prompt;
+                UpdateAutomationScheduleEditor();
             }
             finally
             {
@@ -2889,15 +2955,14 @@ public partial class MainWindow : Window
 
         var hasChat = _selectedProject is not null && _selectedChat is not null;
         var canContinue = _selectedChat?.CanContinue == true;
-        var hasValidInterval = int.TryParse(AutomationIntervalBox.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var interval)
-            && interval >= 1;
+        var hasValidSchedule = TryReadAutomationSchedule(out var scheduleKind, out var scheduleValue, showError: false);
         var hasInput = !string.IsNullOrWhiteSpace(AutomationNameBox.Text)
             && !string.IsNullOrWhiteSpace(AutomationPromptBox.Text)
-            && hasValidInterval;
+            && hasValidSchedule;
         var selectedAutomation = AutomationsGrid.SelectedItem as AutomationDto;
         var hasSelection = selectedAutomation is not null;
         var isDraft = selectedAutomation?.IsDraft == true;
-        var hasChanges = selectedAutomation is not null && AutomationEditorHasChanges(selectedAutomation, interval);
+        var hasChanges = selectedAutomation is not null && AutomationEditorHasChanges(selectedAutomation, scheduleKind, scheduleValue);
         var busy = _isRefreshingAutomations || _isSavingAutomation || _isRunningAutomationNow;
 
         RefreshAutomationsButton.IsEnabled = hasChat && !busy;
@@ -2906,6 +2971,7 @@ public partial class MainWindow : Window
         RunAutomationNowButton.IsEnabled = hasChat && canContinue && !isDraft && selectedAutomation?.Enabled == true && selectedAutomation.Running == false && !busy;
         ToggleAutomationButton.IsEnabled = hasChat && hasSelection && !isDraft && selectedAutomation?.Running == false && !busy;
         DeleteAutomationButton.IsEnabled = hasChat && hasSelection && selectedAutomation?.Running == false && !busy;
+        AutomationEditorPanel.IsEnabled = hasChat && canContinue && hasSelection && !busy;
 
         CreateAutomationButton.ToolTip = !hasChat
             ? "チャットを選択してください"
@@ -2917,7 +2983,7 @@ public partial class MainWindow : Window
             : !canContinue
                 ? "このチャットでは継続できないため保存できません"
                 : !hasInput
-                    ? "名前、実行間隔（分）、指示を入力してください"
+                    ? "名前、実行予定、指示を入力してください"
                     : !hasChanges
                         ? "変更がありません"
                         : null;
@@ -2962,13 +3028,13 @@ public partial class MainWindow : Window
 
     private async Task CreateAutomationFromEditorAsync(ProjectDto project, ChatDto chat, AutomationDto? draft)
     {
-        if (!TryReadAutomationEditor(out var name, out var prompt, out var interval))
+        if (!TryReadAutomationEditor(out var name, out var prompt, out var scheduleKind, out var scheduleValue))
         {
             return;
         }
         try
         {
-            var created = await _client.CreateAutomationAsync(project.Id, chat.Id, name, prompt, interval, AutomationEnabledBox.IsChecked == true);
+            var created = await _client.CreateAutomationAsync(project.Id, chat.Id, name, prompt, scheduleKind, scheduleValue, AutomationEnabledBox.IsChecked == true);
             if (created is not null)
             {
                 if (draft is not null)
@@ -3017,7 +3083,7 @@ public partial class MainWindow : Window
         {
             return;
         }
-        if (!TryReadAutomationEditor(out var name, out var prompt, out var interval))
+        if (!TryReadAutomationEditor(out var name, out var prompt, out var scheduleKind, out var scheduleValue))
         {
             return;
         }
@@ -3030,7 +3096,7 @@ public partial class MainWindow : Window
                 await CreateAutomationFromEditorAsync(project, chat, automation);
                 return;
             }
-            var updated = await _client.UpdateAutomationAsync(project.Id, chat.Id, automation.Id, name, prompt, interval, AutomationEnabledBox.IsChecked == true);
+            var updated = await _client.UpdateAutomationAsync(project.Id, chat.Id, automation.Id, name, prompt, scheduleKind, scheduleValue, AutomationEnabledBox.IsChecked == true);
             if (updated is not null)
             {
                 ReplaceAutomation(updated);
@@ -3178,25 +3244,52 @@ public partial class MainWindow : Window
         UpdateAutomationButtonState();
     }
 
-    private bool TryReadAutomationEditor(out string name, out string prompt, out int interval)
+    private bool TryReadAutomationEditor(out string name, out string prompt, out string scheduleKind, out int scheduleValue)
     {
         name = CleanAutomationName(AutomationNameBox.Text);
         prompt = CleanAutomationPrompt(AutomationPromptBox.Text);
-        interval = 0;
+        scheduleKind = AutomationScheduleKind();
+        scheduleValue = 0;
         if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(prompt))
         {
             StatusText.Text = "automation error | 名前と指示を入力してください";
             return false;
         }
-        if (!int.TryParse(AutomationIntervalBox.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out interval) || interval < 1)
+        if (!TryReadAutomationSchedule(out scheduleKind, out scheduleValue, showError: true))
         {
-            StatusText.Text = "automation error | 間隔は1以上の分数で入力してください";
             return false;
         }
         return true;
     }
 
-    private bool AutomationEditorHasChanges(AutomationDto automation, int parsedInterval)
+    private bool TryReadAutomationSchedule(out string scheduleKind, out int scheduleValue, bool showError)
+    {
+        scheduleKind = AutomationScheduleKind();
+        scheduleValue = 0;
+        if (scheduleKind == "hourly_minute" && AutomationMinuteBox.SelectedItem is int minute)
+        {
+            scheduleValue = minute;
+            return true;
+        }
+        if (scheduleKind == "daily_time" && AutomationHourBox.SelectedItem is int hour && AutomationDailyMinuteBox.SelectedItem is int dailyMinute)
+        {
+            scheduleValue = hour * 60 + dailyMinute;
+            return true;
+        }
+        if (scheduleKind == "interval_minutes"
+            && int.TryParse(AutomationIntervalBox.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out scheduleValue)
+            && scheduleValue >= 1)
+        {
+            return true;
+        }
+        if (showError)
+        {
+            StatusText.Text = "automation error | 実行予定を正しく指定してください";
+        }
+        return false;
+    }
+
+    private bool AutomationEditorHasChanges(AutomationDto automation, string scheduleKind, int scheduleValue)
     {
         if (automation.IsDraft)
         {
@@ -3204,7 +3297,8 @@ public partial class MainWindow : Window
         }
         return CleanAutomationName(AutomationNameBox.Text) != automation.Name
             || CleanAutomationPrompt(AutomationPromptBox.Text) != automation.Prompt
-            || parsedInterval != automation.IntervalMinutes
+            || scheduleKind != automation.ScheduleKind
+            || scheduleValue != automation.IntervalMinutes
             || (AutomationEnabledBox.IsChecked == true) != automation.Enabled;
     }
 

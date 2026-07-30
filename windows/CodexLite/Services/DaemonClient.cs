@@ -429,14 +429,14 @@ public sealed class DaemonClient
     public Task<List<AutomationDto>?> ListAutomationsAsync(string projectId, string chatId, CancellationToken cancellationToken = default) =>
         _http.GetFromJsonAsync<List<AutomationDto>>($"/projects/{projectId}/chats/{chatId}/automations", JsonOptions, cancellationToken);
 
-    public Task<AutomationDto?> CreateAutomationAsync(string projectId, string chatId, string name, string prompt, int intervalMinutes, bool enabled, CancellationToken cancellationToken = default) =>
-        PostAsync<AutomationDto>($"/projects/{projectId}/chats/{chatId}/automations", new { name, prompt, interval_minutes = intervalMinutes, enabled }, cancellationToken);
+    public Task<AutomationDto?> CreateAutomationAsync(string projectId, string chatId, string name, string prompt, string scheduleKind, int scheduleValue, bool enabled, CancellationToken cancellationToken = default) =>
+        PostAsync<AutomationDto>($"/projects/{projectId}/chats/{chatId}/automations", new { name, prompt, schedule_kind = scheduleKind, interval_minutes = scheduleValue, enabled }, cancellationToken);
 
     public Task<AutomationDto?> UpdateAutomationAsync(string projectId, string chatId, string automationId, bool enabled, CancellationToken cancellationToken = default) =>
         PatchAsync<AutomationDto>($"/projects/{projectId}/chats/{chatId}/automations/{automationId}", new { enabled }, cancellationToken);
 
-    public Task<AutomationDto?> UpdateAutomationAsync(string projectId, string chatId, string automationId, string name, string prompt, int intervalMinutes, bool enabled, CancellationToken cancellationToken = default) =>
-        PatchAsync<AutomationDto>($"/projects/{projectId}/chats/{chatId}/automations/{automationId}", new { name, prompt, interval_minutes = intervalMinutes, enabled }, cancellationToken);
+    public Task<AutomationDto?> UpdateAutomationAsync(string projectId, string chatId, string automationId, string name, string prompt, string scheduleKind, int scheduleValue, bool enabled, CancellationToken cancellationToken = default) =>
+        PatchAsync<AutomationDto>($"/projects/{projectId}/chats/{chatId}/automations/{automationId}", new { name, prompt, schedule_kind = scheduleKind, interval_minutes = scheduleValue, enabled }, cancellationToken);
 
     public Task<AutomationRunResultDto?> RunAutomationNowAsync(string projectId, string chatId, string automationId, CancellationToken cancellationToken = default) =>
         PostAsync<AutomationRunResultDto>($"/projects/{projectId}/chats/{chatId}/automations/{automationId}/run", new { }, cancellationToken);

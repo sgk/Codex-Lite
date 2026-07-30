@@ -453,6 +453,42 @@ async def test_chat_automation_crud(linux_tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_automation_supports_hourly_minute_and_daily_time(linux_tmp_path: Path) -> None:
+    app = create_app(make_test_config(linux_tmp_path))
+    project_path = linux_tmp_path / "project"
+    project_path.mkdir()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        project = (await client.post("/projects", json={"path": str(project_path), "name": "project"})).json()
+        chat = (await client.post(f"/projects/{project['id']}/chats", json={"title": "automation schedules"})).json()
+
+        hourly = (
+            await client.post(
+                f"/projects/{project['id']}/chats/{chat['id']}/automations",
+                json={"name": "hourly", "prompt": "check", "schedule_kind": "hourly_minute", "interval_minutes": 15, "enabled": True},
+            )
+        ).json()
+        assert hourly["scheduleKind"] == "hourly_minute"
+        assert hourly["intervalMinutes"] == 15
+        assert hourly["nextRunAt"] is not None
+
+        daily = (
+            await client.patch(
+                f"/projects/{project['id']}/chats/{chat['id']}/automations/{hourly['id']}",
+                json={"schedule_kind": "daily_time", "interval_minutes": 9 * 60 + 30},
+            )
+        ).json()
+        assert daily["scheduleKind"] == "daily_time"
+        assert daily["intervalMinutes"] == 570
+        assert daily["nextRunAt"] is not None
+
+        invalid = await client.patch(
+            f"/projects/{project['id']}/chats/{chat['id']}/automations/{hourly['id']}",
+            json={"schedule_kind": "hourly_minute", "interval_minutes": 60},
+        )
+        assert invalid.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_chat_automation_rejects_archived_chat(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()

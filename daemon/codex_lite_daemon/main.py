@@ -253,8 +253,9 @@ def create_app(config: Config | None = None) -> Starlette:
             chat_id,
             _required_str(body, "name"),
             _required_str(body, "prompt", min_length=1),
-            _required_int(body, "interval_minutes", minimum=1),
+            _required_int(body, "interval_minutes", minimum=0),
             _optional_bool(body, "enabled", True),
+            _optional_str(body, "schedule_kind") or "interval_minutes",
         )
 
     @patch("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}")
@@ -265,8 +266,9 @@ def create_app(config: Config | None = None) -> Starlette:
             automation_id,
             _optional_str(body, "name"),
             _optional_str(body, "prompt"),
-            _optional_int(body, "interval_minutes", minimum=1),
+            _optional_int(body, "interval_minutes", minimum=0),
             _optional_bool(body, "enabled", None),
+            _optional_str(body, "schedule_kind"),
         )
 
     @post("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}/run")
