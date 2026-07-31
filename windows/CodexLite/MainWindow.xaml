@@ -758,14 +758,25 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
-                    <StackPanel Grid.Row="4" Grid.ColumnSpan="4" Orientation="Horizontal" Margin="0,4,0,0">
-                        <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                        <ComboBox x:Name="NewChatApprovalPolicyBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="操作前の確認方法" SelectionChanged="ChatRuntimeSetting_Changed"/>
-                        <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                        <ComboBox x:Name="NewChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
-                        <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                        <ComboBox x:Name="NewChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
-                    </StackPanel>
+                    <Grid Grid.Row="4" Grid.ColumnSpan="4" Margin="0,4,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Orientation="Horizontal">
+                            <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
+                            <ComboBox x:Name="NewChatApprovalPolicyBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="操作前の確認方法" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                            <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
+                            <ComboBox x:Name="NewChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                            <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
+                            <ComboBox x:Name="NewChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button x:Name="NewChatAttachButton" Content="添付" Click="AttachFiles_Click" Height="28" MinWidth="56" Margin="0,0,6,0"/>
+                            <Button x:Name="NewChatPasteImageButton" Content="画像貼付" Click="PasteImage_Click" Height="28" MinWidth="76" Margin="0,0,6,0"/>
+                            <Button x:Name="NewChatSendButton" Content="送信" Click="NewChatSend_Click" Height="28" MinWidth="56"/>
+                        </StackPanel>
+                    </Grid>
                     <TextBlock x:Name="NewChatComposerHintText"
                                Grid.Row="2"
                                Grid.ColumnSpan="4"
@@ -773,16 +784,7 @@
                                Foreground="#666"
                                Margin="2,0,0,6"
                                TextWrapping="Wrap"/>
-                    <TextBox x:Name="NewChatMessageBox" Grid.Row="3" AcceptsReturn="True" TextWrapping="Wrap" Height="72" VerticalScrollBarVisibility="Auto" PreviewKeyDown="NewChatMessageBox_PreviewKeyDown" TextChanged="MessageBox_TextChanged" Margin="0,0,8,0"/>
-                    <Button x:Name="NewChatAttachButton" Grid.Row="3" Grid.Column="1" Content="添付" Click="AttachFiles_Click" Margin="0,0,8,0" MinHeight="32" VerticalAlignment="Bottom"/>
-                    <Button x:Name="NewChatPasteImageButton" Grid.Row="3" Grid.Column="2" Content="画像貼付" Click="PasteImage_Click" Margin="0,0,8,0" MinHeight="32" VerticalAlignment="Bottom"/>
-                    <Button x:Name="NewChatSendButton"
-                            Grid.Row="3"
-                            Grid.Column="3"
-                            Content="送信"
-                            Click="NewChatSend_Click"
-                            MinHeight="32"
-                            VerticalAlignment="Bottom"/>
+                    <TextBox x:Name="NewChatMessageBox" Grid.Row="3" Grid.ColumnSpan="4" AcceptsReturn="True" TextWrapping="Wrap" Height="72" VerticalScrollBarVisibility="Auto" PreviewKeyDown="NewChatMessageBox_PreviewKeyDown" TextChanged="MessageBox_TextChanged"/>
                 </Grid>
                     </Grid>
                     <Grid x:Name="ChatConversationPanel"
@@ -1060,14 +1062,26 @@
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
-                        <StackPanel Grid.Row="4" Grid.ColumnSpan="5" Orientation="Horizontal" Margin="0,4,0,0">
-                            <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                            <ComboBox x:Name="ChatApprovalPolicyBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="操作前の確認方法" SelectionChanged="ChatRuntimeSetting_Changed"/>
-                            <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                            <ComboBox x:Name="ChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
-                            <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                            <ComboBox x:Name="ChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
-                        </StackPanel>
+                        <Grid Grid.Row="4" Grid.ColumnSpan="5" Margin="0,4,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
+                                <ComboBox x:Name="ChatApprovalPolicyBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="操作前の確認方法" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                                <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
+                                <ComboBox x:Name="ChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                                <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
+                                <ComboBox x:Name="ChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="AttachButton" Content="添付" Click="AttachFiles_Click" Height="28" MinWidth="56" Margin="0,0,6,0"/>
+                                <Button x:Name="PasteImageButton" Content="画像貼付" Click="PasteImage_Click" Height="28" MinWidth="76" Margin="0,0,6,0"/>
+                                <Button x:Name="SendButton" Content="送信" Click="Send_Click" Height="28" MinWidth="56" Margin="0,0,6,0"/>
+                                <Button x:Name="CancelButton" Content="停止" Click="Cancel_Click" Height="28" MinWidth="56" IsEnabled="False" ToolTipService.ShowOnDisabled="True"/>
+                            </StackPanel>
+                        </Grid>
                         <TextBlock x:Name="ComposerHintText"
                                    Grid.Row="2"
                                    Grid.ColumnSpan="5"
@@ -1075,26 +1089,7 @@
                                    Foreground="#666"
                                    Margin="2,0,0,6"
                                    TextWrapping="Wrap"/>
-                        <TextBox x:Name="MessageBox" Grid.Row="3" AcceptsReturn="True" TextWrapping="Wrap" Height="72" VerticalScrollBarVisibility="Auto" PreviewKeyDown="MessageBox_PreviewKeyDown" TextChanged="MessageBox_TextChanged" Margin="0,0,8,0"/>
-                        <Button x:Name="AttachButton" Grid.Row="3" Grid.Column="1" Content="添付" Click="AttachFiles_Click" Margin="0,0,8,0" MinHeight="32" VerticalAlignment="Bottom"/>
-                        <Button x:Name="PasteImageButton" Grid.Row="3" Grid.Column="2" Content="画像貼付" Click="PasteImage_Click" Margin="0,0,8,0" MinHeight="32" VerticalAlignment="Bottom"/>
-                        <Button x:Name="SendButton"
-                                Grid.Row="3"
-                                Grid.Column="3"
-                                Content="送信"
-                                Click="Send_Click"
-                                Margin="0,0,8,0"
-                                MinHeight="32"
-                                VerticalAlignment="Bottom"/>
-                        <Button x:Name="CancelButton"
-                                Grid.Row="3"
-                                Grid.Column="4"
-                                Content="停止"
-                                Click="Cancel_Click"
-                                IsEnabled="False"
-                                ToolTipService.ShowOnDisabled="True"
-                                MinHeight="32"
-                                VerticalAlignment="Bottom"/>
+                        <TextBox x:Name="MessageBox" Grid.Row="3" Grid.ColumnSpan="5" AcceptsReturn="True" TextWrapping="Wrap" Height="72" VerticalScrollBarVisibility="Auto" PreviewKeyDown="MessageBox_PreviewKeyDown" TextChanged="MessageBox_TextChanged"/>
                     </Grid>
                     </Grid>
                     </Grid>
