@@ -94,6 +94,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, ActiveUiRun> _activeRunsByChat = new(StringComparer.Ordinal);
     private CancellationTokenSource? _usageCapacityCts;
     private DateTimeOffset _nextBackgroundMessagePollAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _nextChatTreePollAt = DateTimeOffset.MinValue;
     private UsageWindowDto? _fiveHourUsageWindow;
     private UsageWindowDto? _weeklyUsageWindow;
     private System.Windows.Point? _projectDragStart;
@@ -115,6 +116,7 @@ public partial class MainWindow : Window
     private bool _isLoadingMessages;
     private bool _isLoadingOlderMessages;
     private bool _isPollingMessages;
+    private bool _isPollingChatTree;
     private bool _isRestartingDaemon;
     private bool _isRefreshingUsageCapacity;
     private bool _isRefreshingAutomations;
@@ -817,7 +819,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task LoadProjectChatsAsync(ProjectTreeItem projectItem, string? preferredChatId = null, bool sync = false)
+    private async Task LoadProjectChatsAsync(ProjectTreeItem projectItem, string? preferredChatId = null, bool sync = false, bool markUpdatedChats = false)
     {
         var projectId = projectItem.Project.Id;
         var version = _chatLoadVersions.TryGetValue(projectId, out var previousVersion) ? previousVersion + 1 : 1;
@@ -833,10 +835,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        ApplyProjectChats(projectItem, chats, preferredChatId);
+        ApplyProjectChats(projectItem, chats, preferredChatId, markUpdatedChats);
     }
 
-    private void ApplyProjectChats(ProjectTreeItem projectItem, IEnumerable<ChatDto> chats, string? preferredChatId)
+    private void ApplyProjectChats(ProjectTreeItem projectItem, IEnumerable<ChatDto> chats, string? preferredChatId, bool markUpdatedChats = false)
     {
         var existingById = projectItem.Chats
             .GroupBy(item => item.Chat.Id)
@@ -850,13 +852,18 @@ public partial class MainWindow : Window
             {
                 continue;
             }
-            if (!existingById.TryGetValue(chat.Id, out var chatItem))
+            var previousUpdatedAt = existingById.TryGetValue(chat.Id, out var existingChatItem)
+                ? existingChatItem.Chat.UpdatedAt
+                : null;
+            ChatTreeItem chatItem;
+            if (existingChatItem is null)
             {
                 chatItem = new ChatTreeItem(projectItem.Project, chat);
                 projectItem.Chats.Insert(targetIndex, chatItem);
             }
             else
             {
+                chatItem = existingChatItem;
                 chatItem.SetChat(chat);
                 var currentIndex = projectItem.Chats.IndexOf(chatItem);
                 if (currentIndex < 0)
@@ -870,6 +877,12 @@ public partial class MainWindow : Window
             }
             chatItem.HasUnloadedHistory = _chatsWithUnloadedHistory.Contains(chat.Id);
             chatItem.IsRunning = IsChatRunning(chat.Id);
+            if (markUpdatedChats
+                && previousUpdatedAt is not null
+                && !string.Equals(previousUpdatedAt, chat.UpdatedAt, StringComparison.Ordinal))
+            {
+                MarkChatUnreadIfConversationNotVisible(chat.Id);
+            }
             targetItems.Add(chatItem);
             if (_selectedChat?.Id == chat.Id)
             {
@@ -893,7 +906,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task LoadProjectChatsForTreeAsync(string? preferredChatId, string? skipProjectId = null, bool sync = false)
+    private async Task LoadProjectChatsForTreeAsync(string? preferredChatId, string? skipProjectId = null, bool sync = false, bool markUpdatedChats = false)
     {
         using var gate = new SemaphoreSlim(6);
         var tasks = _projectTree
@@ -903,7 +916,7 @@ public partial class MainWindow : Window
                 await gate.WaitAsync();
                 try
                 {
-                    await LoadProjectChatsAsync(projectItem, preferredChatId, sync);
+                    await LoadProjectChatsAsync(projectItem, preferredChatId, sync, markUpdatedChats);
                 }
                 finally
                 {
@@ -2321,7 +2334,30 @@ public partial class MainWindow : Window
 
     private async void MessageRefreshTimer_Tick(object? sender, EventArgs e)
     {
-        if (_isRestartingDaemon || _isPollingMessages || _isLoadingMessages || SelectedActiveRun() is not null)
+        if (_isRestartingDaemon || _isPollingChatTree || _isPollingMessages || _isLoadingMessages)
+        {
+            return;
+        }
+
+        if (DateTimeOffset.Now >= _nextChatTreePollAt)
+        {
+            _isPollingChatTree = true;
+            _nextChatTreePollAt = DateTimeOffset.Now.AddSeconds(5);
+            try
+            {
+                await LoadProjectChatsForTreeAsync(null, null, markUpdatedChats: true);
+            }
+            catch (Exception ex)
+            {
+                WritePerformanceLog("background-chat-tree-refresh-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+            }
+            finally
+            {
+                _isPollingChatTree = false;
+            }
+        }
+
+        if (SelectedActiveRun() is not null)
         {
             return;
         }
