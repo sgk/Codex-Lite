@@ -60,8 +60,8 @@ def make_test_config(tmp_path: Path) -> Config:
     )
 
 
-def make_runtime_settings(permission_profile: str = ":danger-full-access", approval_policy: str = "never", model: str = "") -> AppServerRuntimeSettings:
-    return AppServerRuntimeSettings(permission_profile=permission_profile, approval_policy=approval_policy, model=model)
+def make_runtime_settings(permission_profile: str = ":danger-full-access", approval_policy: str = "never", model: str = "", reasoning_effort: str = "") -> AppServerRuntimeSettings:
+    return AppServerRuntimeSettings(permission_profile=permission_profile, approval_policy=approval_policy, model=model, reasoning_effort=reasoning_effort)
 
 
 def test_codex_runner_prefers_desktop_bundle_then_vscode_before_path(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -585,12 +585,20 @@ async def test_runtime_settings_endpoint(linux_tmp_path: Path) -> None:
         assert initial.json()["permissionProfile"] == ":danger-full-access"
         assert initial.json()["approvalPolicy"] == "never"
         assert initial.json()["model"] == ""
+        assert initial.json()["reasoningEffort"] == ""
+        assert "gpt-5.6-luna" in initial.json()["availableModels"]
 
-        updated = await client.patch("/settings", json={"permissionProfile": ":workspace", "approvalPolicy": "on-request", "model": "gpt-5-codex"})
+        models = await client.get("/models")
+        assert models.status_code == 200
+        assert models.json()["dynamic"] is False
+        assert "gpt-5.6-sol" in models.json()["availableModels"]
+
+        updated = await client.patch("/settings", json={"permissionProfile": ":workspace", "approvalPolicy": "on-request", "model": "gpt-5-codex", "reasoningEffort": "high"})
         assert updated.status_code == 200
         assert updated.json()["permissionProfile"] == ":workspace"
         assert updated.json()["approvalPolicy"] == "on-request"
         assert updated.json()["model"] == "gpt-5-codex"
+        assert updated.json()["reasoningEffort"] == "high"
 
         invalid = await client.patch("/settings", json={"permissionProfile": "invalid"})
         assert invalid.status_code == 400
@@ -607,6 +615,7 @@ async def test_runtime_settings_endpoint(linux_tmp_path: Path) -> None:
         assert persisted.json()["permissionProfile"] == ":workspace"
         assert persisted.json()["approvalPolicy"] == "on-request"
         assert persisted.json()["model"] == "gpt-5-codex"
+        assert persisted.json()["reasoningEffort"] == "high"
 
 
 @pytest.mark.asyncio
@@ -1460,7 +1469,7 @@ async def test_app_server_run_uses_runtime_model_and_approval_policy(linux_tmp_p
     messages = MessageService(db, chats)
     transcripts = TranscriptImportService(cfg, projects, chats)
     app_server = TurnStartAppServer()
-    settings = make_runtime_settings(":danger-full-access", "on-request", "gpt-5-codex")
+    settings = make_runtime_settings(":danger-full-access", "on-request", "gpt-5-codex", "high")
     threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, settings)  # type: ignore[arg-type]
     runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=settings)  # type: ignore[arg-type]
 
@@ -1471,7 +1480,7 @@ async def test_app_server_run_uses_runtime_model_and_approval_policy(linux_tmp_p
 
     assert app_server.requests[0] == (
         "thread/settings/update",
-        {"threadId": "thread_1", "approvalPolicy": "on-request", "permissions": ":danger-full-access", "model": "gpt-5-codex"},
+        {"threadId": "thread_1", "approvalPolicy": "on-request", "permissions": ":danger-full-access", "model": "gpt-5-codex", "effort": "high"},
     )
     db.close()
 

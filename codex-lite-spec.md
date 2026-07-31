@@ -86,7 +86,7 @@ Codex HOMEは「自動」「Windows側 `.codex`」「WSL側 `$HOME/.codex`」か
 
 Codexの実行設定はWSL側の `settings.json` に保存し、スレッド作成時と送信前にapp-serverへ適用する。
 
-モデルは「既定」または任意入力のモデルIDから選択する。「既定」の場合はモデル値を送らず、app-server/Codex側の既定に従う。代表候補として `gpt-5`、`gpt-5-codex` を表示するが、候補の自動取得や複数経路のフォールバックは行わない。
+モデルと承認レベルはチャット入力欄から選択する。モデル候補はデーモンの `/models` を介して app-server の `model/list` から取得し、新しいモデルIDが返ればクライアントの変更なしで表示する。「既定」は空のモデル値としてCodex側の既定に従う。app-serverでモデル一覧を取得できない場合に限り、デーモンが持つ最小限の静的候補を表示する。
 
 自動圧縮は app-server 起動時の Codex config として有効化する。既定では
 `model_auto_compact_token_limit=100000` と
@@ -94,10 +94,11 @@ Codexの実行設定はWSL側の `settings.json` に保存し、スレッド作�
 
 承認方法は次から選択する。
 
-- 未信頼時に確認: `untrusted`
 - 失敗時に確認: `on-failure`
 - 必要時に確認: `on-request`
 - 確認しない: `never`
+
+これはCodexデスクトップアプリの3段階の承認レベルに合わせる。思考レベルはモデル一覧が返す `supportedReasoningEfforts` を使い、モデルごとの候補をチャット入力欄に表示する。候補を取得できない場合は「既定」「低」「中」「高」「最大」を表示し、選択値はapp-serverの `thread/settings/update` の `effort` に渡す。
 
 アクセスポリシーは次から選択する。
 

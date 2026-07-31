@@ -24,6 +24,7 @@ class AppServerRuntimeSettings:
     permission_profile: str
     approval_policy: str
     model: str
+    reasoning_effort: str = ""
 
 
 class AppServerThreadService:
@@ -798,6 +799,8 @@ async def _apply_codex_lite_thread_settings(app_server: AppServerClient, thread_
     }
     if settings.model:
         params["model"] = settings.model
+    if settings.reasoning_effort:
+        params["effort"] = settings.reasoning_effort
     await app_server.request("thread/settings/update", params)
 
 

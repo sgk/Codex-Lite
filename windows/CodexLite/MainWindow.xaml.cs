@@ -21,6 +21,7 @@ using CodexLite.ViewModels;
 using Microsoft.Win32;
 using Binding = System.Windows.Data.Binding;
 using Button = System.Windows.Controls.Button;
+using ComboBox = System.Windows.Controls.ComboBox;
 using DrawingIcon = System.Drawing.Icon;
 using DragDropEffects = System.Windows.DragDropEffects;
 using Key = System.Windows.Input.Key;
@@ -66,6 +67,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, int> _chatLoadVersions = new();
     private readonly Dictionary<string, int> _runActivityDepthByChat = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _runProgressTextByChat = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IReadOnlyList<string>> _reasoningEffortsByModel = new(StringComparer.Ordinal);
     private readonly DispatcherTimer _streamingTextTimer = new() { Interval = StreamingTextInterval };
     private readonly DispatcherTimer _messageRefreshTimer = new() { Interval = TimeSpan.FromSeconds(3) };
     private readonly DispatcherTimer _uiHeartbeatTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
@@ -125,6 +127,8 @@ public partial class MainWindow : Window
     private bool _pendingMessageScrollOffsetRestore;
     private bool _isCheckingDaemonHealth;
     private bool _isApplyingComposerHistory;
+    private bool _isLoadingRuntimeSettings;
+    private bool _isApplyingRuntimeSetting;
     private string _composerHistoryDraft = "";
     private int _automationDraftCounter;
     private int? _composerHistoryIndex;
@@ -139,10 +143,12 @@ public partial class MainWindow : Window
     private string? _persistedSelectedProjectId;
     private string? _persistedSelectedChatId;
     private string? _persistedSelectedTab;
+    private AppSettingsDto? _runtimeSettings;
 
     public MainWindow()
     {
         InitializeComponent();
+        InitializeChatRuntimeSettings();
         InitializeAutomationScheduleInputs();
         InitializeCommandButtonIcons();
         UpdateCommandButtonState();
@@ -2805,6 +2811,18 @@ public partial class MainWindow : Window
             {
                 ApplyRuntimeSettingsSelection(settings);
             }
+            try
+            {
+                var models = await _client.GetModelsAsync();
+                if (models?.AvailableModels is { Count: > 0 } availableModels)
+                {
+                    ApplyModelList(models);
+                }
+            }
+            catch
+            {
+                // The settings endpoint remains usable when app-server model discovery is unavailable.
+            }
             var text = await _client.GetDiagnosticsJsonAsync();
             using var document = JsonDocument.Parse(text);
             UpdateDiagnosticsSummary(document.RootElement);
@@ -3358,15 +3376,16 @@ public partial class MainWindow : Window
     private async void ApplyRuntimeSettings_Click(object sender, RoutedEventArgs e)
     {
         var profile = SelectedPermissionProfile();
-        var approvalPolicy = SelectedApprovalPolicy();
-        if (profile is null || approvalPolicy is null)
+        if (profile is null)
         {
             return;
         }
-        var model = SelectedModel();
+        var approvalPolicy = _runtimeSettings?.ApprovalPolicy ?? "on-request";
+        var model = _runtimeSettings?.Model ?? "";
+        var reasoningEffort = _runtimeSettings?.ReasoningEffort ?? "";
         await RunActivityAsync("実行設定を更新中...", async () =>
         {
-            var settings = await _client.UpdateSettingsAsync(profile, approvalPolicy, model);
+            var settings = await _client.UpdateSettingsAsync(profile, approvalPolicy, model, reasoningEffort);
             if (settings is not null)
             {
                 ApplyRuntimeSettingsSelection(settings);
@@ -3381,33 +3400,166 @@ public partial class MainWindow : Window
         return (PermissionProfileBox.SelectedItem as ComboBoxItem)?.Tag as string;
     }
 
-    private string? SelectedApprovalPolicy()
+    private static string? SelectedApprovalPolicy(ComboBox comboBox)
     {
-        return (ApprovalPolicyBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        return (comboBox.SelectedItem as ComboBoxItem)?.Tag as string;
     }
 
-    private string SelectedModel()
+    private static string SelectedModel(ComboBox comboBox)
     {
-        var text = (ModelBox.Text ?? "").Trim();
-        if (text.Length == 0 || text == "既定")
-        {
-            return "";
-        }
-        foreach (var item in ModelBox.Items.OfType<ComboBoxItem>())
-        {
-            if ((item.Tag as string) == text || string.Equals(item.Content as string, text, StringComparison.Ordinal))
-            {
-                return (item.Tag as string) ?? "";
-            }
-        }
-        return text;
+        return (comboBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+    }
+
+    private static string SelectedReasoningEffort(ComboBox comboBox)
+    {
+        return (comboBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
     }
 
     private void ApplyRuntimeSettingsSelection(AppSettingsDto settings)
     {
-        SelectPermissionProfile(settings.PermissionProfile);
-        SelectApprovalPolicy(settings.ApprovalPolicy);
-        SelectModel(settings.Model);
+        _runtimeSettings = settings;
+        UpdateModelChoices(settings.AvailableModels);
+        _isLoadingRuntimeSettings = true;
+        try
+        {
+            SelectPermissionProfile(settings.PermissionProfile);
+            SelectApprovalPolicy(NewChatApprovalPolicyBox, settings.ApprovalPolicy);
+            SelectApprovalPolicy(ChatApprovalPolicyBox, settings.ApprovalPolicy);
+            SelectModel(NewChatModelBox, settings.Model);
+            SelectModel(ChatModelBox, settings.Model);
+            SelectReasoningEffort(NewChatReasoningEffortBox, settings.ReasoningEffort);
+            SelectReasoningEffort(ChatReasoningEffortBox, settings.ReasoningEffort);
+        }
+        finally
+        {
+            _isLoadingRuntimeSettings = false;
+        }
+    }
+
+    private void InitializeChatRuntimeSettings()
+    {
+        PopulateApprovalPolicyChoices(NewChatApprovalPolicyBox);
+        PopulateApprovalPolicyChoices(ChatApprovalPolicyBox);
+        UpdateModelChoices(Array.Empty<string>());
+        UpdateReasoningEffortChoices(NewChatReasoningEffortBox, "");
+        UpdateReasoningEffortChoices(ChatReasoningEffortBox, "");
+    }
+
+    private static void PopulateApprovalPolicyChoices(ComboBox comboBox)
+    {
+        comboBox.Items.Clear();
+        foreach (var choice in new[]
+        {
+            (Value: "on-failure", Label: "失敗時に確認", Tip: "コマンドや操作が失敗したときに確認します"),
+            (Value: "on-request", Label: "必要時に確認", Tip: "Codexが必要と判断した操作の前に確認します"),
+            (Value: "never", Label: "確認しない", Tip: "確認なしで操作を実行します")
+        })
+        {
+            comboBox.Items.Add(new ComboBoxItem { Content = choice.Label, Tag = choice.Value, ToolTip = choice.Tip });
+        }
+    }
+
+    private void UpdateModelChoices(IEnumerable<string> models)
+    {
+        var choices = new List<string> { "" };
+        foreach (var model in models)
+        {
+            var normalized = (model ?? "").Trim();
+            if (normalized.Length > 0 && !choices.Contains(normalized, StringComparer.Ordinal))
+            {
+                choices.Add(normalized);
+            }
+        }
+        var selectedModel = _runtimeSettings?.Model;
+        if (!string.IsNullOrWhiteSpace(selectedModel) && !choices.Contains(selectedModel, StringComparer.Ordinal))
+        {
+            choices.Add(selectedModel);
+        }
+
+        _isLoadingRuntimeSettings = true;
+        try
+        {
+            PopulateModelChoices(NewChatModelBox, choices);
+            PopulateModelChoices(ChatModelBox, choices);
+            var currentModel = _runtimeSettings?.Model ?? "";
+            SelectModel(NewChatModelBox, currentModel);
+            SelectModel(ChatModelBox, currentModel);
+            UpdateReasoningEffortChoices(NewChatReasoningEffortBox, currentModel);
+            UpdateReasoningEffortChoices(ChatReasoningEffortBox, currentModel);
+        }
+        finally
+        {
+            _isLoadingRuntimeSettings = false;
+        }
+    }
+
+    private static void PopulateModelChoices(ComboBox comboBox, IEnumerable<string> choices)
+    {
+        comboBox.Items.Clear();
+        foreach (var model in choices)
+        {
+            comboBox.Items.Add(new ComboBoxItem { Content = model.Length == 0 ? "既定" : model, Tag = model });
+        }
+        if (comboBox.Items.Count > 0)
+        {
+            comboBox.SelectedIndex = 0;
+        }
+    }
+
+    private void ApplyModelList(ModelListDto modelList)
+    {
+        _reasoningEffortsByModel.Clear();
+        foreach (var pair in modelList.ReasoningEffortsByModel ?? new Dictionary<string, IReadOnlyList<string>>())
+        {
+            if (pair.Value is { Count: > 0 })
+            {
+                _reasoningEffortsByModel[pair.Key] = pair.Value;
+            }
+        }
+        UpdateModelChoices(modelList.AvailableModels);
+    }
+
+    private IReadOnlyList<string> ReasoningEffortsForModel(string model)
+    {
+        if (_reasoningEffortsByModel.TryGetValue(model, out var advertised) && advertised.Count > 0)
+        {
+            return new[] { "" }.Concat(advertised.Where(effort => !string.IsNullOrWhiteSpace(effort))).ToArray();
+        }
+        return model.EndsWith("luna", StringComparison.OrdinalIgnoreCase)
+            ? new[] { "", "low", "medium", "high", "xhigh", "max" }
+            : new[] { "", "low", "medium", "high", "xhigh", "max", "ultra" };
+    }
+
+    private void UpdateReasoningEffortChoices(ComboBox comboBox, string model)
+    {
+        var current = SelectedReasoningEffort(comboBox);
+        PopulateReasoningEffortChoices(comboBox, ReasoningEffortsForModel(model));
+        SelectReasoningEffort(comboBox, current);
+    }
+
+    private static void PopulateReasoningEffortChoices(ComboBox comboBox, IEnumerable<string> choices)
+    {
+        comboBox.Items.Clear();
+        foreach (var effort in choices.Distinct(StringComparer.Ordinal))
+        {
+            var label = effort switch
+            {
+                "" => "既定",
+                "minimal" => "最小",
+                "low" => "低",
+                "medium" => "中",
+                "high" => "高",
+                "xhigh" => "最大",
+                "max" => "最大+",
+                "ultra" => "超高",
+                _ => effort
+            };
+            comboBox.Items.Add(new ComboBoxItem { Content = label, Tag = effort, ToolTip = effort.Length == 0 ? "モデルの既定値" : $"reasoning effort: {effort}" });
+        }
+        if (comboBox.Items.Count > 0)
+        {
+            comboBox.SelectedIndex = 0;
+        }
     }
 
     private void SelectPermissionProfile(string profile)
@@ -3422,36 +3574,104 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SelectApprovalPolicy(string approvalPolicy)
+    private static void SelectApprovalPolicy(ComboBox comboBox, string approvalPolicy)
     {
-        foreach (var item in ApprovalPolicyBox.Items.OfType<ComboBoxItem>())
+        foreach (var item in comboBox.Items.OfType<ComboBoxItem>())
         {
             if ((item.Tag as string) == approvalPolicy)
             {
-                ApprovalPolicyBox.SelectedItem = item;
+                comboBox.SelectedItem = item;
                 return;
             }
         }
     }
 
-    private void SelectModel(string model)
+    private static void SelectModel(ComboBox comboBox, string model)
     {
-        foreach (var item in ModelBox.Items.OfType<ComboBoxItem>())
+        foreach (var item in comboBox.Items.OfType<ComboBoxItem>())
         {
             if ((item.Tag as string) == model)
             {
-                ModelBox.SelectedItem = item;
+                comboBox.SelectedItem = item;
                 return;
             }
         }
-        ModelBox.SelectedItem = null;
-        ModelBox.Text = model;
+        comboBox.SelectedIndex = 0;
+    }
+
+    private static void SelectReasoningEffort(ComboBox comboBox, string effort)
+    {
+        foreach (var item in comboBox.Items.OfType<ComboBoxItem>())
+        {
+            if ((item.Tag as string) == effort)
+            {
+                comboBox.SelectedItem = item;
+                return;
+            }
+        }
+        comboBox.SelectedIndex = 0;
+    }
+
+    private async void ChatRuntimeSetting_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isLoadingRuntimeSettings || _isApplyingRuntimeSetting || _runtimeSettings is null || sender is not ComboBox source)
+        {
+            return;
+        }
+
+        var isNewChat = ReferenceEquals(source, NewChatModelBox)
+            || ReferenceEquals(source, NewChatApprovalPolicyBox)
+            || ReferenceEquals(source, NewChatReasoningEffortBox);
+        var modelBox = isNewChat ? NewChatModelBox : ChatModelBox;
+        var approvalBox = isNewChat ? NewChatApprovalPolicyBox : ChatApprovalPolicyBox;
+        var reasoningBox = isNewChat ? NewChatReasoningEffortBox : ChatReasoningEffortBox;
+        if (ReferenceEquals(source, modelBox))
+        {
+            _isLoadingRuntimeSettings = true;
+            try
+            {
+                UpdateReasoningEffortChoices(reasoningBox, SelectedModel(modelBox));
+            }
+            finally
+            {
+                _isLoadingRuntimeSettings = false;
+            }
+        }
+        var approvalPolicy = SelectedApprovalPolicy(approvalBox);
+        if (approvalPolicy is null)
+        {
+            return;
+        }
+
+        _isApplyingRuntimeSetting = true;
+        try
+        {
+            var settings = await _client.UpdateSettingsAsync(
+                _runtimeSettings.PermissionProfile,
+                approvalPolicy,
+                SelectedModel(modelBox),
+                SelectedReasoningEffort(reasoningBox));
+            if (settings is not null)
+            {
+                ApplyRuntimeSettingsSelection(settings);
+                StatusText.Text = $"実行設定 | {DisplayRuntimeSettings(settings)}";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"実行設定の更新に失敗 | {ShortError(ex)}";
+        }
+        finally
+        {
+            _isApplyingRuntimeSetting = false;
+        }
     }
 
     private static string DisplayRuntimeSettings(AppSettingsDto settings)
     {
         var model = string.IsNullOrWhiteSpace(settings.Model) ? "既定" : settings.Model;
-        return $"{model}, {settings.ApprovalPolicy}, {settings.PermissionProfile}";
+        var effort = string.IsNullOrWhiteSpace(settings.ReasoningEffort) ? "思考:既定" : $"思考:{settings.ReasoningEffort}";
+        return $"{model}, {effort}, {settings.ApprovalPolicy}, {settings.PermissionProfile}";
     }
 
     private async void ChatFilterBox_TextChanged(object sender, TextChangedEventArgs e) => await RefreshProjectsAsync();

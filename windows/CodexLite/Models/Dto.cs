@@ -234,6 +234,13 @@ public sealed record AppSettingsDto(
     string PermissionProfile,
     string ApprovalPolicy,
     string Model,
+    string ReasoningEffort,
     IReadOnlyList<string> AvailablePermissionProfiles,
     IReadOnlyList<string> AvailableApprovalPolicies,
-    IReadOnlyList<string> AvailableModels);
+    IReadOnlyList<string> AvailableModels,
+    IReadOnlyList<string> AvailableReasoningEfforts);
+
+public sealed record ModelListDto(
+    IReadOnlyList<string> AvailableModels,
+    IReadOnlyDictionary<string, IReadOnlyList<string>> ReasoningEffortsByModel,
+    bool Dynamic);

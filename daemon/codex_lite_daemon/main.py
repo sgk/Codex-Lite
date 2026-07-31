@@ -131,6 +131,7 @@ def create_app(config: Config | None = None) -> Starlette:
             "permissionProfile": app_settings.permission_profile,
             "approvalPolicy": app_settings.approval_policy,
             "model": app_settings.model,
+            "reasoningEffort": app_settings.reasoning_effort,
             "autoCompactTokenLimit": cfg.auto_compact_token_limit,
             "autoCompactTokenLimitScope": cfg.auto_compact_token_limit_scope,
             "appServerRunning": app_server.is_running,
@@ -141,14 +142,20 @@ def create_app(config: Config | None = None) -> Starlette:
 
     @get("/settings")
     async def get_settings() -> dict:
-        return {
-            "permissionProfile": app_settings.permission_profile,
-            "approvalPolicy": app_settings.approval_policy,
-            "model": app_settings.model,
-            "availablePermissionProfiles": [":read-only", ":workspace", ":danger-full-access"],
-            "availableApprovalPolicies": ["untrusted", "on-failure", "on-request", "never"],
-            "availableModels": ["", "gpt-5", "gpt-5-codex"],
-        }
+        return _settings_out(app_settings, _static_model_options(app_settings.model))
+
+    @get("/models")
+    async def list_models() -> dict:
+        if not use_app_server:
+            return _model_list_out(_static_model_options(app_settings.model), {}, app_settings.model, dynamic=False)
+        try:
+            response = await app_server.request("model/list", {})
+            models, efforts_by_model = _model_catalog_from_response(response)
+            if models:
+                return _model_list_out(models, efforts_by_model, app_settings.model, dynamic=True)
+        except AppError:
+            pass
+        return _model_list_out(_static_model_options(app_settings.model), {}, app_settings.model, dynamic=False)
 
     @get("/usage/capacity")
     async def usage_capacity() -> dict:
@@ -164,15 +171,10 @@ def create_app(config: Config | None = None) -> Starlette:
             app_settings.approval_policy = _normalized_approval_policy(str(body.get("approvalPolicy") or ""))
         if "model" in body:
             app_settings.model = _normalized_model(str(body.get("model") or ""))
+        if "reasoningEffort" in body:
+            app_settings.reasoning_effort = _normalized_reasoning_effort(str(body.get("reasoningEffort") or ""))
         _save_app_settings(cfg, app_settings)
-        return {
-            "permissionProfile": app_settings.permission_profile,
-            "approvalPolicy": app_settings.approval_policy,
-            "model": app_settings.model,
-            "availablePermissionProfiles": [":read-only", ":workspace", ":danger-full-access"],
-            "availableApprovalPolicies": ["untrusted", "on-failure", "on-request", "never"],
-            "availableModels": ["", "gpt-5", "gpt-5-codex"],
-        }
+        return _settings_out(app_settings, _static_model_options(app_settings.model))
 
     @post("/shutdown")
     async def shutdown() -> dict:
@@ -518,10 +520,10 @@ def _normalized_approval_policy(value: str) -> str:
         "on-failure": "on-failure",
         "on_failure": "on-failure",
         "never": "never",
-        "untrusted": "untrusted",
+        "untrusted": "on-request",
     }
     normalized = aliases.get(value, value)
-    if normalized not in {"untrusted", "on-failure", "on-request", "never"}:
+    if normalized not in {"on-failure", "on-request", "never"}:
         raise AppError("validation_error", "Approval policy is invalid.", 400)
     return normalized
 
@@ -533,6 +535,96 @@ def _normalized_model(value: str) -> str:
     return normalized
 
 
+def _normalized_reasoning_effort(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    aliases = {"default": "", "none": ""}
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+        raise AppError("validation_error", "Reasoning effort is invalid.", 400)
+    return normalized
+
+
+def _static_model_options(selected: str = "") -> list[str]:
+    return _with_selected_model(["", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5", "gpt-5-codex"], selected)
+
+
+def _with_selected_model(models: list[str], selected: str) -> list[str]:
+    result: list[str] = []
+    for model in ["", *models, selected]:
+        if isinstance(model, str) and model not in result:
+            result.append(model)
+    return result
+
+
+def _model_catalog_from_response(response: object) -> tuple[list[str], dict[str, list[str]]]:
+    if not isinstance(response, dict):
+        return [], {}
+    candidates = response.get("models")
+    if not isinstance(candidates, list):
+        candidates = response.get("data")
+    if not isinstance(candidates, list):
+        return [], {}
+    result: list[str] = []
+    efforts_by_model: dict[str, list[str]] = {}
+    for item in candidates:
+        if isinstance(item, str):
+            model_id = item.strip()
+            efforts: object = None
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or item.get("model") or "").strip()
+            efforts = item.get("supportedReasoningEfforts") or item.get("reasoningEfforts")
+        else:
+            model_id = ""
+            efforts = None
+        if model_id and "\x00" not in model_id and len(model_id) <= 120 and model_id not in result:
+            result.append(model_id)
+            if isinstance(efforts, list):
+                normalized_efforts = []
+                for effort in efforts:
+                    if isinstance(effort, dict):
+                        effort = effort.get("reasoningEffort") or effort.get("id") or ""
+                    try:
+                        normalized = _normalized_reasoning_effort(str(effort))
+                    except AppError:
+                        continue
+                    if normalized and normalized not in normalized_efforts:
+                        normalized_efforts.append(normalized)
+                if normalized_efforts:
+                    efforts_by_model[model_id] = normalized_efforts
+    return result, efforts_by_model
+
+
+def _model_ids_from_response(response: object) -> list[str]:
+    return _model_catalog_from_response(response)[0]
+
+
+def _static_reasoning_efforts(model: str = "") -> list[str]:
+    if model.endswith("luna"):
+        return ["", "low", "medium", "high", "xhigh", "max"]
+    return ["", "low", "medium", "high", "xhigh", "max", "ultra"]
+
+
+def _model_list_out(models: list[str], efforts_by_model: dict[str, list[str]], selected: str, dynamic: bool) -> dict:
+    return {
+        "availableModels": _with_selected_model(models, selected),
+        "reasoningEffortsByModel": efforts_by_model,
+        "dynamic": dynamic,
+    }
+
+
+def _settings_out(settings: AppServerRuntimeSettings, models: list[str]) -> dict:
+    return {
+        "permissionProfile": settings.permission_profile,
+        "approvalPolicy": settings.approval_policy,
+        "model": settings.model,
+        "reasoningEffort": settings.reasoning_effort,
+        "availablePermissionProfiles": [":read-only", ":workspace", ":danger-full-access"],
+        "availableApprovalPolicies": ["on-failure", "on-request", "never"],
+        "availableModels": models,
+        "availableReasoningEfforts": _static_reasoning_efforts(settings.model),
+    }
+
+
 def _settings_path(config: Config) -> Path:
     return config.app_data_dir / "settings.json"
 
@@ -541,6 +633,7 @@ def _load_app_settings(config: Config) -> AppServerRuntimeSettings:
     permission_profile = config.permission_profile
     approval_policy = config.approval_policy
     model = config.model
+    reasoning_effort = ""
     path = _settings_path(config)
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -549,18 +642,22 @@ def _load_app_settings(config: Config) -> AppServerRuntimeSettings:
             permission_value = data.get("permissionProfile")
             approval_value = data.get("approvalPolicy")
             model_value = data.get("model")
+            reasoning_value = data.get("reasoningEffort")
             if isinstance(permission_value, str):
                 permission_profile = permission_value
             if isinstance(approval_value, str):
                 approval_policy = approval_value
             if isinstance(model_value, str):
                 model = model_value
+            if isinstance(reasoning_value, str):
+                reasoning_effort = reasoning_value
     except (OSError, json.JSONDecodeError, AppError):
         pass
     return AppServerRuntimeSettings(
         permission_profile=_normalized_permission_profile(permission_profile),
         approval_policy=_normalized_approval_policy(approval_policy),
         model=_normalized_model(model),
+        reasoning_effort=_normalized_reasoning_effort(reasoning_effort),
     )
 
 
@@ -573,6 +670,7 @@ def _save_app_settings(config: Config, settings: AppServerRuntimeSettings) -> No
                 "permissionProfile": settings.permission_profile,
                 "approvalPolicy": settings.approval_policy,
                 "model": settings.model,
+                "reasoningEffort": settings.reasoning_effort,
             },
             handle,
             ensure_ascii=False,
