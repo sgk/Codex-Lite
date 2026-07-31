@@ -87,6 +87,7 @@ public partial class MainWindow : Window
     private readonly HashSet<string> _persistedExpandedProjectIds = new();
     private readonly HashSet<string> _chatsWithUnloadedHistory = new(StringComparer.Ordinal);
     private readonly List<string> _persistedProjectOrderIds = new();
+    private readonly Dictionary<string, List<string>> _persistedChatOrderIdsByProject = new(StringComparer.Ordinal);
     private readonly List<string> _composerHistory = new();
     private string _textSizeSetting = "small";
     private string _codexHomeMode = DefaultCodexHomeMode();
@@ -99,6 +100,7 @@ public partial class MainWindow : Window
     private UsageWindowDto? _weeklyUsageWindow;
     private System.Windows.Point? _projectDragStart;
     private ProjectTreeItem? _projectDragItem;
+    private ChatTreeItem? _chatDragItem;
     private ProjectDto? _selectedProject;
     private ChatDto? _selectedChat;
     private string _currentFilePath = "";
@@ -838,15 +840,89 @@ public partial class MainWindow : Window
         ApplyProjectChats(projectItem, chats, preferredChatId, markUpdatedChats);
     }
 
+    private List<ChatDto> OrderChats(ProjectTreeItem projectItem, IEnumerable<ChatDto> chats)
+    {
+        var chatList = chats.ToList();
+        if (!_persistedChatOrderIdsByProject.TryGetValue(projectItem.Project.Id, out var savedOrder) || savedOrder.Count == 0)
+        {
+            return chatList;
+        }
+
+        var order = savedOrder
+            .Select((id, index) => new { id, index })
+            .GroupBy(item => item.id, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().index, StringComparer.Ordinal);
+        return chatList
+            .Select((chat, index) => new { chat, index })
+            .OrderBy(item => order.TryGetValue(item.chat.Id, out var savedIndex) ? savedIndex : int.MaxValue)
+            .ThenBy(item => item.index)
+            .Select(item => item.chat)
+            .ToList();
+    }
+
+    private void RememberChatOrder(ProjectTreeItem projectItem, IEnumerable<ChatDto> chats)
+    {
+        _persistedChatOrderIdsByProject[projectItem.Project.Id] = chats
+            .Select(chat => chat.Id)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private void RememberVisibleChatOrder(ProjectTreeItem projectItem, IEnumerable<ChatDto> visibleChats)
+    {
+        var visibleIds = visibleChats
+            .Select(chat => chat.Id)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (visibleIds.Count == 0)
+        {
+            return;
+        }
+
+        if (!_persistedChatOrderIdsByProject.TryGetValue(projectItem.Project.Id, out var savedOrder) || savedOrder.Count == 0)
+        {
+            _persistedChatOrderIdsByProject[projectItem.Project.Id] = visibleIds;
+            return;
+        }
+
+        var visibleIdSet = visibleIds.ToHashSet(StringComparer.Ordinal);
+        var remainingIds = savedOrder.Where(chatId => !visibleIdSet.Contains(chatId)).ToList();
+        var nextVisibleIndex = 0;
+        var nextRemainingIndex = 0;
+        var mergedOrder = new List<string>(Math.Max(savedOrder.Count, visibleIds.Count));
+        foreach (var chatId in savedOrder)
+        {
+            if (visibleIdSet.Contains(chatId))
+            {
+                if (nextVisibleIndex < visibleIds.Count)
+                {
+                    mergedOrder.Add(visibleIds[nextVisibleIndex++]);
+                }
+            }
+            else
+            {
+                mergedOrder.Add(remainingIds[nextRemainingIndex++]);
+            }
+        }
+        while (nextVisibleIndex < visibleIds.Count)
+        {
+            mergedOrder.Add(visibleIds[nextVisibleIndex++]);
+        }
+
+        _persistedChatOrderIdsByProject[projectItem.Project.Id] = mergedOrder;
+    }
+
     private void ApplyProjectChats(ProjectTreeItem projectItem, IEnumerable<ChatDto> chats, string? preferredChatId, bool markUpdatedChats = false)
     {
+        var orderedChats = OrderChats(projectItem, chats);
+        RememberChatOrder(projectItem, orderedChats);
         var existingById = projectItem.Chats
             .GroupBy(item => item.Chat.Id)
             .ToDictionary(group => group.Key, group => group.First());
         var targetItems = new HashSet<ChatTreeItem>();
         var targetIndex = 0;
 
-        foreach (var chat in chats)
+        foreach (var chat in orderedChats)
         {
             if (!ChatMatchesFilter(chat))
             {
@@ -1194,6 +1270,14 @@ public partial class MainWindow : Window
             {
                 _persistedProjectOrderIds.Add(projectId);
             }
+            _persistedChatOrderIdsByProject.Clear();
+            foreach (var pair in state?.ChatOrderIdsByProject ?? [])
+            {
+                _persistedChatOrderIdsByProject[pair.Key] = (pair.Value ?? [])
+                    .Where(chatId => !string.IsNullOrWhiteSpace(chatId))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+            }
             _textSizeSetting = NormalizeTextSize(state?.TextSize);
             ApplyTextSizeSetting(_textSizeSetting);
             _codexHomeMode = NormalizeCodexHomeMode(state?.CodexHomeMode) ?? DefaultCodexHomeMode();
@@ -1209,6 +1293,7 @@ public partial class MainWindow : Window
         {
             _persistedExpandedProjectIds.Clear();
             _persistedProjectOrderIds.Clear();
+            _persistedChatOrderIdsByProject.Clear();
             _textSizeSetting = "small";
             ApplyTextSizeSetting(_textSizeSetting);
             _codexHomeMode = DefaultCodexHomeMode();
@@ -1246,6 +1331,8 @@ public partial class MainWindow : Window
             _persistedProjectOrderIds.Clear();
             _persistedProjectOrderIds.AddRange(_projectTree.Select(item => item.Project.Id));
         }
+        var chatOrderIdsByProject = _persistedChatOrderIdsByProject
+            .ToDictionary(pair => pair.Key, pair => pair.Value.ToList(), StringComparer.Ordinal);
         var state = new UiState(
             _persistedExpandedProjectIds.OrderBy(id => id).ToList(),
             _persistedProjectOrderIds.ToList(),
@@ -1256,7 +1343,8 @@ public partial class MainWindow : Window
             _codexHomeMode,
             selectedProjectId,
             selectedChatId,
-            selectedTab);
+            selectedTab,
+            chatOrderIdsByProject);
         File.WriteAllText(_uiStatePath, JsonSerializer.Serialize(state, _json));
     }
 
@@ -2130,12 +2218,15 @@ public partial class MainWindow : Window
     {
         _projectDragStart = e.GetPosition(ProjectTree);
         _projectDragItem = ProjectItemFromOriginalSource(e.OriginalSource);
+        _chatDragItem = ChatItemFromOriginalSource(e.OriginalSource);
         ProjectTree.Focus();
     }
 
     private void ProjectTree_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        if (e.LeftButton != MouseButtonState.Pressed || _projectDragStart is not Point start || _projectDragItem is null)
+        if (e.LeftButton != MouseButtonState.Pressed
+            || _projectDragStart is not Point start
+            || (_projectDragItem is null && _chatDragItem is null))
         {
             return;
         }
@@ -2147,18 +2238,46 @@ public partial class MainWindow : Window
             return;
         }
 
-        DragDrop.DoDragDrop(ProjectTree, _projectDragItem.Project.Id, DragDropEffects.Move);
+        if (_chatDragItem is not null)
+        {
+            DragDrop.DoDragDrop(ProjectTree, _chatDragItem, DragDropEffects.Move);
+        }
+        else if (_projectDragItem is not null)
+        {
+            DragDrop.DoDragDrop(ProjectTree, _projectDragItem.Project.Id, DragDropEffects.Move);
+        }
         ClearProjectDropIndicators();
         _projectDragStart = null;
         _projectDragItem = null;
+        _chatDragItem = null;
     }
 
     private void ProjectTree_DragOver(object sender, System.Windows.DragEventArgs e)
     {
         var sourceProjectId = e.Data.GetData(typeof(string)) as string;
+        var sourceChat = e.Data.GetData(typeof(ChatTreeItem)) as ChatTreeItem;
+        var targetChat = ChatItemFromOriginalSource(e.OriginalSource);
         var targetProject = ProjectDropTargetFromOriginalSource(e.OriginalSource);
         var isProjectHeaderTarget = ProjectItemFromOriginalSource(e.OriginalSource) is not null;
         ClearProjectDropIndicators();
+
+        if (sourceChat is not null)
+        {
+            var canMoveChat = targetChat is not null
+                && targetChat.Chat.Id != sourceChat.Chat.Id
+                && targetChat.Project.Id == sourceChat.Project.Id;
+            var chatPlacement = canMoveChat ? ChatDropPlacement(e, targetChat) : null;
+            if (canMoveChat && targetChat is not null && chatPlacement is not null)
+            {
+                targetChat.ShowDropBefore = chatPlacement == ProjectDropPlacementKind.Before;
+                targetChat.ShowDropAfter = chatPlacement == ProjectDropPlacementKind.After;
+            }
+
+            e.Effects = canMoveChat ? DragDropEffects.Move : DragDropEffects.None;
+            e.Handled = true;
+            return;
+        }
+
         var placement = ProjectDropPlacement(e, targetProject, isProjectHeaderTarget);
         if (targetProject is not null && placement is not null)
         {
@@ -2181,6 +2300,52 @@ public partial class MainWindow : Window
     private void ProjectTree_Drop(object sender, System.Windows.DragEventArgs e)
     {
         var sourceProjectId = e.Data.GetData(typeof(string)) as string;
+        var sourceChat = e.Data.GetData(typeof(ChatTreeItem)) as ChatTreeItem;
+        if (sourceChat is not null)
+        {
+            var targetChat = ChatItemFromOriginalSource(e.OriginalSource);
+            var projectItem = FindProjectItem(sourceChat.Project.Id);
+            var chatPlacement = targetChat is not null && targetChat.Project.Id == sourceChat.Project.Id
+                ? ChatDropPlacement(e, targetChat)
+                : null;
+            ClearProjectDropIndicators();
+            if (projectItem is null
+                || targetChat is null
+                || targetChat.Chat.Id == sourceChat.Chat.Id
+                || targetChat.Project.Id != sourceChat.Project.Id
+                || chatPlacement is null)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            var chatSourceIndex = projectItem.Chats.IndexOf(sourceChat);
+            var chatTargetIndex = projectItem.Chats.IndexOf(targetChat);
+            if (chatSourceIndex < 0 || chatTargetIndex < 0)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            var chatInsertIndex = chatPlacement == ProjectDropPlacementKind.Before ? chatTargetIndex : chatTargetIndex + 1;
+            if (chatSourceIndex < chatInsertIndex)
+            {
+                chatInsertIndex--;
+            }
+            if (chatSourceIndex == chatInsertIndex)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            projectItem.Chats.Move(chatSourceIndex, Math.Clamp(chatInsertIndex, 0, projectItem.Chats.Count - 1));
+            RememberVisibleChatOrder(projectItem, projectItem.Chats.Select(item => item.Chat));
+            SaveUiState();
+            StatusText.Text = "chat order updated";
+            e.Handled = true;
+            return;
+        }
+
         var targetProject = ProjectDropTargetFromOriginalSource(e.OriginalSource);
         var isProjectHeaderTarget = ProjectItemFromOriginalSource(e.OriginalSource) is not null;
         if (sourceProjectId is null || targetProject is null || targetProject.Project.Id == sourceProjectId)
@@ -2234,6 +2399,28 @@ public partial class MainWindow : Window
         return position.Y < container.ActualHeight / 2 ? ProjectDropPlacementKind.Before : ProjectDropPlacementKind.After;
     }
 
+    private ProjectDropPlacementKind? ChatDropPlacement(System.Windows.DragEventArgs e, ChatTreeItem? targetChat)
+    {
+        if (targetChat is null)
+        {
+            return null;
+        }
+
+        if (e.OriginalSource is not DependencyObject source)
+        {
+            return ProjectDropPlacementKind.Before;
+        }
+
+        var container = FindVisualAncestor<TreeViewItem>(source);
+        if (container is null)
+        {
+            return ProjectDropPlacementKind.Before;
+        }
+
+        var position = e.GetPosition(container);
+        return position.Y < container.ActualHeight / 2 ? ProjectDropPlacementKind.Before : ProjectDropPlacementKind.After;
+    }
+
     private void ClearProjectDropIndicators()
     {
         foreach (var item in _projectTree)
@@ -2242,6 +2429,7 @@ public partial class MainWindow : Window
             item.ShowDropAfter = false;
             foreach (var chat in item.Chats)
             {
+                chat.ShowDropBefore = false;
                 chat.ShowDropAfter = false;
             }
         }
@@ -6568,6 +6756,17 @@ public partial class MainWindow : Window
         return container?.DataContext as ProjectTreeItem;
     }
 
+    private static ChatTreeItem? ChatItemFromOriginalSource(object originalSource)
+    {
+        if (originalSource is not DependencyObject source)
+        {
+            return null;
+        }
+
+        var container = FindVisualAncestor<TreeViewItem>(source);
+        return container?.DataContext as ChatTreeItem;
+    }
+
     private ProjectTreeItem? ProjectDropTargetFromOriginalSource(object originalSource)
     {
         if (originalSource is not DependencyObject source)
@@ -6671,7 +6870,8 @@ public sealed record UiState(
     string? CodexHomeMode = null,
     string? SelectedProjectId = null,
     string? SelectedChatId = null,
-    string? SelectedTab = null);
+    string? SelectedTab = null,
+    Dictionary<string, List<string>>? ChatOrderIdsByProject = null);
 
 public sealed record WindowPlacementState(
     double Left,

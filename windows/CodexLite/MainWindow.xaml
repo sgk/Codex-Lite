@@ -486,6 +486,12 @@
                             </Grid.ColumnDefinitions>
                             <Border Height="2"
                                     Background="#2F6FED"
+                                    VerticalAlignment="Top"
+                                    Panel.ZIndex="2"
+                                    Grid.ColumnSpan="3"
+                                    Visibility="{Binding ShowDropBefore, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            <Border Height="2"
+                                    Background="#2F6FED"
                                     VerticalAlignment="Bottom"
                                     Panel.ZIndex="2"
                                     Grid.ColumnSpan="3"

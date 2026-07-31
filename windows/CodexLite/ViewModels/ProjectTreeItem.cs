@@ -152,6 +152,7 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
 
     private bool _isEditing;
     private bool _isArchiving;
+    private bool _showDropBefore;
     private bool _showDropAfter;
     private bool _hasUnloadedHistory;
     private bool _isRunning;
@@ -200,6 +201,20 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
     }
 
     public bool IsAvailable => !IsArchiving;
+
+    public bool ShowDropBefore
+    {
+        get => _showDropBefore;
+        set
+        {
+            if (_showDropBefore == value)
+            {
+                return;
+            }
+            _showDropBefore = value;
+            OnPropertyChanged();
+        }
+    }
 
     public bool HasUnloadedHistory
     {
