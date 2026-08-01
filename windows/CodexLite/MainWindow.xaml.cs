@@ -4907,7 +4907,7 @@ public partial class MainWindow : Window
             return;
         }
         _composerHistoryIndex--;
-        ApplyComposerHistoryText(textBox, _composerHistory[_composerHistoryIndex.Value]);
+        ApplyComposerHistoryText(textBox, _composerHistory[_composerHistoryIndex.Value], caretAtEnd: false);
     }
 
     private void ShowNextComposerHistory(TextBox textBox)
@@ -4923,16 +4923,17 @@ public partial class MainWindow : Window
         _composerHistoryIndex++;
         ApplyComposerHistoryText(
             textBox,
-            _composerHistoryIndex == _composerHistory.Count ? _composerHistoryDraft : _composerHistory[_composerHistoryIndex.Value]);
+            _composerHistoryIndex == _composerHistory.Count ? _composerHistoryDraft : _composerHistory[_composerHistoryIndex.Value],
+            caretAtEnd: true);
     }
 
-    private void ApplyComposerHistoryText(TextBox textBox, string value)
+    private void ApplyComposerHistoryText(TextBox textBox, string value, bool caretAtEnd)
     {
         _isApplyingComposerHistory = true;
         try
         {
             textBox.Text = value;
-            textBox.CaretIndex = textBox.Text.Length;
+            textBox.CaretIndex = caretAtEnd ? textBox.Text.Length : 0;
         }
         finally
         {
