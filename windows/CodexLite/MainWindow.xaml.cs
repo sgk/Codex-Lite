@@ -4827,6 +4827,12 @@ public partial class MainWindow : Window
             {
                 return false;
             }
+            if (!IsCaretAtTextStart(textBox))
+            {
+                e.Handled = true;
+                MoveCaretToTextStart(textBox);
+                return true;
+            }
             e.Handled = true;
             ShowPreviousComposerHistory(textBox);
             return true;
@@ -4836,6 +4842,12 @@ public partial class MainWindow : Window
             if (!IsCaretOnLastTextLine(textBox))
             {
                 return false;
+            }
+            if (!IsCaretAtTextEnd(textBox))
+            {
+                e.Handled = true;
+                MoveCaretToTextEnd(textBox);
+                return true;
             }
             e.Handled = true;
             ShowNextComposerHistory(textBox);
@@ -4849,12 +4861,34 @@ public partial class MainWindow : Window
         return textBox.GetLineIndexFromCharacterIndex(Math.Clamp(textBox.CaretIndex, 0, textBox.Text.Length)) == 0;
     }
 
+    private static bool IsCaretAtTextStart(TextBox textBox)
+    {
+        return textBox.CaretIndex <= 0;
+    }
+
     private static bool IsCaretOnLastTextLine(TextBox textBox)
     {
         var caretLine = textBox.GetLineIndexFromCharacterIndex(Math.Clamp(textBox.CaretIndex, 0, textBox.Text.Length));
         var lastCharacterIndex = Math.Max(0, textBox.Text.Length - 1);
         var lastLine = textBox.GetLineIndexFromCharacterIndex(lastCharacterIndex);
         return caretLine >= lastLine;
+    }
+
+    private static bool IsCaretAtTextEnd(TextBox textBox)
+    {
+        return textBox.CaretIndex >= textBox.Text.Length;
+    }
+
+    private static void MoveCaretToTextStart(TextBox textBox)
+    {
+        textBox.CaretIndex = 0;
+        textBox.SelectionLength = 0;
+    }
+
+    private static void MoveCaretToTextEnd(TextBox textBox)
+    {
+        textBox.CaretIndex = textBox.Text.Length;
+        textBox.SelectionLength = 0;
     }
 
     private void ShowPreviousComposerHistory(TextBox textBox)
