@@ -771,7 +771,7 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Orientation="Horizontal">
                             <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                            <ComboBox x:Name="NewChatApprovalPolicyBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="操作前の確認方法" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                            <ComboBox x:Name="NewChatPermissionModeBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="Codexの権限モード" SelectionChanged="ChatRuntimeSetting_Changed"/>
                             <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
                             <ComboBox x:Name="NewChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
                             <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
@@ -1075,7 +1075,7 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Orientation="Horizontal">
                                 <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                                <ComboBox x:Name="ChatApprovalPolicyBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="操作前の確認方法" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                                <ComboBox x:Name="ChatPermissionModeBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="Codexの権限モード" SelectionChanged="ChatRuntimeSetting_Changed"/>
                                 <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
                                 <ComboBox x:Name="ChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
                                 <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
@@ -1403,13 +1403,7 @@
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                            <TextBlock Text="アクセスポリシー" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                            <ComboBox x:Name="PermissionProfileBox" Width="160" Margin="0,0,8,0">
-                                <ComboBoxItem Content="読み取り専用" Tag=":read-only"/>
-                                <ComboBoxItem Content="ワークスペース" Tag=":workspace"/>
-                                <ComboBoxItem Content="フルアクセス" Tag=":danger-full-access"/>
-                            </ComboBox>
-                            <Button Content="適用" Click="ApplyRuntimeSettings_Click"/>
+                            <TextBlock Text="権限・承認はチャット欄のCodexモードに連動します" Foreground="#666" VerticalAlignment="Center"/>
                         </StackPanel>
                         <Border Grid.Row="1"
                                 Background="#F6F8FA"

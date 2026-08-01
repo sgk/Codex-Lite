@@ -500,8 +500,8 @@ public sealed class DaemonClient
     public Task<ModelListDto?> GetModelsAsync(CancellationToken cancellationToken = default) =>
         _http.GetFromJsonAsync<ModelListDto>("/models", JsonOptions, cancellationToken);
 
-    public Task<AppSettingsDto?> UpdateSettingsAsync(string permissionProfile, string approvalPolicy, string model, string reasoningEffort = "", CancellationToken cancellationToken = default) =>
-        PatchAsync<AppSettingsDto>("/settings", new { permissionProfile, approvalPolicy, model, reasoningEffort }, cancellationToken);
+    public Task<AppSettingsDto?> UpdateSettingsAsync(string permissionProfile, string approvalPolicy, string model, string reasoningEffort = "", string approvalsReviewer = "user", CancellationToken cancellationToken = default) =>
+        PatchAsync<AppSettingsDto>("/settings", new { permissionProfile, approvalPolicy, approvalsReviewer, model, reasoningEffort }, cancellationToken);
 
     public async IAsyncEnumerable<SseEvent> StreamRunEventsAsync(string runId, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {

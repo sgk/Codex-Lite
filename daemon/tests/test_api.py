@@ -60,8 +60,8 @@ def make_test_config(tmp_path: Path) -> Config:
     )
 
 
-def make_runtime_settings(permission_profile: str = ":danger-full-access", approval_policy: str = "never", model: str = "", reasoning_effort: str = "") -> AppServerRuntimeSettings:
-    return AppServerRuntimeSettings(permission_profile=permission_profile, approval_policy=approval_policy, model=model, reasoning_effort=reasoning_effort)
+def make_runtime_settings(permission_profile: str = ":danger-full-access", approval_policy: str = "never", model: str = "", reasoning_effort: str = "", approvals_reviewer: str = "user") -> AppServerRuntimeSettings:
+    return AppServerRuntimeSettings(permission_profile=permission_profile, approval_policy=approval_policy, model=model, reasoning_effort=reasoning_effort, approvals_reviewer=approvals_reviewer)
 
 
 def test_codex_runner_prefers_desktop_bundle_then_vscode_before_path(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -584,6 +584,7 @@ async def test_runtime_settings_endpoint(linux_tmp_path: Path) -> None:
         assert initial.status_code == 200
         assert initial.json()["permissionProfile"] == ":danger-full-access"
         assert initial.json()["approvalPolicy"] == "never"
+        assert initial.json()["approvalsReviewer"] == "user"
         assert initial.json()["model"] == ""
         assert initial.json()["reasoningEffort"] == ""
         assert "gpt-5.6-luna" in initial.json()["availableModels"]
@@ -593,10 +594,11 @@ async def test_runtime_settings_endpoint(linux_tmp_path: Path) -> None:
         assert models.json()["dynamic"] is False
         assert "gpt-5.6-sol" in models.json()["availableModels"]
 
-        updated = await client.patch("/settings", json={"permissionProfile": ":workspace", "approvalPolicy": "on-request", "model": "gpt-5-codex", "reasoningEffort": "high"})
+        updated = await client.patch("/settings", json={"permissionProfile": ":workspace", "approvalPolicy": "on-request", "approvalsReviewer": "auto_review", "model": "gpt-5-codex", "reasoningEffort": "high"})
         assert updated.status_code == 200
         assert updated.json()["permissionProfile"] == ":workspace"
         assert updated.json()["approvalPolicy"] == "on-request"
+        assert updated.json()["approvalsReviewer"] == "auto_review"
         assert updated.json()["model"] == "gpt-5-codex"
         assert updated.json()["reasoningEffort"] == "high"
 
@@ -608,12 +610,17 @@ async def test_runtime_settings_endpoint(linux_tmp_path: Path) -> None:
         assert invalid_approval.status_code == 400
         assert invalid_approval.json()["error"]["code"] == "validation_error"
 
+        invalid_reviewer = await client.patch("/settings", json={"approvalsReviewer": "invalid"})
+        assert invalid_reviewer.status_code == 400
+        assert invalid_reviewer.json()["error"]["code"] == "validation_error"
+
     restarted = create_app(cfg)
     async with AsyncClient(transport=ASGITransport(app=restarted), base_url="http://test") as client:
         persisted = await client.get("/settings")
         assert persisted.status_code == 200
         assert persisted.json()["permissionProfile"] == ":workspace"
         assert persisted.json()["approvalPolicy"] == "on-request"
+        assert persisted.json()["approvalsReviewer"] == "auto_review"
         assert persisted.json()["model"] == "gpt-5-codex"
         assert persisted.json()["reasoningEffort"] == "high"
 
@@ -1372,7 +1379,7 @@ async def test_app_server_run_uses_chat_id_before_codex_session_id(linux_tmp_pat
 
     assert result["messageId"].startswith("msg_")
     assert app_server.requests == [
-        ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "permissions": ":danger-full-access"}),
+        ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "approvalsReviewer": "user", "permissions": ":danger-full-access"}),
         ("turn/start", {"threadId": "thread_1", "cwd": str(project_dir), "input": [{"type": "text", "text": "hello"}]}),
     ]
     db.close()
@@ -1453,7 +1460,7 @@ async def test_app_server_run_uses_runtime_settings(linux_tmp_path: Path) -> Non
 
     await runs.start_message_run(project_id, chat_id, "hello")
 
-    assert app_server.requests[0] == ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "on-request", "permissions": ":workspace", "model": "gpt-5-codex"})
+    assert app_server.requests[0] == ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "on-request", "approvalsReviewer": "user", "permissions": ":workspace", "model": "gpt-5-codex"})
     db.close()
 
 
@@ -1469,7 +1476,7 @@ async def test_app_server_run_uses_runtime_model_and_approval_policy(linux_tmp_p
     messages = MessageService(db, chats)
     transcripts = TranscriptImportService(cfg, projects, chats)
     app_server = TurnStartAppServer()
-    settings = make_runtime_settings(":danger-full-access", "on-request", "gpt-5-codex", "high")
+    settings = make_runtime_settings(":workspace", "on-request", "gpt-5-codex", "high", "auto_review")
     threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, settings)  # type: ignore[arg-type]
     runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=settings)  # type: ignore[arg-type]
 
@@ -1480,7 +1487,7 @@ async def test_app_server_run_uses_runtime_model_and_approval_policy(linux_tmp_p
 
     assert app_server.requests[0] == (
         "thread/settings/update",
-        {"threadId": "thread_1", "approvalPolicy": "on-request", "permissions": ":danger-full-access", "model": "gpt-5-codex", "effort": "high"},
+        {"threadId": "thread_1", "approvalPolicy": "on-request", "approvalsReviewer": "auto_review", "permissions": ":workspace", "model": "gpt-5-codex", "effort": "high"},
     )
     db.close()
 
@@ -1506,10 +1513,10 @@ async def test_app_server_run_resumes_not_loaded_thread_before_turn(linux_tmp_pa
     await runs.start_message_run(project_id, chat_id, "hello")
 
     assert app_server.requests == [
-        ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "permissions": ":danger-full-access"}),
+        ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "approvalsReviewer": "user", "permissions": ":danger-full-access"}),
         ("thread/read", {"threadId": "thread_1"}),
         ("thread/resume", {"threadId": "thread_1"}),
-        ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "permissions": ":danger-full-access"}),
+        ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "approvalsReviewer": "user", "permissions": ":danger-full-access"}),
         ("turn/start", {"threadId": "thread_1", "cwd": str(project_dir), "input": [{"type": "text", "text": "hello"}]}),
     ]
     db.close()
@@ -1731,7 +1738,7 @@ async def test_app_server_run_sends_attachments_to_turn(linux_tmp_path: Path) ->
     )
 
     assert app_server.requests == [
-        ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "permissions": ":danger-full-access"}),
+        ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "approvalsReviewer": "user", "permissions": ":danger-full-access"}),
         (
             "turn/start",
             {
@@ -1780,7 +1787,7 @@ async def test_app_server_run_does_not_replace_missing_imported_thread(linux_tmp
     assert exc_info.value.code == "thread_not_found"
     assert chats.get_chat(project_id, chat_id)["codexSessionId"] == "old_thread"
     assert app_server.requests == [
-        ("thread/settings/update", {"threadId": "old_thread", "approvalPolicy": "never", "permissions": ":danger-full-access"}),
+        ("thread/settings/update", {"threadId": "old_thread", "approvalPolicy": "never", "approvalsReviewer": "user", "permissions": ":danger-full-access"}),
         ("turn/start", {"threadId": "old_thread", "cwd": str(project_dir), "input": [{"type": "text", "text": "hello"}]}),
         ("thread/read", {"threadId": "old_thread"}),
         ("turn/start", {"threadId": "old_thread", "cwd": str(project_dir), "input": [{"type": "text", "text": "hello"}]}),

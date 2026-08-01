@@ -233,6 +233,7 @@ public sealed record SseEvent(string Event, string Data);
 public sealed record AppSettingsDto(
     string PermissionProfile,
     string ApprovalPolicy,
+    string ApprovalsReviewer,
     string Model,
     string ReasoningEffort,
     IReadOnlyList<string> AvailablePermissionProfiles,

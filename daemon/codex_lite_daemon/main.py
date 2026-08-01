@@ -130,6 +130,7 @@ def create_app(config: Config | None = None) -> Starlette:
             "runnerMode": cfg.runner_mode,
             "permissionProfile": app_settings.permission_profile,
             "approvalPolicy": app_settings.approval_policy,
+            "approvalsReviewer": app_settings.approvals_reviewer,
             "model": app_settings.model,
             "reasoningEffort": app_settings.reasoning_effort,
             "autoCompactTokenLimit": cfg.auto_compact_token_limit,
@@ -169,6 +170,8 @@ def create_app(config: Config | None = None) -> Starlette:
             app_settings.permission_profile = _normalized_permission_profile(str(body.get("permissionProfile") or ""))
         if "approvalPolicy" in body:
             app_settings.approval_policy = _normalized_approval_policy(str(body.get("approvalPolicy") or ""))
+        if "approvalsReviewer" in body:
+            app_settings.approvals_reviewer = _normalized_approvals_reviewer(str(body.get("approvalsReviewer") or ""))
         if "model" in body:
             app_settings.model = _normalized_model(str(body.get("model") or ""))
         if "reasoningEffort" in body:
@@ -528,6 +531,18 @@ def _normalized_approval_policy(value: str) -> str:
     return normalized
 
 
+def _normalized_approvals_reviewer(value: str) -> str:
+    aliases = {
+        "auto-review": "auto_review",
+        "autoReview": "auto_review",
+        "guardian_subagent": "auto_review",
+    }
+    normalized = aliases.get(value, value)
+    if normalized not in {"user", "auto_review"}:
+        raise AppError("validation_error", "Approvals reviewer is invalid.", 400)
+    return normalized
+
+
 def _normalized_model(value: str) -> str:
     normalized = value.strip()
     if "\x00" in normalized or len(normalized) > 120:
@@ -616,10 +631,12 @@ def _settings_out(settings: AppServerRuntimeSettings, models: list[str]) -> dict
     return {
         "permissionProfile": settings.permission_profile,
         "approvalPolicy": settings.approval_policy,
+        "approvalsReviewer": settings.approvals_reviewer,
         "model": settings.model,
         "reasoningEffort": settings.reasoning_effort,
         "availablePermissionProfiles": [":read-only", ":workspace", ":danger-full-access"],
         "availableApprovalPolicies": ["on-failure", "on-request", "never"],
+        "availableApprovalReviewers": ["user", "auto_review"],
         "availableModels": models,
         "availableReasoningEfforts": _static_reasoning_efforts(settings.model),
     }
@@ -634,6 +651,7 @@ def _load_app_settings(config: Config) -> AppServerRuntimeSettings:
     approval_policy = config.approval_policy
     model = config.model
     reasoning_effort = ""
+    approvals_reviewer = "user"
     path = _settings_path(config)
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -643,6 +661,7 @@ def _load_app_settings(config: Config) -> AppServerRuntimeSettings:
             approval_value = data.get("approvalPolicy")
             model_value = data.get("model")
             reasoning_value = data.get("reasoningEffort")
+            reviewer_value = data.get("approvalsReviewer")
             if isinstance(permission_value, str):
                 permission_profile = permission_value
             if isinstance(approval_value, str):
@@ -651,6 +670,8 @@ def _load_app_settings(config: Config) -> AppServerRuntimeSettings:
                 model = model_value
             if isinstance(reasoning_value, str):
                 reasoning_effort = reasoning_value
+            if isinstance(reviewer_value, str):
+                approvals_reviewer = reviewer_value
     except (OSError, json.JSONDecodeError, AppError):
         pass
     return AppServerRuntimeSettings(
@@ -658,6 +679,7 @@ def _load_app_settings(config: Config) -> AppServerRuntimeSettings:
         approval_policy=_normalized_approval_policy(approval_policy),
         model=_normalized_model(model),
         reasoning_effort=_normalized_reasoning_effort(reasoning_effort),
+        approvals_reviewer=_normalized_approvals_reviewer(approvals_reviewer),
     )
 
 
@@ -671,6 +693,7 @@ def _save_app_settings(config: Config, settings: AppServerRuntimeSettings) -> No
                 "approvalPolicy": settings.approval_policy,
                 "model": settings.model,
                 "reasoningEffort": settings.reasoning_effort,
+                "approvalsReviewer": settings.approvals_reviewer,
             },
             handle,
             ensure_ascii=False,

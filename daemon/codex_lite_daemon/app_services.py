@@ -25,6 +25,7 @@ class AppServerRuntimeSettings:
     approval_policy: str
     model: str
     reasoning_effort: str = ""
+    approvals_reviewer: str = "user"
 
 
 class AppServerThreadService:
@@ -795,6 +796,7 @@ async def _apply_codex_lite_thread_settings(app_server: AppServerClient, thread_
     params: dict[str, Any] = {
         "threadId": thread_id,
         "approvalPolicy": settings.approval_policy,
+        "approvalsReviewer": settings.approvals_reviewer,
         "permissions": settings.permission_profile,
     }
     if settings.model:

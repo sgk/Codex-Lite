@@ -92,19 +92,13 @@ Codexの実行設定はWSL側の `settings.json` に保存し、スレッド作�
 `model_auto_compact_token_limit=100000` と
 `model_auto_compact_token_limit_scope="total"` を指定し、同じ app-server 上で継続・新規作成される全チャットセッションに適用する。`CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT=0` を指定した場合は Codex Lite から自動圧縮設定を渡さない。
 
-承認方法は次から選択する。
+承認モードはCodexデスクトップアプリに合わせ、チャット入力欄から次の3つを選択する。
 
-- 失敗時に確認: `on-failure`
-- 必要時に確認: `on-request`
-- 確認しない: `never`
+- 承認を求める: `permissions=:workspace`、`approvalPolicy=on-request`、`approvalsReviewer=user`
+- 自動で承認: `permissions=:workspace`、`approvalPolicy=on-request`、`approvalsReviewer=auto_review`
+- フルアクセス: `permissions=:danger-full-access`、`approvalPolicy=never`、`approvalsReviewer=user`
 
-これはCodexデスクトップアプリの3段階の承認レベルに合わせる。思考レベルはモデル一覧が返す `supportedReasoningEfforts` を使い、モデルごとの候補をチャット入力欄に表示する。候補を取得できない場合は「既定」「低」「中」「高」「最大」を表示し、選択値はapp-serverの `thread/settings/update` の `effort` に渡す。
-
-アクセスポリシーは次から選択する。
-
-- 読み取り専用: `:read-only`
-- ワークスペース: `:workspace`
-- フルアクセス: `:danger-full-access`
+承認モードはサンドボックス境界と承認要求の扱いを一体として切り替える。別のアクセスポリシーを診断画面から変更する経路は設けない。思考レベルはモデル一覧が返す `supportedReasoningEfforts` を使い、モデルごとの候補をチャット入力欄に表示する。候補を取得できない場合は「既定」「低」「中」「高」「最大」を表示し、選択値はapp-serverの `thread/settings/update` の `effort` に渡す。
 
 ## 5. デーモン
 

@@ -3630,34 +3630,7 @@ public partial class MainWindow : Window
             : null;
     }
 
-    private async void ApplyRuntimeSettings_Click(object sender, RoutedEventArgs e)
-    {
-        var profile = SelectedPermissionProfile();
-        if (profile is null)
-        {
-            return;
-        }
-        var approvalPolicy = _runtimeSettings?.ApprovalPolicy ?? "on-request";
-        var model = _runtimeSettings?.Model ?? "";
-        var reasoningEffort = _runtimeSettings?.ReasoningEffort ?? "";
-        await RunActivityAsync("実行設定を更新中...", async () =>
-        {
-            var settings = await _client.UpdateSettingsAsync(profile, approvalPolicy, model, reasoningEffort);
-            if (settings is not null)
-            {
-                ApplyRuntimeSettingsSelection(settings);
-                StatusText.Text = $"実行設定 | {DisplayRuntimeSettings(settings)}";
-            }
-            await RefreshDiagnosticsAsync();
-        });
-    }
-
-    private string? SelectedPermissionProfile()
-    {
-        return (PermissionProfileBox.SelectedItem as ComboBoxItem)?.Tag as string;
-    }
-
-    private static string? SelectedApprovalPolicy(ComboBox comboBox)
+    private static string? SelectedPermissionMode(ComboBox comboBox)
     {
         return (comboBox.SelectedItem as ComboBoxItem)?.Tag as string;
     }
@@ -3679,9 +3652,9 @@ public partial class MainWindow : Window
         _isLoadingRuntimeSettings = true;
         try
         {
-            SelectPermissionProfile(settings.PermissionProfile);
-            SelectApprovalPolicy(NewChatApprovalPolicyBox, settings.ApprovalPolicy);
-            SelectApprovalPolicy(ChatApprovalPolicyBox, settings.ApprovalPolicy);
+            var mode = PermissionModeForSettings(settings);
+            SelectPermissionMode(NewChatPermissionModeBox, mode);
+            SelectPermissionMode(ChatPermissionModeBox, mode);
             SelectModel(NewChatModelBox, settings.Model);
             SelectModel(ChatModelBox, settings.Model);
             SelectReasoningEffort(NewChatReasoningEffortBox, settings.ReasoningEffort);
@@ -3695,25 +3668,56 @@ public partial class MainWindow : Window
 
     private void InitializeChatRuntimeSettings()
     {
-        PopulateApprovalPolicyChoices(NewChatApprovalPolicyBox);
-        PopulateApprovalPolicyChoices(ChatApprovalPolicyBox);
+        PopulatePermissionModeChoices(NewChatPermissionModeBox);
+        PopulatePermissionModeChoices(ChatPermissionModeBox);
         UpdateModelChoices(Array.Empty<string>());
         UpdateReasoningEffortChoices(NewChatReasoningEffortBox, "");
         UpdateReasoningEffortChoices(ChatReasoningEffortBox, "");
     }
 
-    private static void PopulateApprovalPolicyChoices(ComboBox comboBox)
+    private static void PopulatePermissionModeChoices(ComboBox comboBox)
     {
         comboBox.Items.Clear();
         foreach (var choice in new[]
         {
-            (Value: "on-failure", Label: "失敗時に確認", Tip: "コマンドや操作が失敗したときに確認します"),
-            (Value: "on-request", Label: "必要時に確認", Tip: "Codexが必要と判断した操作の前に確認します"),
-            (Value: "never", Label: "確認しない", Tip: "確認なしで操作を実行します")
+            (Value: "ask-for-approval", Label: "承認を求める", Tip: "ワークスペース内で動作し、範囲外の操作は確認します"),
+            (Value: "approve-for-me", Label: "自動で承認", Tip: "ワークスペース内で動作し、範囲外の確認を自動レビューします"),
+            (Value: "full-access", Label: "フルアクセス", Tip: "サンドボックスと確認を無効にします")
         })
         {
             comboBox.Items.Add(new ComboBoxItem { Content = choice.Label, Tag = choice.Value, ToolTip = choice.Tip });
         }
+    }
+
+    private static (string PermissionProfile, string ApprovalPolicy, string ApprovalsReviewer) SettingsForPermissionMode(string mode)
+    {
+        return mode switch
+        {
+            "approve-for-me" => (":workspace", "on-request", "auto_review"),
+            "full-access" => (":danger-full-access", "never", "user"),
+            _ => (":workspace", "on-request", "user")
+        };
+    }
+
+    private static string PermissionModeForSettings(AppSettingsDto settings)
+    {
+        if (string.Equals(settings.PermissionProfile, ":danger-full-access", StringComparison.Ordinal))
+        {
+            return "full-access";
+        }
+        return string.Equals(settings.ApprovalsReviewer, "auto_review", StringComparison.Ordinal)
+            ? "approve-for-me"
+            : "ask-for-approval";
+    }
+
+    private static string PermissionModeLabel(string mode)
+    {
+        return mode switch
+        {
+            "approve-for-me" => "自動で承認",
+            "full-access" => "フルアクセス",
+            _ => "承認を求める"
+        };
     }
 
     private void UpdateModelChoices(IEnumerable<string> models)
@@ -3819,23 +3823,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SelectPermissionProfile(string profile)
-    {
-        foreach (var item in PermissionProfileBox.Items.OfType<ComboBoxItem>())
-        {
-            if ((item.Tag as string) == profile)
-            {
-                PermissionProfileBox.SelectedItem = item;
-                return;
-            }
-        }
-    }
-
-    private static void SelectApprovalPolicy(ComboBox comboBox, string approvalPolicy)
+    private static void SelectPermissionMode(ComboBox comboBox, string mode)
     {
         foreach (var item in comboBox.Items.OfType<ComboBoxItem>())
         {
-            if ((item.Tag as string) == approvalPolicy)
+            if ((item.Tag as string) == mode)
             {
                 comboBox.SelectedItem = item;
                 return;
@@ -3877,10 +3869,10 @@ public partial class MainWindow : Window
         }
 
         var isNewChat = ReferenceEquals(source, NewChatModelBox)
-            || ReferenceEquals(source, NewChatApprovalPolicyBox)
+            || ReferenceEquals(source, NewChatPermissionModeBox)
             || ReferenceEquals(source, NewChatReasoningEffortBox);
         var modelBox = isNewChat ? NewChatModelBox : ChatModelBox;
-        var approvalBox = isNewChat ? NewChatApprovalPolicyBox : ChatApprovalPolicyBox;
+        var modeBox = isNewChat ? NewChatPermissionModeBox : ChatPermissionModeBox;
         var reasoningBox = isNewChat ? NewChatReasoningEffortBox : ChatReasoningEffortBox;
         if (ReferenceEquals(source, modelBox))
         {
@@ -3894,20 +3886,22 @@ public partial class MainWindow : Window
                 _isLoadingRuntimeSettings = false;
             }
         }
-        var approvalPolicy = SelectedApprovalPolicy(approvalBox);
-        if (approvalPolicy is null)
+        var mode = SelectedPermissionMode(modeBox);
+        if (mode is null)
         {
             return;
         }
+        var modeSettings = SettingsForPermissionMode(mode);
 
         _isApplyingRuntimeSetting = true;
         try
         {
             var settings = await _client.UpdateSettingsAsync(
-                _runtimeSettings.PermissionProfile,
-                approvalPolicy,
+                modeSettings.PermissionProfile,
+                modeSettings.ApprovalPolicy,
                 SelectedModel(modelBox),
-                SelectedReasoningEffort(reasoningBox));
+                SelectedReasoningEffort(reasoningBox),
+                modeSettings.ApprovalsReviewer);
             if (settings is not null)
             {
                 ApplyRuntimeSettingsSelection(settings);
@@ -3926,9 +3920,10 @@ public partial class MainWindow : Window
 
     private static string DisplayRuntimeSettings(AppSettingsDto settings)
     {
+        var mode = PermissionModeLabel(PermissionModeForSettings(settings));
         var model = string.IsNullOrWhiteSpace(settings.Model) ? "既定" : settings.Model;
         var effort = string.IsNullOrWhiteSpace(settings.ReasoningEffort) ? "思考:既定" : $"思考:{settings.ReasoningEffort}";
-        return $"{model}, {effort}, {settings.ApprovalPolicy}, {settings.PermissionProfile}";
+        return $"{mode}, {model}, {effort}";
     }
 
     private async void ChatFilterBox_TextChanged(object sender, TextChangedEventArgs e) => await RefreshProjectsAsync();
