@@ -4606,7 +4606,7 @@ public partial class MainWindow : Window
     {
         if (GetChatFromMenu(sender) is ChatTreeItem item)
         {
-            await BeginEditChatAsync(item.Chat.Id);
+            await BeginEditChatAsync(item.Project.Id, item.Chat.Id);
         }
     }
 
@@ -4639,7 +4639,7 @@ public partial class MainWindow : Window
             if (ProjectTree.SelectedItem is ChatTreeItem chatItem)
             {
                 await SelectChatAsync(chatItem);
-                await BeginEditChatAsync(chatItem.Chat.Id);
+                await BeginEditChatAsync(chatItem.Project.Id, chatItem.Chat.Id);
             }
             else if (ProjectTree.SelectedItem is ProjectTreeItem projectItem)
             {
