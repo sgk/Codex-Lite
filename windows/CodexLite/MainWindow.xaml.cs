@@ -85,7 +85,7 @@ public partial class MainWindow : Window
         "ui-performance.log");
     private readonly CancellationTokenSource _uiWatchdogCts = new();
     private readonly HashSet<string> _persistedExpandedProjectIds = new();
-    private readonly HashSet<string> _chatsWithUnloadedHistory = new(StringComparer.Ordinal);
+    private readonly HashSet<(string ProjectId, string ChatId)> _chatsWithUnloadedHistory = new();
     private readonly List<string> _persistedProjectOrderIds = new();
     private readonly Dictionary<string, List<string>> _persistedChatOrderIdsByProject = new(StringComparer.Ordinal);
     private readonly List<string> _composerHistory = new();
@@ -148,6 +148,7 @@ public partial class MainWindow : Window
     private string? _persistedSelectedChatId;
     private string? _persistedSelectedTab;
     private AppSettingsDto? _runtimeSettings;
+    private long _selectionGeneration;
 
     public MainWindow()
     {
@@ -568,6 +569,7 @@ public partial class MainWindow : Window
 
     private async Task RefreshProjectsAsync(string? preferredChatId)
     {
+        _selectionGeneration++;
         BeginProjectTreeLoading("プロジェクトを読み込み中...");
         var projectTreeLoadingEnded = false;
         var selectedProjectId = _selectedProject?.Id ?? _persistedSelectedProjectId;
@@ -951,16 +953,16 @@ public partial class MainWindow : Window
                     projectItem.Chats.Move(currentIndex, targetIndex);
                 }
             }
-            chatItem.HasUnloadedHistory = _chatsWithUnloadedHistory.Contains(chat.Id);
+            chatItem.HasUnloadedHistory = _chatsWithUnloadedHistory.Contains((projectItem.Project.Id, chat.Id));
             chatItem.IsRunning = IsChatRunning(chat.Id);
             if (markUpdatedChats
                 && previousUpdatedAt is not null
                 && !string.Equals(previousUpdatedAt, chat.UpdatedAt, StringComparison.Ordinal))
             {
-                MarkChatUnreadIfConversationNotVisible(chat.Id);
+                MarkChatUnreadIfConversationNotVisible(projectItem.Project.Id, chat.Id);
             }
             targetItems.Add(chatItem);
-            if (_selectedChat?.Id == chat.Id)
+            if (_selectedProject?.Id == projectItem.Project.Id && _selectedChat?.Id == chat.Id)
             {
                 _selectedProject = projectItem.Project;
                 _selectedChat = chat;
@@ -1644,8 +1646,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task SelectProjectAsync(ProjectDto project)
+    private async Task SelectProjectAsync(ProjectDto project, long? requestedGeneration = null)
     {
+        var generation = requestedGeneration ?? ++_selectionGeneration;
         _selectedProject = project;
         _selectedChat = null;
         _messages.Clear();
@@ -1655,10 +1658,18 @@ public partial class MainWindow : Window
         {
             await LoadProjectChatsAsync(projectItem);
         }
+        if (!IsSelectionCurrent(generation, project.Id, null))
+        {
+            return;
+        }
         UpdateCommandButtonState();
         UpdateRightPaneVisibility();
         _ = RefreshUsageCapacityAsync();
         await RefreshFilesAsync("");
+        if (!IsSelectionCurrent(generation, project.Id, null))
+        {
+            return;
+        }
         StatusText.Text = $"project | {project.Name} | {project.Path}";
         NewChatMessageBox.Focus();
         SaveUiState();
@@ -1666,6 +1677,7 @@ public partial class MainWindow : Window
 
     private void SelectProjectWithoutLoading(ProjectDto project)
     {
+        _selectionGeneration++;
         _selectedProject = project;
         _selectedChat = null;
         _messages.Clear();
@@ -1678,8 +1690,9 @@ public partial class MainWindow : Window
         SaveUiState();
     }
 
-    private async Task SelectChatAsync(ChatTreeItem item)
+    private async Task SelectChatAsync(ChatTreeItem item, long? requestedGeneration = null)
     {
+        var generation = requestedGeneration ?? ++_selectionGeneration;
         if (FindProjectItem(item.Project.Id) is ProjectTreeItem projectItem)
         {
             var currentItem = projectItem.Chats.FirstOrDefault(chatItem => chatItem.Chat.Id == item.Chat.Id);
@@ -1703,12 +1716,31 @@ public partial class MainWindow : Window
         UpdateRightPaneVisibility();
         MarkSelectedConversationSeen();
         await RefreshMessagesAsync();
+        if (!IsSelectionCurrent(generation, item.Project.Id, item.Chat.Id))
+        {
+            return;
+        }
         await RefreshFilesAsync("");
+        if (!IsSelectionCurrent(generation, item.Project.Id, item.Chat.Id))
+        {
+            return;
+        }
         await RefreshAutomationsAsync();
+        if (!IsSelectionCurrent(generation, item.Project.Id, item.Chat.Id))
+        {
+            return;
+        }
         StatusText.Text = item.Chat.CanContinue
             ? $"chat | {item.Project.Name} | {item.Chat.Title}"
             : $"chat | {item.Project.Name} | {item.Chat.Title} | read-only | {item.Chat.ContinueDisabledReason}";
         SaveUiState();
+    }
+
+    private bool IsSelectionCurrent(long generation, string projectId, string? chatId)
+    {
+        return generation == _selectionGeneration
+            && _selectedProject?.Id == projectId
+            && _selectedChat?.Id == chatId;
     }
 
     private void UpdateRightPaneVisibility()
@@ -2199,13 +2231,14 @@ public partial class MainWindow : Window
 
         try
         {
+            var generation = ++_selectionGeneration;
             if (e.NewValue is ProjectTreeItem projectItem)
             {
-                await SelectProjectAsync(projectItem.Project);
+                await SelectProjectAsync(projectItem.Project, generation);
             }
             else if (e.NewValue is ChatTreeItem chatItem)
             {
-                await SelectChatAsync(chatItem);
+                await SelectChatAsync(chatItem, generation);
             }
         }
         catch (Exception ex)
@@ -4071,6 +4104,7 @@ public partial class MainWindow : Window
         {
             return;
         }
+        _selectionGeneration++;
         _selectedProject = project;
         _selectedChat = null;
         _messages.Clear();
@@ -4082,16 +4116,16 @@ public partial class MainWindow : Window
 
     private async void RenameChat_Click(object sender, RoutedEventArgs e)
     {
-        if (_selectedChat is not ChatDto chat)
+        if (_selectedProject is not ProjectDto project || _selectedChat is not ChatDto chat)
         {
             return;
         }
-        await BeginEditChatAsync(chat.Id);
+        await BeginEditChatAsync(project.Id, chat.Id);
     }
 
-    private async Task BeginEditChatAsync(string chatId)
+    private async Task BeginEditChatAsync(string projectId, string chatId)
     {
-        var item = FindChatItem(chatId);
+        var item = FindChatItem(projectId, chatId);
         if (item is null)
         {
             return;
@@ -4115,25 +4149,52 @@ public partial class MainWindow : Window
         }, DispatcherPriority.Loaded);
     }
 
+    private ChatTreeItem? FindChatItem(string projectId, string chatId)
+    {
+        return FindProjectItem(projectId)?.Chats.FirstOrDefault(item => item.Chat.Id == chatId);
+    }
+
     private ChatTreeItem? FindChatItem(string chatId)
     {
         return _projectTree.SelectMany(project => project.Chats).FirstOrDefault(item => item.Chat.Id == chatId);
     }
 
-    private void SetChatUnloadedHistoryIndicator(string chatId, bool hasUnloadedHistory)
+    private string? ProjectIdForChat(string chatId)
     {
+        if (_activeRunsByChat.TryGetValue(chatId, out var activeRun))
+        {
+            return activeRun.ProjectId;
+        }
+        if (_selectedChat?.Id == chatId)
+        {
+            return _selectedProject?.Id;
+        }
+        return FindChatItem(chatId)?.Project.Id;
+    }
+
+    private void SetChatUnloadedHistoryIndicator(string projectId, string chatId, bool hasUnloadedHistory)
+    {
+        var key = (projectId, chatId);
         if (hasUnloadedHistory)
         {
-            _chatsWithUnloadedHistory.Add(chatId);
+            _chatsWithUnloadedHistory.Add(key);
         }
         else
         {
-            _chatsWithUnloadedHistory.Remove(chatId);
+            _chatsWithUnloadedHistory.Remove(key);
         }
 
-        if (FindChatItem(chatId) is { } item)
+        if (FindChatItem(projectId, chatId) is { } item)
         {
             item.HasUnloadedHistory = hasUnloadedHistory;
+        }
+    }
+
+    private void SetChatUnloadedHistoryIndicator(string chatId, bool hasUnloadedHistory)
+    {
+        if (ProjectIdForChat(chatId) is { } projectId)
+        {
+            SetChatUnloadedHistoryIndicator(projectId, chatId, hasUnloadedHistory);
         }
     }
 
@@ -4150,20 +4211,32 @@ public partial class MainWindow : Window
         }
     }
 
-    private void MarkChatUnreadIfConversationNotVisible(string chatId)
+    private void MarkChatUnreadIfConversationNotVisible(string projectId, string chatId)
     {
-        if (_selectedChat?.Id == chatId && ReferenceEquals(MainTabs.SelectedItem, ConversationTab))
+        if (_selectedProject?.Id == projectId
+            && _selectedChat?.Id == chatId
+            && ReferenceEquals(MainTabs.SelectedItem, ConversationTab))
         {
             return;
         }
-        SetChatUnloadedHistoryIndicator(chatId, true);
+        SetChatUnloadedHistoryIndicator(projectId, chatId, true);
+    }
+
+    private void MarkChatUnreadIfConversationNotVisible(string chatId)
+    {
+        if (ProjectIdForChat(chatId) is { } projectId)
+        {
+            MarkChatUnreadIfConversationNotVisible(projectId, chatId);
+        }
     }
 
     private void MarkSelectedConversationSeen()
     {
-        if (_selectedChat is ChatDto chat && ReferenceEquals(MainTabs.SelectedItem, ConversationTab))
+        if (_selectedProject is ProjectDto project
+            && _selectedChat is ChatDto chat
+            && ReferenceEquals(MainTabs.SelectedItem, ConversationTab))
         {
-            SetChatUnloadedHistoryIndicator(chat.Id, false);
+            SetChatUnloadedHistoryIndicator(project.Id, chat.Id, false);
         }
     }
 
@@ -4323,6 +4396,8 @@ public partial class MainWindow : Window
                         return;
                     }
 
+                    parentItem.IsExpanded = true;
+                    projectContainer.IsExpanded = true;
                     projectContainer.UpdateLayout();
                     if (projectContainer.ItemContainerGenerator.ContainerFromItem(chatItem) is TreeViewItem chatContainer)
                     {
@@ -5240,6 +5315,7 @@ public partial class MainWindow : Window
         projectItem.IsExpanded = true;
         var chatItem = new ChatTreeItem(project, chat);
         projectItem.Chats.Insert(0, chatItem);
+        RememberChatOrder(projectItem, projectItem.Chats.Select(item => item.Chat));
         _ = SelectTreeItemAsync(chatItem);
     }
 
