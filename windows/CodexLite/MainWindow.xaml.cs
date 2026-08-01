@@ -4823,49 +4823,38 @@ public partial class MainWindow : Window
         }
         if (e.Key == Key.Up)
         {
-            e.Handled = true;
-            if (!IsCaretAtTextStart(textBox))
+            if (!IsCaretOnFirstTextLine(textBox))
             {
-                MoveCaretToTextStart(textBox);
-                return true;
+                return false;
             }
+            e.Handled = true;
             ShowPreviousComposerHistory(textBox);
             return true;
         }
         if (e.Key == Key.Down)
         {
-            e.Handled = true;
-            if (!IsCaretAtTextEnd(textBox))
+            if (!IsCaretOnLastTextLine(textBox))
             {
-                MoveCaretToTextEnd(textBox);
-                return true;
+                return false;
             }
+            e.Handled = true;
             ShowNextComposerHistory(textBox);
             return true;
         }
         return false;
     }
 
-    private static bool IsCaretAtTextStart(TextBox textBox)
+    private static bool IsCaretOnFirstTextLine(TextBox textBox)
     {
-        return textBox.CaretIndex <= 0;
+        return textBox.GetLineIndexFromCharacterIndex(Math.Clamp(textBox.CaretIndex, 0, textBox.Text.Length)) == 0;
     }
 
-    private static bool IsCaretAtTextEnd(TextBox textBox)
+    private static bool IsCaretOnLastTextLine(TextBox textBox)
     {
-        return textBox.CaretIndex >= textBox.Text.Length;
-    }
-
-    private static void MoveCaretToTextStart(TextBox textBox)
-    {
-        textBox.CaretIndex = 0;
-        textBox.SelectionLength = 0;
-    }
-
-    private static void MoveCaretToTextEnd(TextBox textBox)
-    {
-        textBox.CaretIndex = textBox.Text.Length;
-        textBox.SelectionLength = 0;
+        var caretLine = textBox.GetLineIndexFromCharacterIndex(Math.Clamp(textBox.CaretIndex, 0, textBox.Text.Length));
+        var lastCharacterIndex = Math.Max(0, textBox.Text.Length - 1);
+        var lastLine = textBox.GetLineIndexFromCharacterIndex(lastCharacterIndex);
+        return caretLine >= lastLine;
     }
 
     private void ShowPreviousComposerHistory(TextBox textBox)
