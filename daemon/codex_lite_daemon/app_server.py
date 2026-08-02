@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .deepseek import DEEPSEEK_PROVIDER, ensure_model_catalog
 from .errors import AppError
 from .process_env import codex_process_env
 from .runner.codex_runner import CodexRunner
@@ -32,6 +33,8 @@ class AppServerClient:
         self._subscribers: list[asyncio.Queue[AppServerNotification]] = []
         self._stderr_tail: list[str] = []
         self._last_env: dict[str, str] = {}
+        self._desired_model_provider = "openai"
+        self._active_model_provider: str | None = None
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._reader_task: asyncio.Task | None = None
@@ -85,16 +88,18 @@ class AppServerClient:
             self._subscribers.remove(queue)
 
     async def ensure_started(self) -> None:
-        if self.is_running:
+        if self.is_running and self._active_model_provider == self._desired_model_provider:
             return
         async with self._start_lock:
-            if self.is_running:
+            if self.is_running and self._active_model_provider == self._desired_model_provider:
                 return
+            if self.is_running:
+                await self.close()
             codex = await self.codex_runner.resolve()
             env = self._env()
             self._last_env = dict(env)
             self._process = await asyncio.create_subprocess_exec(
-                *self._command_args(codex),
+                *self._command_args(codex, self._desired_model_provider),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -122,11 +127,16 @@ class AppServerClient:
                 raise AppError("app_server_timeout", "Codex app-server initialize timed out.", 504) from exc
             if "userAgent" not in response:
                 raise AppError("app_server_initialize_failed", "Codex app-server did not initialize.", 503)
+            self._active_model_provider = self._desired_model_provider
             await self.notify("initialized")
+
+    def set_model_provider(self, provider: str) -> None:
+        self._desired_model_provider = provider if provider == DEEPSEEK_PROVIDER else "openai"
 
     async def close(self) -> None:
         process = self._process
         self._process = None
+        self._active_model_provider = None
         for future in self._pending.values():
             if not future.done():
                 future.cancel()
@@ -205,7 +215,7 @@ class AppServerClient:
     def _env(self) -> dict[str, str]:
         return codex_process_env(self.config)
 
-    def _command_args(self, codex: str) -> list[str]:
+    def _command_args(self, codex: str, model_provider: str | None = None) -> list[str]:
         args = [codex]
         if self.config.auto_compact_token_limit > 0:
             args.extend(
@@ -214,6 +224,27 @@ class AppServerClient:
                     f"model_auto_compact_token_limit={self.config.auto_compact_token_limit}",
                     "-c",
                     f'model_auto_compact_token_limit_scope="{self.config.auto_compact_token_limit_scope}"',
+                ]
+            )
+        provider = model_provider or self._desired_model_provider
+        if provider == DEEPSEEK_PROVIDER:
+            catalog_path = ensure_model_catalog(self.config.app_data_dir)
+            args.extend(
+                [
+                    "-c",
+                    'model="deepseek-v4-flash"',
+                    "-c",
+                    'model_provider="deepseek"',
+                    "-c",
+                    f"model_catalog_json={json.dumps(str(catalog_path), ensure_ascii=False)}",
+                    "-c",
+                    'model_providers.deepseek.name="DeepSeek"',
+                    "-c",
+                    'model_providers.deepseek.base_url="https://api.deepseek.com/"',
+                    "-c",
+                    'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"',
+                    "-c",
+                    'model_providers.deepseek.wire_api="responses"',
                 ]
             )
         args.extend(["app-server", "--listen", "stdio://"])

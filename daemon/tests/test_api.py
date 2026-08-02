@@ -17,8 +17,9 @@ from codex_lite_daemon.codex_state import CodexStateService
 from codex_lite_daemon.config import Config, default_config
 from codex_lite_daemon.db import Database
 from codex_lite_daemon.errors import AppError
-from codex_lite_daemon.main import create_app, message_page
+from codex_lite_daemon.main import _model_list_out, create_app, message_page
 import codex_lite_daemon.process_env as process_env
+import codex_lite_daemon.deepseek as deepseek
 from codex_lite_daemon.process_env import codex_process_env
 from codex_lite_daemon.run_service import EventHub
 from codex_lite_daemon.runner.codex_runner import CodexRunner
@@ -188,6 +189,41 @@ def test_codex_process_env_falls_back_when_login_shell_fails(linux_tmp_path: Pat
 
     assert env["PATH"] == process_env.DEFAULT_PATH
     assert env["CODEX_HOME"] == str(cfg.codex_home)
+
+
+def test_codex_process_env_loads_deepseek_key_from_user_file(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = linux_tmp_path / "home"
+    secret_path = home / ".config" / "codex-lite" / "deepseek.env"
+    secret_path.parent.mkdir(parents=True)
+    secret_path.write_text("DEEPSEEK_API_KEY=sk-test-only\n", encoding="utf-8")
+    monkeypatch.setattr(deepseek.Path, "home", lambda: home)
+    monkeypatch.setattr(process_env, "_LOGIN_ENV", {"PATH": process_env.DEFAULT_PATH})
+
+    env = codex_process_env(make_test_config(linux_tmp_path))
+
+    assert env["DEEPSEEK_API_KEY"] == "sk-test-only"
+
+
+def test_deepseek_app_server_command_uses_responses_provider(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    client = AppServerClient(cfg, CodexRunner(cfg))
+
+    args = client._command_args("/opt/codex", "deepseek")
+
+    assert 'model_provider="deepseek"' in args
+    assert 'model="deepseek-v4-flash"' in args
+    assert 'model_providers.deepseek.wire_api="responses"' in args
+    assert (cfg.app_data_dir / "deepseek-models.json").exists()
+
+
+def test_model_list_adds_configured_deepseek_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(deepseek, "deepseek_api_key_configured", lambda: True)
+
+    result = _model_list_out(["gpt-5.6-sol"], {}, "", dynamic=True)
+
+    assert "gpt-5.6-sol" in result["availableModels"]
+    assert "deepseek-v4-flash" in result["availableModels"]
+    assert result["reasoningEffortsByModel"]["deepseek-v4-flash"] == ["low", "high", "max"]
 
 
 def test_app_server_progress_notifications_have_readable_summaries() -> None:

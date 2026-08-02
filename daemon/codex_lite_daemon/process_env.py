@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from .config import Config
+from .deepseek import DEEPSEEK_API_KEY_ENV, read_deepseek_api_key
 
 
 DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib"
@@ -38,6 +39,7 @@ _SAFE_LOGIN_ENV_NAMES = {
 
 def codex_process_env(config: Config) -> dict[str, str]:
     env = _login_shell_env()
+    deepseek_api_key = read_deepseek_api_key()
     env.update(
         {
             "HOME": str(Path.home()),
@@ -48,6 +50,8 @@ def codex_process_env(config: Config) -> dict[str, str]:
             "PATH": env.get("PATH") or DEFAULT_PATH,
         }
     )
+    if deepseek_api_key:
+        env[DEEPSEEK_API_KEY_ENV] = deepseek_api_key
     return env
 
 

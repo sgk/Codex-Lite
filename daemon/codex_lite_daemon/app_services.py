@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .app_server import AppServerClient, AppServerNotification
+from .deepseek import DEEPSEEK_PROVIDER, model_provider_for_model
 from .errors import AppError
 from .run_service import EventHub
 from .services import ChatService, MessageService, ProjectService
@@ -48,7 +49,13 @@ class AppServerThreadService:
 
     async def create_chat(self, project_id: str, title: str | None = None) -> dict:
         project = self.projects.get_project_row(project_id)
-        response = await self.app_server.request("thread/start", {"cwd": project["path"]})
+        start_params: dict[str, Any] = {"cwd": project["path"]}
+        if self.settings.model:
+            start_params["model"] = self.settings.model
+            provider = model_provider_for_model(self.settings.model)
+            if provider == DEEPSEEK_PROVIDER:
+                start_params["modelProvider"] = provider
+        response = await self.app_server.request("thread/start", start_params)
         thread = response["thread"]
         await _apply_codex_lite_thread_settings(self.app_server, thread["id"], self.settings)
         clean_title = (title or "New Chat").strip() or "New Chat"
@@ -258,7 +265,13 @@ class AppServerRunService:
         thread = response.get("thread") or {}
         status = thread.get("status") if isinstance(thread, dict) else {}
         if isinstance(status, dict) and status.get("type") == "notLoaded":
-            await self.app_server.request("thread/resume", {"threadId": thread_id}, timeout=120)
+            resume_params: dict[str, Any] = {"threadId": thread_id}
+            if self.settings.model:
+                resume_params["model"] = self.settings.model
+                provider = model_provider_for_model(self.settings.model)
+                if provider == DEEPSEEK_PROVIDER:
+                    resume_params["modelProvider"] = provider
+            await self.app_server.request("thread/resume", resume_params, timeout=120)
 
     def get_run(self, run_id: str) -> dict:
         run = self.runs.get(run_id)

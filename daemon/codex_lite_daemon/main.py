@@ -22,6 +22,7 @@ from .app_server import AppServerClient
 from .app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService
 from .config import Config, load_config
 from .codex_state import CodexStateService
+from .deepseek import DEEPSEEK_MODEL, deepseek_model_ids, deepseek_reasoning_efforts, model_provider_for_model
 from .db import Database
 from .errors import AppError
 from .file_service import FileService
@@ -31,6 +32,9 @@ from .runner.codex_runner import CodexRunner
 from .runner.fake_runner import FakeRunner
 from .services import ChatService, MessageService, ProjectService
 from .transcript_import import TranscriptImportService
+
+
+_STATIC_OPENAI_MODELS = ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5", "gpt-5-codex"]
 
 
 def create_app(config: Config | None = None) -> Starlette:
@@ -51,6 +55,7 @@ def create_app(config: Config | None = None) -> Starlette:
     files = FileService(db, projects)
     transcript_import = TranscriptImportService(cfg, projects, chats, codex_state)
     app_settings = _load_app_settings(cfg)
+    app_server.set_model_provider(model_provider_for_model(app_settings.model))
     app_threads = AppServerThreadService(projects, chats, messages, transcript_import, app_server, app_settings)
     app_runs = AppServerRunService(projects, app_threads, messages, app_server, cfg.max_concurrent_runs, app_settings)
     app_usage = AppServerUsageService(app_server)
@@ -166,14 +171,23 @@ def create_app(config: Config | None = None) -> Starlette:
 
     @patch("/settings")
     async def update_settings(body: dict) -> dict:
+        requested_model: str | None = None
+        if "model" in body:
+            requested_model = _normalized_model(str(body.get("model") or ""))
+            current_provider = model_provider_for_model(app_settings.model)
+            requested_provider = model_provider_for_model(requested_model)
+            active_runs = app_runs.list_run_diagnostics() if use_app_server else runs.list_run_diagnostics()
+            if requested_provider != current_provider and any(run.get("status") == "running" for run in active_runs):
+                raise AppError("model_provider_switch_busy", "実行中のRunがあるため、モデル提供元を切り替えられません。Runの完了後に再度選択してください。", 409)
         if "permissionProfile" in body:
             app_settings.permission_profile = _normalized_permission_profile(str(body.get("permissionProfile") or ""))
         if "approvalPolicy" in body:
             app_settings.approval_policy = _normalized_approval_policy(str(body.get("approvalPolicy") or ""))
         if "approvalsReviewer" in body:
             app_settings.approvals_reviewer = _normalized_approvals_reviewer(str(body.get("approvalsReviewer") or ""))
-        if "model" in body:
-            app_settings.model = _normalized_model(str(body.get("model") or ""))
+        if requested_model is not None:
+            app_settings.model = requested_model
+            app_server.set_model_provider(model_provider_for_model(app_settings.model))
         if "reasoningEffort" in body:
             app_settings.reasoning_effort = _normalized_reasoning_effort(str(body.get("reasoningEffort") or ""))
         _save_app_settings(cfg, app_settings)
@@ -560,7 +574,9 @@ def _normalized_reasoning_effort(value: str) -> str:
 
 
 def _static_model_options(selected: str = "") -> list[str]:
-    return _with_selected_model(["", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5", "gpt-5-codex"], selected)
+    models = ["", *_STATIC_OPENAI_MODELS]
+    models.extend(deepseek_model_ids())
+    return _with_selected_model(models, selected)
 
 
 def _with_selected_model(models: list[str], selected: str) -> list[str]:
@@ -614,15 +630,21 @@ def _model_ids_from_response(response: object) -> list[str]:
 
 
 def _static_reasoning_efforts(model: str = "") -> list[str]:
+    if model.strip().lower().startswith("deepseek-"):
+        return ["", *deepseek_reasoning_efforts()]
     if model.endswith("luna"):
         return ["", "low", "medium", "high", "xhigh", "max"]
     return ["", "low", "medium", "high", "xhigh", "max", "ultra"]
 
 
 def _model_list_out(models: list[str], efforts_by_model: dict[str, list[str]], selected: str, dynamic: bool) -> dict:
+    merged_models = [*models, *_STATIC_OPENAI_MODELS, *deepseek_model_ids()]
+    merged_efforts = dict(efforts_by_model)
+    if DEEPSEEK_MODEL in deepseek_model_ids():
+        merged_efforts.setdefault(DEEPSEEK_MODEL, deepseek_reasoning_efforts())
     return {
-        "availableModels": _with_selected_model(models, selected),
-        "reasoningEffortsByModel": efforts_by_model,
+        "availableModels": _with_selected_model(merged_models, selected),
+        "reasoningEffortsByModel": merged_efforts,
         "dynamic": dynamic,
     }
 
