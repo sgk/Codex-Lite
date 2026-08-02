@@ -350,6 +350,14 @@ def _runtime_settings_values(settings: AppServerRuntimeSettings) -> dict[str, st
     }
 
 
+def _latest_provider(provider_threads: list[dict]) -> str | None:
+    if not provider_threads:
+        return None
+    latest = max(provider_threads, key=lambda item: str(item.get("updated_at") or ""))
+    provider = latest.get("provider")
+    return str(provider) if provider else None
+
+
 def _acquire_run_lease(app_server: Any) -> None:
     acquire_run = getattr(app_server, "acquire_run", None)
     if callable(acquire_run):
@@ -389,6 +397,8 @@ class AppServerRunService:
         provider = model_provider_for_model(run_settings.model)
         app_server = _app_server_for_provider(self.app_server, provider)
         prior_context = await self.threads.context_for_provider(project_id, chat_id, exclude_content=content)
+        provider_rows_before = self.chats.list_provider_threads(project_id, chat_id)
+        last_provider = _latest_provider(provider_rows_before)
         user_message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
         _acquire_run_lease(app_server)
         try:
@@ -400,7 +410,7 @@ class AppServerRunService:
         try:
             provider_thread = await self.threads.ensure_provider_thread(project_id, chat_id, project["path"], run_settings)
             input_items = _build_turn_input(content, attachments or [])
-            if not bool(provider_thread.get("history_initialized")) and prior_context:
+            if prior_context and (not bool(provider_thread.get("history_initialized")) or (last_provider is not None and last_provider != provider)):
                 input_items[0]["text"] = _provider_context_prompt(prior_context, str(input_items[0].get("text") or ""))
             candidate_thread_ids = [str(provider_thread["thread_id"])]
             legacy_id = chat.get("codex_session_id")
@@ -426,8 +436,7 @@ class AppServerRunService:
                 ) from last_thread_not_found
             if thread_id != str(provider_thread["thread_id"]):
                 self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=bool(provider_thread.get("history_initialized")))
-            if not bool(provider_thread.get("history_initialized")):
-                self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=True)
+            self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=True)
         except Exception:
             app_server.unsubscribe_queue(notification_queue)
             await _release_run_lease(app_server)
