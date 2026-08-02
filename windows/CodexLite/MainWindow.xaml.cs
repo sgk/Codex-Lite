@@ -1904,6 +1904,7 @@ public partial class MainWindow : Window
         _codexCredits = null;
         _deepSeekBalance = null;
         UsageProviderText.Text = "提供元: 未取得";
+        UsageBalanceBorder.Visibility = Visibility.Collapsed;
         OpenAiUsagePanel.Visibility = Visibility.Visible;
         SetUsageCapacityText("未取得", "未取得");
         SetUsageBalanceText("未取得", "未取得", "");
@@ -1913,6 +1914,11 @@ public partial class MainWindow : Window
     {
         var isDeepSeek = string.Equals(provider, "deepseek", StringComparison.OrdinalIgnoreCase);
         UsageProviderText.Text = isDeepSeek ? "提供元: DeepSeek" : "提供元: OpenAI / Codex";
+        UsageBalanceBorder.Visibility = Visibility.Visible;
+        CodexCreditsPanel.Visibility = isDeepSeek ? Visibility.Collapsed : Visibility.Visible;
+        DeepSeekBalancePanel.Visibility = isDeepSeek ? Visibility.Visible : Visibility.Collapsed;
+        Grid.SetColumn(isDeepSeek ? DeepSeekBalancePanel : CodexCreditsPanel, 0);
+        Grid.SetColumnSpan(isDeepSeek ? DeepSeekBalancePanel : CodexCreditsPanel, 2);
         OpenAiUsagePanel.Visibility = isDeepSeek ? Visibility.Collapsed : Visibility.Visible;
     }
 

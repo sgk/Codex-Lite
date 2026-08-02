@@ -688,17 +688,17 @@
                                 VerticalAlignment="Center"
                                 Click="RefreshUsage_Click"/>
                     </Grid>
-                    <Border Grid.Row="1" BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="12" Margin="0,0,0,10">
-                        <Grid>
+                    <Border x:Name="UsageBalanceBorder" Grid.Row="1" BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="12" Margin="0,0,0,10">
+                        <Grid x:Name="UsageBalanceGrid">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                            <StackPanel x:Name="CodexCreditsPanel" Grid.Column="0" Margin="0,0,12,0">
                                 <TextBlock Text="Codexクレジット" Foreground="#333"/>
                                 <TextBlock x:Name="CodexCreditsText" Text="未取得" Foreground="#666" TextWrapping="Wrap"/>
                             </StackPanel>
-                            <StackPanel Grid.Column="1">
+                            <StackPanel x:Name="DeepSeekBalancePanel" Grid.Column="1" Visibility="Collapsed">
                                 <TextBlock Text="DeepSeek残高" Foreground="#333"/>
                                 <TextBlock x:Name="DeepSeekBalanceText" Text="未取得" Foreground="#666" TextWrapping="Wrap"/>
                                 <TextBlock x:Name="DeepSeekBalanceDetailText" Foreground="#667085" FontSize="11" TextWrapping="Wrap"/>
