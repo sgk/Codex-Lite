@@ -6,7 +6,7 @@ import re
 import shlex
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -54,17 +54,18 @@ class AppServerThreadService:
 
     async def create_chat(self, project_id: str, title: str | None = None) -> dict:
         project = self.projects.get_project_row(project_id)
+        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(self.settings.model))
         start_params: dict[str, Any] = {"cwd": project["path"]}
         if self.settings.model:
             start_params["model"] = self.settings.model
             provider = model_provider_for_model(self.settings.model)
             if provider == DEEPSEEK_PROVIDER:
                 start_params["modelProvider"] = provider
-        response = await self.app_server.request("thread/start", start_params)
+        response = await app_server.request("thread/start", start_params)
         thread = response["thread"]
-        await _apply_codex_lite_thread_settings(self.app_server, thread["id"], self.settings)
+        await _apply_codex_lite_thread_settings(app_server, thread["id"], self.settings)
         clean_title = (title or "New Chat").strip() or "New Chat"
-        await self.app_server.request("thread/name/set", {"threadId": thread["id"], "name": clean_title})
+        await app_server.request("thread/name/set", {"threadId": thread["id"], "name": clean_title})
         chat = _chat_out(project_id, thread) | {"title": clean_title}
         return self.chats.upsert_chat_index(
             project_id,
@@ -82,17 +83,19 @@ class AppServerThreadService:
             raise AppError("validation_error", "Chat title must not be empty.")
         updated = self.chats.update_chat(project_id, chat_id, clean_title)
         thread_id = str(chat.get("codex_session_id") or chat_id)
+        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(self.settings.model))
         try:
-            await self.app_server.request("thread/name/set", {"threadId": thread_id, "name": clean_title})
+            await app_server.request("thread/name/set", {"threadId": thread_id, "name": clean_title})
         except AppError:
             pass
         return updated
 
     async def archive_chat(self, project_id: str, chat_id: str) -> dict:
         chat = self.chats.get_chat_row(project_id, chat_id)
+        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(self.settings.model))
         for candidate_thread_id in _candidate_thread_ids(chat_id, chat.get("codex_session_id")):
             try:
-                await self.app_server.request("thread/archive", {"threadId": candidate_thread_id})
+                await app_server.request("thread/archive", {"threadId": candidate_thread_id})
                 break
             except AppError as exc:
                 if _is_thread_not_found(exc):
@@ -159,7 +162,8 @@ class AppServerUsageService:
                 "deepseekBalance": await self.deepseek_balance_reader(),
                 "fetchedAt": utc_now(),
             }
-        response = await self.app_server.request("account/rateLimits/read")
+        app_server = _app_server_for_provider(self.app_server, provider)
+        response = await app_server.request("account/rateLimits/read")
         rate_limits = response.get("rateLimits")
         if not isinstance(rate_limits, dict):
             raise AppError("usage_unavailable", "Codex usage capacity was not available.", 502)
@@ -182,6 +186,7 @@ class AppServerActiveRun:
     thread_id: str
     turn_id: str
     chat_id: str
+    provider: str = "openai"
     status: str = "running"
     started_at: str | None = None
     finished_at: str | None = None
@@ -189,6 +194,26 @@ class AppServerActiveRun:
     reconnect_count: int = 0
     last_reconnect_at: str | None = None
     last_reconnect_message: str | None = None
+    lease_released: bool = False
+
+
+def _app_server_for_provider(app_server: Any, provider: str) -> Any:
+    client_for_provider = getattr(app_server, "client_for_provider", None)
+    if callable(client_for_provider):
+        return client_for_provider(provider)
+    return app_server
+
+
+def _acquire_run_lease(app_server: Any) -> None:
+    acquire_run = getattr(app_server, "acquire_run", None)
+    if callable(acquire_run):
+        acquire_run()
+
+
+async def _release_run_lease(app_server: Any) -> None:
+    release_run = getattr(app_server, "release_run", None)
+    if callable(release_run):
+        await release_run()
 
 
 class AppServerRunService:
@@ -215,16 +240,24 @@ class AppServerRunService:
             raise AppError("chat_read_only", str(chat.get("continue_disabled_reason") or "This imported Codex history cannot be continued by Codex Lite."), 409)
         input_items = _build_turn_input(content, attachments or [])
         run_id = new_id("run")
+        run_settings = replace(self.settings)
+        provider = model_provider_for_model(run_settings.model)
+        app_server = _app_server_for_provider(self.app_server, provider)
         user_message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
-        await self.app_server.ensure_started()
-        notification_queue = self.app_server.subscribe_queue()
+        _acquire_run_lease(app_server)
+        try:
+            await app_server.ensure_started()
+        except Exception:
+            await _release_run_lease(app_server)
+            raise
+        notification_queue = app_server.subscribe_queue()
         try:
             response = None
             thread_id = ""
             last_thread_not_found: AppError | None = None
             for candidate_thread_id in _candidate_thread_ids(chat_id, chat.get("codex_session_id")):
                 try:
-                    response = await self._start_turn(candidate_thread_id, project["path"], input_items)
+                    response = await self._start_turn(app_server, candidate_thread_id, project["path"], input_items, run_settings)
                     thread_id = candidate_thread_id
                     break
                 except AppError as exc:
@@ -240,26 +273,29 @@ class AppServerRunService:
                     404,
                 ) from last_thread_not_found
         except Exception:
-            self.app_server.unsubscribe_queue(notification_queue)
+            app_server.unsubscribe_queue(notification_queue)
+            await _release_run_lease(app_server)
             raise
         turn_id = _turn_id_from_response(response)
         if not turn_id:
+            app_server.unsubscribe_queue(notification_queue)
+            await _release_run_lease(app_server)
             raise AppError("app_server_error", "turn/start did not return a turn id.", 502)
-        self.runs[run_id] = AppServerActiveRun(thread_id, turn_id, chat_id, started_at=utc_now())
+        self.runs[run_id] = AppServerActiveRun(thread_id, turn_id, chat_id, provider=provider, started_at=utc_now())
         await self.events.publish(run_id, "status", {"status": "running"})
-        asyncio.create_task(self._watch_run(run_id, notification_queue))
+        asyncio.create_task(self._watch_run(run_id, notification_queue, app_server))
         return {"messageId": user_message["id"], "runId": run_id}
 
-    async def _start_turn(self, thread_id: str, project_path: str, input_items: list[dict[str, Any]]) -> dict:
+    async def _start_turn(self, app_server: Any, thread_id: str, project_path: str, input_items: list[dict[str, Any]], settings: AppServerRuntimeSettings) -> dict:
         try:
-            await _apply_codex_lite_thread_settings(self.app_server, thread_id, self.settings)
+            await _apply_codex_lite_thread_settings(app_server, thread_id, settings)
         except AppError as exc:
             if not _is_thread_not_found(exc):
                 raise
-            await self._ensure_thread_loaded(thread_id)
-            await _apply_codex_lite_thread_settings(self.app_server, thread_id, self.settings)
+            await self._ensure_thread_loaded(app_server, thread_id, settings)
+            await _apply_codex_lite_thread_settings(app_server, thread_id, settings)
         try:
-            return await self.app_server.request(
+            return await app_server.request(
                 "turn/start",
                 {
                     "threadId": thread_id,
@@ -270,8 +306,8 @@ class AppServerRunService:
         except AppError as exc:
             if not _is_thread_not_found(exc):
                 raise
-            await self._ensure_thread_loaded(thread_id)
-            return await self.app_server.request(
+            await self._ensure_thread_loaded(app_server, thread_id, settings)
+            return await app_server.request(
                 "turn/start",
                 {
                     "threadId": thread_id,
@@ -280,18 +316,18 @@ class AppServerRunService:
                 },
             )
 
-    async def _ensure_thread_loaded(self, thread_id: str) -> None:
-        response = await self.app_server.request("thread/read", {"threadId": thread_id})
+    async def _ensure_thread_loaded(self, app_server: Any, thread_id: str, settings: AppServerRuntimeSettings) -> None:
+        response = await app_server.request("thread/read", {"threadId": thread_id})
         thread = response.get("thread") or {}
         status = thread.get("status") if isinstance(thread, dict) else {}
         if isinstance(status, dict) and status.get("type") == "notLoaded":
             resume_params: dict[str, Any] = {"threadId": thread_id}
-            if self.settings.model:
-                resume_params["model"] = self.settings.model
-                provider = model_provider_for_model(self.settings.model)
+            if settings.model:
+                resume_params["model"] = settings.model
+                provider = model_provider_for_model(settings.model)
                 if provider == DEEPSEEK_PROVIDER:
                     resume_params["modelProvider"] = provider
-            await self.app_server.request("thread/resume", resume_params, timeout=120)
+            await app_server.request("thread/resume", resume_params, timeout=120)
 
     def get_run(self, run_id: str) -> dict:
         run = self.runs.get(run_id)
@@ -306,6 +342,7 @@ class AppServerRunService:
                 "chatId": run.chat_id,
                 "threadId": run.thread_id,
                 "turnId": run.turn_id,
+                "provider": run.provider,
                 "status": run.status,
                 "startedAt": run.started_at,
                 "finishedAt": run.finished_at,
@@ -323,12 +360,14 @@ class AppServerRunService:
             raise AppError("cancel_failed", "Run is not active.", 409)
         if run.status != "running":
             return _run_out(run_id, run)
+        app_server = _app_server_for_provider(self.app_server, run.provider)
         try:
-            await self.app_server.notify("turn/interrupt", {"threadId": run.thread_id, "turnId": run.turn_id})
+            await app_server.notify("turn/interrupt", {"threadId": run.thread_id, "turnId": run.turn_id})
         except AppError as exc:
             await self.events.publish(run_id, "progress", {"method": "turn/interrupt", "summary": exc.message})
         run.status = "cancelled"
         run.finished_at = utc_now()
+        await self._release_run_lease(run)
         await self.events.publish(run_id, "done", {"status": "cancelled", "exitCode": None})
         return _run_out(run_id, run)
 
@@ -342,9 +381,10 @@ class AppServerRunService:
         if not clean_content:
             raise AppError("validation_error", "Steer content must not be empty.", 400)
         input_items = _build_turn_input(clean_content, attachments or [])
+        app_server = _app_server_for_provider(self.app_server, run.provider)
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "sending additional instructions"})
         try:
-            await self.app_server.request(
+            await app_server.request(
                 "turn/steer",
                 {
                     "threadId": run.thread_id,
@@ -365,7 +405,7 @@ class AppServerRunService:
         async for item in self.events.subscribe(run_id):
             yield f"event: {item['event']}\ndata: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
 
-    async def _watch_run(self, run_id: str, notification_queue: asyncio.Queue[AppServerNotification]) -> None:
+    async def _watch_run(self, run_id: str, notification_queue: asyncio.Queue[AppServerNotification], app_server: Any) -> None:
         run = self.runs[run_id]
         assistant_parts: list[str] = []
         reasoning_buffers: dict[tuple[str, str], list[str]] = {}
@@ -495,7 +535,15 @@ class AppServerRunService:
             run.finished_at = utc_now()
             await self.events.publish(run_id, "error", {"code": "app_server_run_failed", "message": str(exc)})
         finally:
-            self.app_server.unsubscribe_queue(notification_queue)
+            app_server.unsubscribe_queue(notification_queue)
+            await self._release_run_lease(run)
+
+    async def _release_run_lease(self, run: AppServerActiveRun) -> None:
+        if run.lease_released:
+            return
+        run.lease_released = True
+        app_server = _app_server_for_provider(self.app_server, run.provider)
+        await _release_run_lease(app_server)
 
 
 def _is_reasoning_delta_notification(notification: AppServerNotification) -> bool:
@@ -979,6 +1027,7 @@ def _run_out(run_id: str, run: AppServerActiveRun) -> dict:
         "chatId": run.chat_id,
         "threadId": run.thread_id,
         "turnId": run.turn_id,
+        "provider": run.provider,
         "status": run.status,
         "pid": None,
         "exitCode": 0 if run.status == "succeeded" else None,

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from codex_lite_daemon.app_server import AppServerClient, AppServerNotification
+from codex_lite_daemon.app_server import AppServerClient, AppServerClientPool, AppServerNotification
 from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _is_reasoning_delta_notification, _merge_messages, _notification_details, _notification_summary, _reasoning_delta, _reasoning_item_id
 from codex_lite_daemon.automation_service import AutomationService, _run_due_automations
 from codex_lite_daemon.codex_state import CodexStateService
@@ -214,6 +214,41 @@ def test_deepseek_app_server_command_uses_responses_provider(linux_tmp_path: Pat
     assert 'model="deepseek-v4-flash"' in args
     assert 'model_providers.deepseek.wire_api="responses"' in args
     assert (cfg.app_data_dir / "deepseek-models.json").exists()
+
+
+def test_app_server_pool_keeps_provider_processes_independent(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    pool = AppServerClientPool(cfg, CodexRunner(cfg))
+
+    openai = pool.client_for_provider("openai")
+    deepseek = pool.client_for_provider("deepseek")
+
+    assert openai is not deepseek
+    assert openai.provider == "openai"
+    assert deepseek.provider == "deepseek"
+    assert 'model_provider="deepseek"' in deepseek._command_args("/opt/codex")
+    assert 'model_provider="deepseek"' not in openai._command_args("/opt/codex")
+
+
+@pytest.mark.asyncio
+async def test_app_server_client_closes_after_idle_run_window(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    client = AppServerClient(cfg, CodexRunner(cfg), "deepseek")
+    closed = False
+
+    async def fake_close() -> None:
+        nonlocal closed
+        closed = True
+        client._idle_shutdown_task = None
+
+    monkeypatch.setattr(type(client), "is_running", property(lambda self: True))
+    monkeypatch.setattr(client, "close", fake_close)
+    client.IDLE_SHUTDOWN_SECONDS = 0.01
+
+    await client.release_run()
+    await asyncio.sleep(0.03)
+
+    assert closed is True
 
 
 def test_model_list_adds_configured_deepseek_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1564,6 +1599,43 @@ async def test_app_server_run_uses_runtime_model_and_approval_policy(linux_tmp_p
         "thread/settings/update",
         {"threadId": "thread_1", "approvalPolicy": "on-request", "approvalsReviewer": "auto_review", "permissions": ":workspace", "model": "gpt-5-codex", "effort": "high"},
     )
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_app_server_run_routes_each_run_to_selected_provider(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    openai = TurnStartAppServer()
+    deepseek = TurnStartAppServer()
+
+    class ProviderPool:
+        def client_for_provider(self, provider: str):
+            return deepseek if provider == "deepseek" else openai
+
+    settings = make_runtime_settings(model="deepseek-v4-flash")
+    threads = AppServerThreadService(projects, chats, messages, transcripts, ProviderPool(), settings)  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, ProviderPool(), max_concurrent_runs=2, settings=settings)  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    deepseek_chat = chats.upsert_chat_index(project_id, "deepseek_thread", "deepseek", "deepseek_thread", utc_now(), utc_now())["id"]
+    openai_chat = chats.upsert_chat_index(project_id, "openai_thread", "openai", "openai_thread", utc_now(), utc_now())["id"]
+
+    deepseek_result = await runs.start_message_run(project_id, deepseek_chat, "use deepseek")
+    settings.model = "gpt-5-codex"
+    openai_result = await runs.start_message_run(project_id, openai_chat, "use openai")
+
+    assert deepseek.requests[0][0] == "thread/settings/update"
+    assert openai.requests[0][0] == "thread/settings/update"
+    assert runs.get_run(deepseek_result["runId"])["provider"] == "deepseek"
+    assert runs.get_run(openai_result["runId"])["provider"] == "openai"
     db.close()
 
 

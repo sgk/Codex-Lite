@@ -18,7 +18,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import __version__
 from .automation_service import AutomationService, run_automation_scheduler
-from .app_server import AppServerClient
+from .app_server import AppServerClientPool
 from .app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService
 from .config import Config, load_config
 from .codex_state import CodexStateService
@@ -49,16 +49,15 @@ def create_app(config: Config | None = None) -> Starlette:
     messages = MessageService(db, chats)
     codex_runner = CodexRunner(cfg)
     runner = FakeRunner() if cfg.runner_mode == "fake" else codex_runner
-    app_server = AppServerClient(cfg, codex_runner)
+    app_servers = AppServerClientPool(cfg, codex_runner)
     codex_state = CodexStateService(cfg)
     runs = RunService(db, cfg, projects, chats, messages, runner)
     files = FileService(db, projects)
     transcript_import = TranscriptImportService(cfg, projects, chats, codex_state)
     app_settings = _load_app_settings(cfg)
-    app_server.set_model_provider(model_provider_for_model(app_settings.model))
-    app_threads = AppServerThreadService(projects, chats, messages, transcript_import, app_server, app_settings)
-    app_runs = AppServerRunService(projects, app_threads, messages, app_server, cfg.max_concurrent_runs, app_settings)
-    app_usage = AppServerUsageService(app_server)
+    app_threads = AppServerThreadService(projects, chats, messages, transcript_import, app_servers, app_settings)
+    app_runs = AppServerRunService(projects, app_threads, messages, app_servers, cfg.max_concurrent_runs, app_settings)
+    app_usage = AppServerUsageService(app_servers)
     automations = AutomationService(db, projects, chats)
     runs.recover_stale_runs()
     use_app_server = cfg.runner_mode == "app-server"
@@ -78,7 +77,7 @@ def create_app(config: Config | None = None) -> Starlette:
                     await scheduler_task
                 except asyncio.CancelledError:
                     pass
-            await app_server.close()
+            await app_servers.close()
             db.close()
 
     app = Starlette(lifespan=lifespan)
@@ -86,7 +85,7 @@ def create_app(config: Config | None = None) -> Starlette:
     app.state.db = db
     app.state.codex_runner = codex_runner
     app.state.runs = runs
-    app.state.app_server = app_server
+    app.state.app_server = app_servers
 
     async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(
@@ -140,9 +139,12 @@ def create_app(config: Config | None = None) -> Starlette:
             "reasoningEffort": app_settings.reasoning_effort,
             "autoCompactTokenLimit": cfg.auto_compact_token_limit,
             "autoCompactTokenLimitScope": cfg.auto_compact_token_limit_scope,
-            "appServerRunning": app_server.is_running,
-            "appServerEnvironment": app_server.environment_diagnostics(),
-            "appServerStderrTail": app_server.stderr_tail,
+            "appServerRunning": any(item["running"] for item in app_servers.diagnostics().values()),
+            "appServerEnvironment": app_servers.diagnostics(),
+            "appServerStderrTail": {
+                provider: app_servers.client_for_provider(provider).stderr_tail
+                for provider in ("openai", "deepseek")
+            },
             "codexStateSync": codex_state.diagnostics(),
         }
 
@@ -155,7 +157,8 @@ def create_app(config: Config | None = None) -> Starlette:
         if not use_app_server:
             return _model_list_out(_static_model_options(app_settings.model), {}, app_settings.model, dynamic=False)
         try:
-            response = await app_server.request("model/list", {})
+            provider = model_provider_for_model(app_settings.model)
+            response = await app_servers.client_for_provider(provider).request("model/list", {})
             models, efforts_by_model = _model_catalog_from_response(response)
             if models:
                 return _model_list_out(models, efforts_by_model, app_settings.model, dynamic=True)
@@ -176,11 +179,6 @@ def create_app(config: Config | None = None) -> Starlette:
         requested_model: str | None = None
         if "model" in body:
             requested_model = _normalized_model(str(body.get("model") or ""))
-            current_provider = model_provider_for_model(app_settings.model)
-            requested_provider = model_provider_for_model(requested_model)
-            active_runs = app_runs.list_run_diagnostics() if use_app_server else runs.list_run_diagnostics()
-            if requested_provider != current_provider and any(run.get("status") == "running" for run in active_runs):
-                raise AppError("model_provider_switch_busy", "実行中のRunがあるため、モデル提供元を切り替えられません。Runの完了後に再度選択してください。", 409)
         if "permissionProfile" in body:
             app_settings.permission_profile = _normalized_permission_profile(str(body.get("permissionProfile") or ""))
         if "approvalPolicy" in body:
@@ -189,7 +187,6 @@ def create_app(config: Config | None = None) -> Starlette:
             app_settings.approvals_reviewer = _normalized_approvals_reviewer(str(body.get("approvalsReviewer") or ""))
         if requested_model is not None:
             app_settings.model = requested_model
-            app_server.set_model_provider(model_provider_for_model(app_settings.model))
         if "reasoningEffort" in body:
             app_settings.reasoning_effort = _normalized_reasoning_effort(str(body.get("reasoningEffort") or ""))
         _save_app_settings(cfg, app_settings)

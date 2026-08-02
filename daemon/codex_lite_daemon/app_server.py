@@ -23,22 +23,26 @@ class AppServerNotification:
 class AppServerClient:
     REQUEST_TIMEOUT_SECONDS = 20
     STDIO_LIMIT_BYTES = 64 * 1024 * 1024
+    IDLE_SHUTDOWN_SECONDS = 60
 
-    def __init__(self, config: Config, codex_runner: CodexRunner) -> None:
+    def __init__(self, config: Config, codex_runner: CodexRunner, model_provider: str | None = None) -> None:
         self.config = config
         self.codex_runner = codex_runner
+        self.provider = _normalize_provider(model_provider) if model_provider is not None else None
         self._process: asyncio.subprocess.Process | None = None
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._subscribers: list[asyncio.Queue[AppServerNotification]] = []
         self._stderr_tail: list[str] = []
         self._last_env: dict[str, str] = {}
-        self._desired_model_provider = "openai"
+        self._desired_model_provider = self.provider or "openai"
         self._active_model_provider: str | None = None
         self._start_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._active_run_count = 0
+        self._idle_shutdown_task: asyncio.Task | None = None
 
     @property
     def is_running(self) -> bool:
@@ -49,11 +53,14 @@ class AppServerClient:
         return list(self._stderr_tail[-40:])
 
     async def request(self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> dict[str, Any]:
+        self._cancel_idle_shutdown()
         await self.ensure_started()
         try:
             return await asyncio.wait_for(self._request_started(method, params), timeout=timeout or self.REQUEST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
             raise AppError("app_server_timeout", f"Codex app-server request timed out: {method}", 504) from exc
+        finally:
+            self._schedule_idle_shutdown()
 
     async def _request_started(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         assert self._process is not None
@@ -67,8 +74,12 @@ class AppServerClient:
         return await future
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        self._cancel_idle_shutdown()
         await self.ensure_started()
-        await self._write({"method": method, "params": params or {}})
+        try:
+            await self._write({"method": method, "params": params or {}})
+        finally:
+            self._schedule_idle_shutdown()
 
     async def subscribe(self) -> AsyncIterator[AppServerNotification]:
         queue = self.subscribe_queue()
@@ -131,9 +142,23 @@ class AppServerClient:
             await self.notify("initialized")
 
     def set_model_provider(self, provider: str) -> None:
+        if self.provider is not None:
+            return
         self._desired_model_provider = provider if provider == DEEPSEEK_PROVIDER else "openai"
 
+    def acquire_run(self) -> None:
+        self._active_run_count += 1
+        self._cancel_idle_shutdown()
+
+    async def release_run(self) -> None:
+        self._active_run_count = max(0, self._active_run_count - 1)
+        self._schedule_idle_shutdown()
+
     async def close(self) -> None:
+        idle_task = self._idle_shutdown_task
+        self._idle_shutdown_task = None
+        if idle_task is not None and idle_task is not asyncio.current_task():
+            idle_task.cancel()
         process = self._process
         self._process = None
         self._active_model_provider = None
@@ -160,6 +185,26 @@ class AppServerClient:
         for task in (self._reader_task, self._stderr_task):
             if task is not None and not task.done():
                 task.cancel()
+
+    def _cancel_idle_shutdown(self) -> None:
+        task = self._idle_shutdown_task
+        if task is None:
+            return
+        self._idle_shutdown_task = None
+        task.cancel()
+
+    def _schedule_idle_shutdown(self) -> None:
+        if not self.is_running or self._active_run_count > 0 or self._idle_shutdown_task is not None:
+            return
+        self._idle_shutdown_task = asyncio.create_task(self._close_after_idle())
+
+    async def _close_after_idle(self) -> None:
+        try:
+            await asyncio.sleep(self.IDLE_SHUTDOWN_SECONDS)
+            if self._active_run_count == 0:
+                await self.close()
+        except asyncio.CancelledError:
+            return
 
     async def _write(self, payload: dict[str, Any]) -> None:
         process = self._process
@@ -226,7 +271,7 @@ class AppServerClient:
                     f'model_auto_compact_token_limit_scope="{self.config.auto_compact_token_limit_scope}"',
                 ]
             )
-        provider = model_provider or self._desired_model_provider
+        provider = model_provider or self.provider or self._desired_model_provider
         if provider == DEEPSEEK_PROVIDER:
             catalog_path = ensure_model_catalog(self.config.app_data_dir)
             args.extend(
@@ -257,7 +302,35 @@ class AppServerClient:
             "captured": bool(env),
             "sshAgentConfigured": bool(sock),
             "sshAgentSocketExists": bool(sock and Path(sock).exists()),
+            "provider": self.provider or self._active_model_provider or self._desired_model_provider,
+            "activeRunCount": self._active_run_count,
         }
+
+
+class AppServerClientPool:
+    def __init__(self, config: Config, codex_runner: CodexRunner) -> None:
+        self._clients = {
+            "openai": AppServerClient(config, codex_runner, "openai"),
+            DEEPSEEK_PROVIDER: AppServerClient(config, codex_runner, DEEPSEEK_PROVIDER),
+        }
+        # The OpenAI client is the default lifecycle target. DeepSeek joins
+        # the shutdown set once it is actually selected.
+        self._used_providers = {"openai"}
+
+    def client_for_provider(self, provider: str) -> AppServerClient:
+        normalized = _normalize_provider(provider)
+        self._used_providers.add(normalized)
+        return self._clients[normalized]
+
+    def diagnostics(self) -> dict[str, dict[str, Any]]:
+        return {provider: client.environment_diagnostics() | {"running": client.is_running} for provider, client in self._clients.items()}
+
+    async def close(self) -> None:
+        await asyncio.gather(*(self._clients[provider].close() for provider in self._used_providers))
+
+
+def _normalize_provider(provider: str | None) -> str:
+    return provider if provider == DEEPSEEK_PROVIDER else "openai"
 
 
 def _app_server_error(error: dict[str, Any]) -> AppError:
