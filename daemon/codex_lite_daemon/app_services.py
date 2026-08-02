@@ -77,6 +77,13 @@ class AppServerThreadService:
             chat["updatedAt"],
         )
         self.chats.update_chat_settings(project_id, result["id"], _runtime_settings_values(runtime_settings))
+        self.chats.upsert_provider_thread(
+            project_id,
+            result["id"],
+            model_provider_for_model(runtime_settings.model),
+            str(thread["id"]),
+            history_initialized=False,
+        )
         return result
 
     async def update_chat(self, project_id: str, chat_id: str, title: str | None) -> dict:
@@ -85,29 +92,39 @@ class AppServerThreadService:
         if not clean_title:
             raise AppError("validation_error", "Chat title must not be empty.")
         updated = self.chats.update_chat(project_id, chat_id, clean_title)
-        thread_id = str(chat.get("codex_session_id") or chat_id)
-        runtime_settings = self.settings_for_chat(project_id, chat_id)
-        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(runtime_settings.model))
-        try:
-            await app_server.request("thread/name/set", {"threadId": thread_id, "name": clean_title})
-        except AppError:
-            pass
+        provider_threads = self.chats.list_provider_threads(project_id, chat_id)
+        if provider_threads:
+            for provider_thread in provider_threads:
+                app_server = _app_server_for_provider(self.app_server, str(provider_thread["provider"]))
+                try:
+                    await app_server.request("thread/name/set", {"threadId": str(provider_thread["thread_id"]), "name": clean_title})
+                except AppError:
+                    pass
+        else:
+            thread_id = str(chat.get("codex_session_id") or chat_id)
+            runtime_settings = self.settings_for_chat(project_id, chat_id)
+            app_server = _app_server_for_provider(self.app_server, model_provider_for_model(runtime_settings.model))
+            try:
+                await app_server.request("thread/name/set", {"threadId": thread_id, "name": clean_title})
+            except AppError:
+                pass
         return updated
 
     async def archive_chat(self, project_id: str, chat_id: str) -> dict:
         chat = self.chats.get_chat_row(project_id, chat_id)
-        runtime_settings = self.settings_for_chat(project_id, chat_id)
-        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(runtime_settings.model))
-        for candidate_thread_id in _candidate_thread_ids(chat_id, chat.get("codex_session_id")):
+        provider_threads = self.chats.list_provider_threads(project_id, chat_id)
+        if provider_threads:
+            archive_targets = [(str(item["provider"]), str(item["thread_id"])) for item in provider_threads]
+        else:
+            runtime_settings = self.settings_for_chat(project_id, chat_id)
+            archive_targets = [(model_provider_for_model(runtime_settings.model), candidate) for candidate in _candidate_thread_ids(chat_id, chat.get("codex_session_id"))]
+        for provider, candidate_thread_id in archive_targets:
+            app_server = _app_server_for_provider(self.app_server, provider)
             try:
                 await app_server.request("thread/archive", {"threadId": candidate_thread_id})
-                break
-            except AppError as exc:
-                if _is_thread_not_found(exc):
-                    continue
+            except AppError:
                 # Codex Lite hides the row locally when app-server cannot
-                # archive it. A later Codex metadata sync may restore it if the
-                # Codex state DB still reports the thread as active.
+                # archive it. A later metadata sync may restore it if needed.
                 continue
         # Imported JSONL sessions may no longer be known to app-server. They
         # still need to disappear from Codex Lite's active list.
@@ -137,30 +154,130 @@ class AppServerThreadService:
     async def list_messages(self, project_id: str, chat_id: str) -> list[dict]:
         project = self.projects.get_project_row(project_id)
         chat = self.chats.get_chat_row(project_id, chat_id)
-        session_ids = [chat_id]
-        codex_session_id = chat.get("codex_session_id")
-        if codex_session_id and codex_session_id not in session_ids:
-            session_ids.append(str(codex_session_id))
-        transcript_messages = [
-            message
-            for session_id in session_ids
-            for message in self._list_transcript_messages(project_id, project["path"], chat_id, session_id, chat.get("transcript_path"))
-        ]
-        local_messages = [
-            message
-            for message in self.messages.list_messages(project_id, chat_id)
-            if str(message.get("role") or "").lower() != "assistant"
-        ]
+        provider_threads = self.chats.list_provider_threads(project_id, chat_id)
+        transcript_messages: list[dict] = []
+        if provider_threads:
+            for provider_thread in provider_threads:
+                transcript_messages.extend(
+                    self._list_transcript_messages(
+                        project_id,
+                        project["path"],
+                        chat_id,
+                        str(provider_thread["thread_id"]),
+                        provider_thread.get("transcript_path"),
+                        str(provider_thread["provider"]),
+                    )
+                )
+        else:
+            session_ids = [chat_id]
+            codex_session_id = chat.get("codex_session_id")
+            if codex_session_id and codex_session_id not in session_ids:
+                session_ids.append(str(codex_session_id))
+            transcript_messages = [
+                message
+                for session_id in session_ids
+                for message in self._list_transcript_messages(project_id, project["path"], chat_id, session_id, chat.get("transcript_path"), "openai")
+            ]
+        all_local_messages = self.messages.list_messages(project_id, chat_id)
+        # Once Lite has executed a turn, its local user/assistant rows are the
+        # provider-neutral visible history.  Do not expose a DeepSeek
+        # synthetic context prompt or duplicate the alternate provider's
+        # assistant answer from JSONL. Imported/read-only chats have no local
+        # run rows, so they continue to use the transcript as before.
+        canonical_local = any(
+            str(message.get("role") or "").lower() == "user" and message.get("runId")
+            for message in all_local_messages
+        )
+        if canonical_local:
+            transcript_messages = [
+                message
+                for message in transcript_messages
+                if str(message.get("role") or "").lower() not in {"user", "assistant"}
+            ]
+            local_messages = all_local_messages
+        else:
+            local_messages = [
+                message
+                for message in all_local_messages
+                if str(message.get("role") or "").lower() != "assistant"
+            ]
         return _merge_messages(transcript_messages, local_messages)
 
-    def _list_transcript_messages(self, project_id: str, project_path: str, chat_id: str, session_id: str, transcript_path: Any) -> list[dict]:
+    def _list_transcript_messages(self, project_id: str, project_path: str, chat_id: str, session_id: str, transcript_path: Any, provider: str = "openai") -> list[dict]:
         saved_path = str(transcript_path) if transcript_path else None
-        resolved_path = self.transcripts.find_transcript_path(project_path, session_id, saved_path)
+        include_internal = provider == DEEPSEEK_PROVIDER
+        resolved_path = self.transcripts.find_transcript_path(project_path, session_id, saved_path, include_internal=include_internal)
         if resolved_path is None:
             return []
-        if saved_path != str(resolved_path):
-            self.chats.update_chat_transcript_path(project_id, chat_id, str(resolved_path))
-        return self.transcripts.list_messages(project_path, session_id, chat_id, str(resolved_path))
+        if provider == "openai":
+            if saved_path != str(resolved_path):
+                self.chats.update_chat_transcript_path(project_id, chat_id, str(resolved_path))
+        else:
+            provider_thread = self.chats.get_provider_thread(project_id, chat_id, provider)
+            if provider_thread is not None and saved_path != str(resolved_path):
+                self.chats.update_provider_thread_transcript_path(project_id, chat_id, provider, str(resolved_path))
+        return self.transcripts.list_messages(project_path, session_id, chat_id, str(resolved_path), include_internal=include_internal)
+
+    async def ensure_provider_thread(self, project_id: str, chat_id: str, project_path: str, settings: AppServerRuntimeSettings) -> dict:
+        provider = model_provider_for_model(settings.model)
+        existing = self.chats.get_provider_thread(project_id, chat_id, provider)
+        if existing is not None:
+            return existing
+
+        chat = self.chats.get_chat_row(project_id, chat_id)
+        app_server = _app_server_for_provider(self.app_server, provider)
+        # Existing OpenAI sessions are safe to resume in the primary home.
+        # A legacy DeepSeek mapping is only used when no dedicated home is
+        # configured (primarily compatibility for embedded/test callers).
+        dedicated_deepseek = provider == DEEPSEEK_PROVIDER and getattr(getattr(app_server, "config", None), "deepseek_codex_home", None) is not None
+        existing_provider_threads = self.chats.list_provider_threads(project_id, chat_id)
+        legacy_thread_id = chat.get("codex_session_id") if not existing_provider_threads else None
+        if provider == "openai" and legacy_thread_id and str(legacy_thread_id) != chat_id:
+            # Preserve the historic Codex Lite candidate order for imported
+            # rows: the Lite chat id was tried before the Codex metadata id.
+            legacy_thread_id = chat_id
+        if legacy_thread_id and (provider == "openai" or not dedicated_deepseek):
+            return self.chats.upsert_provider_thread(
+                project_id,
+                chat_id,
+                provider,
+                str(legacy_thread_id),
+                chat.get("transcript_path") if provider == "openai" else None,
+                history_initialized=True,
+            )
+
+        start_params: dict[str, Any] = {"cwd": project_path}
+        if settings.model:
+            start_params["model"] = settings.model
+            if provider == DEEPSEEK_PROVIDER:
+                start_params["modelProvider"] = provider
+        response = await app_server.request("thread/start", start_params)
+        thread = response.get("thread") or {}
+        thread_id = thread.get("id")
+        if not isinstance(thread_id, str) or not thread_id:
+            raise AppError("app_server_error", "thread/start did not return a thread id.", 502)
+        await _apply_codex_lite_thread_settings(app_server, thread_id, settings)
+        try:
+            await app_server.request("thread/name/set", {"threadId": thread_id, "name": chat.get("title") or "New Chat"})
+        except AppError:
+            pass
+        return self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=False)
+
+    async def context_for_provider(self, project_id: str, chat_id: str, exclude_content: str | None = None) -> str:
+        messages = await self.list_messages(project_id, chat_id)
+        excluded = _message_content_key(exclude_content or "")
+        lines: list[str] = []
+        for message in messages:
+            role = str(message.get("role") or "").lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(message.get("content") or "").strip()
+            if not content or (excluded and role == "user" and _message_content_key(content) == excluded):
+                continue
+            label = "User" if role == "user" else "Assistant"
+            lines.append(f"{label}: {content}")
+        # Keep a provider switch from creating an unbounded synthetic prompt.
+        return "\n\n".join(lines)[-120000:]
 
 
 class AppServerUsageService:
@@ -267,11 +384,11 @@ class AppServerRunService:
             raise AppError("run_already_active_in_chat", "Another run is already active in this chat.", 409)
         if not bool(chat.get("can_continue", 1)):
             raise AppError("chat_read_only", str(chat.get("continue_disabled_reason") or "This imported Codex history cannot be continued by Codex Lite."), 409)
-        input_items = _build_turn_input(content, attachments or [])
         run_id = new_id("run")
         run_settings = self.threads.settings_for_chat(project_id, chat_id)
         provider = model_provider_for_model(run_settings.model)
         app_server = _app_server_for_provider(self.app_server, provider)
+        prior_context = await self.threads.context_for_provider(project_id, chat_id, exclude_content=content)
         user_message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
         _acquire_run_lease(app_server)
         try:
@@ -281,10 +398,18 @@ class AppServerRunService:
             raise
         notification_queue = app_server.subscribe_queue()
         try:
+            provider_thread = await self.threads.ensure_provider_thread(project_id, chat_id, project["path"], run_settings)
+            input_items = _build_turn_input(content, attachments or [])
+            if not bool(provider_thread.get("history_initialized")) and prior_context:
+                input_items[0]["text"] = _provider_context_prompt(prior_context, str(input_items[0].get("text") or ""))
+            candidate_thread_ids = [str(provider_thread["thread_id"])]
+            legacy_id = chat.get("codex_session_id")
+            if provider == "openai" and legacy_id and str(legacy_id) not in candidate_thread_ids:
+                candidate_thread_ids.append(str(legacy_id))
             response = None
-            thread_id = ""
+            thread_id = candidate_thread_ids[0]
             last_thread_not_found: AppError | None = None
-            for candidate_thread_id in _candidate_thread_ids(chat_id, chat.get("codex_session_id")):
+            for candidate_thread_id in candidate_thread_ids:
                 try:
                     response = await self._start_turn(app_server, candidate_thread_id, project["path"], input_items, run_settings)
                     thread_id = candidate_thread_id
@@ -294,13 +419,15 @@ class AppServerRunService:
                         raise
                     last_thread_not_found = exc
             if response is None:
-                if last_thread_not_found is None:
-                    raise AppError("thread_not_found", "No thread id candidate was available.", 404)
                 raise AppError(
                     "thread_not_found",
                     "Codex thread was not found by app-server. No replacement session was created.",
                     404,
                 ) from last_thread_not_found
+            if thread_id != str(provider_thread["thread_id"]):
+                self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=bool(provider_thread.get("history_initialized")))
+            if not bool(provider_thread.get("history_initialized")):
+                self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=True)
         except Exception:
             app_server.unsubscribe_queue(notification_queue)
             await _release_run_lease(app_server)
@@ -930,6 +1057,18 @@ def _content_with_direct_attachment_instruction(content: str, file_paths: list[P
     ]
     lines.extend(f"- {path}" for path in file_paths)
     return "\n".join(lines)
+
+
+def _provider_context_prompt(prior_context: str, current_request: str) -> str:
+    return (
+        "以下はCodex Liteの同じチャットで、別のモデル提供元が応答した過去の表示内容です。"
+        "提供元固有の推論状態は引き継がれていないため、必要な事実だけを会話の文脈として利用してください。\n\n"
+        "--- 過去の会話 ---\n"
+        f"{prior_context}\n"
+        "--- 過去の会話ここまで ---\n\n"
+        "--- 今回の依頼 ---\n"
+        f"{current_request}"
+    )
 
 
 def _validated_attachment_path(attachment: dict[str, Any]) -> Path:

@@ -258,6 +258,12 @@ class AppServerClient:
             self._stderr_tail = self._stderr_tail[-80:]
 
     def _env(self) -> dict[str, str]:
+        if self.provider == DEEPSEEK_PROVIDER:
+            return codex_process_env(
+                self.config,
+                self.config.deepseek_codex_home,
+                self.config.deepseek_codex_sqlite_home,
+            )
         return codex_process_env(self.config)
 
     def _command_args(self, codex: str, model_provider: str | None = None) -> list[str]:

@@ -127,9 +127,10 @@ class TranscriptImportService:
             candidates.append({"path": str(path), "name": path.name, "threadCount": 0, "lastUsedAt": None})
         return candidates
 
-    def _transcript_files(self) -> list[Path]:
+    def _transcript_files(self, include_internal: bool = False) -> list[Path]:
         roots = []
-        for codex_home in self._codex_homes():
+        homes = self._all_codex_homes() if include_internal else self._codex_homes()
+        for codex_home in homes:
             roots.append(codex_home / "sessions")
         files: list[Path] = []
         for root in roots:
@@ -137,7 +138,17 @@ class TranscriptImportService:
                 files.extend(root.glob("**/*.jsonl"))
         return files
 
-    def _transcript_sessions(self) -> list[TranscriptSession]:
+    def _transcript_sessions(self, include_internal: bool = False) -> list[TranscriptSession]:
+        # The Codex state DB is intentionally primary-home-only.  Internal
+        # provider histories are looked up by JSONL path and never indexed as
+        # separate user-visible chats.
+        if include_internal and self.config.deepseek_codex_home is not None:
+            sessions_by_id: dict[str, TranscriptSession] = {}
+            for transcript in self._transcript_files(include_internal=True):
+                session = self._read_transcript_session(transcript)
+                if session is not None:
+                    sessions_by_id[session.id] = session
+            return list(sessions_by_id.values())
         if self.codex_state is not None:
             codex_sessions: dict[str, TranscriptSession] = {}
             for thread in self.codex_state.list_threads():
@@ -181,6 +192,18 @@ class TranscriptImportService:
             return [self.config.codex_home.resolve()]
         except OSError:
             return [self.config.codex_home]
+
+    def _all_codex_homes(self) -> list[Path]:
+        homes = self._codex_homes()
+        deepseek_home = self.config.deepseek_codex_home
+        if deepseek_home is not None:
+            try:
+                resolved = deepseek_home.resolve()
+            except OSError:
+                resolved = deepseek_home
+            if resolved not in homes:
+                homes.append(resolved)
+        return homes
 
     def _read_session_meta(self, path: Path) -> dict[str, Any]:
         session = self._read_transcript_session(path)
@@ -238,10 +261,10 @@ class TranscriptImportService:
             continue_disabled_reason="このチャットはJSONLから取り込んだ履歴のため、Codex Liteからは継続できません。",
         )
 
-    def list_messages(self, project_path: str, session_id: str, chat_id: str, transcript_path: str | None = None) -> list[dict]:
-        transcript = self._validated_transcript_path(transcript_path, project_path, session_id) if transcript_path else None
+    def list_messages(self, project_path: str, session_id: str, chat_id: str, transcript_path: str | None = None, include_internal: bool = False) -> list[dict]:
+        transcript = self._validated_transcript_path(transcript_path, project_path, session_id, include_internal=include_internal) if transcript_path else None
         if transcript is None:
-            transcript = self._find_transcript_path(project_path, session_id)
+            transcript = self._find_transcript_path(project_path, session_id, include_internal=include_internal)
         if transcript is None:
             return []
         messages: list[dict] = []
@@ -260,24 +283,24 @@ class TranscriptImportService:
             return []
         return messages
 
-    def find_transcript_path(self, project_path: str, session_id: str, transcript_path: str | None = None) -> Path | None:
+    def find_transcript_path(self, project_path: str, session_id: str, transcript_path: str | None = None, include_internal: bool = False) -> Path | None:
         if transcript_path:
-            transcript = self._validated_transcript_path(transcript_path, project_path, session_id)
+            transcript = self._validated_transcript_path(transcript_path, project_path, session_id, include_internal=include_internal)
             if transcript is not None:
                 return transcript
-        return self._find_transcript_path(project_path, session_id)
+        return self._find_transcript_path(project_path, session_id, include_internal=include_internal)
 
-    def _find_transcript_path(self, project_path: str, session_id: str) -> Path | None:
+    def _find_transcript_path(self, project_path: str, session_id: str, include_internal: bool = False) -> Path | None:
         try:
             resolved_project = Path(project_path).resolve()
         except OSError:
             resolved_project = Path(project_path)
-        for session in self._transcript_sessions():
+        for session in self._transcript_sessions(include_internal=include_internal):
             if session.id == session_id and session.path == resolved_project:
                 return session.transcript_path
         return None
 
-    def _validated_transcript_path(self, value: str | None, project_path: str, session_id: str) -> Path | None:
+    def _validated_transcript_path(self, value: str | None, project_path: str, session_id: str, include_internal: bool = False) -> Path | None:
         if not value or "\x00" in value:
             return None
         path = Path(value)
@@ -287,7 +310,8 @@ class TranscriptImportService:
             return None
         if not resolved.is_file() or resolved.suffix != ".jsonl":
             return None
-        allowed_roots = [home / child for home in self._codex_homes() for child in ("sessions", "archived_sessions")]
+        homes = self._all_codex_homes() if include_internal else self._codex_homes()
+        allowed_roots = [home / child for home in homes for child in ("sessions", "archived_sessions")]
         if not any(resolved.is_relative_to(root) for root in allowed_roots):
             return None
         session = self._read_transcript_session(resolved)

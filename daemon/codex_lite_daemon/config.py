@@ -25,12 +25,19 @@ class Config:
     model: str
     auto_compact_token_limit: int
     auto_compact_token_limit_scope: str
+    # DeepSeek runs in a private Codex home so its Responses history (which
+    # can contain provider-specific reasoning content) is never replayed
+    # through the OpenAI app-server.  Optional defaults keep older test and
+    # embedding configurations source-compatible.
+    deepseek_codex_home: Path | None = None
+    deepseek_codex_sqlite_home: Path | None = None
 
 
 def default_config() -> Config:
     home = Path.home()
     app_data_dir = home / ".local" / "share" / "codex-lite"
     codex_home = home / ".codex"
+    deepseek_codex_home = app_data_dir / "deepseek-codex-home"
     return Config(
         host="127.0.0.1",
         port=0,
@@ -49,6 +56,8 @@ def default_config() -> Config:
         model=os.environ.get("CODEX_LITE_MODEL", ""),
         auto_compact_token_limit=int(os.environ.get("CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT", "100000")),
         auto_compact_token_limit_scope=os.environ.get("CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT_SCOPE", "total"),
+        deepseek_codex_home=deepseek_codex_home,
+        deepseek_codex_sqlite_home=deepseek_codex_home / "sqlite",
     )
 
 
@@ -79,6 +88,8 @@ def load_config(path: Path | None = None) -> Config:
         "model": data.get("model", base.model),
         "auto_compact_token_limit": int(data.get("auto_compact_token_limit", base.auto_compact_token_limit)),
         "auto_compact_token_limit_scope": data.get("auto_compact_token_limit_scope", base.auto_compact_token_limit_scope),
+        "deepseek_codex_home": Path(data["deepseek_codex_home"]) if data.get("deepseek_codex_home") else base.deepseek_codex_home,
+        "deepseek_codex_sqlite_home": Path(data["deepseek_codex_sqlite_home"]) if data.get("deepseek_codex_sqlite_home") else base.deepseek_codex_sqlite_home,
     }
     return _with_env_overrides(Config(**values))
 
@@ -93,6 +104,17 @@ def _with_env_overrides(config: Config) -> Config:
     database_path = Path(os.environ.get("CODEX_LITE_DATABASE", str(config.database_path)))
     app_data_dir = Path(os.environ.get("CODEX_LITE_APP_DATA_DIR", str(config.app_data_dir)))
     run_log_dir = Path(os.environ.get("CODEX_LITE_RUN_LOG_DIR", str(config.run_log_dir)))
+    deepseek_codex_home_value = os.environ.get("CODEX_LITE_DEEPSEEK_CODEX_HOME")
+    deepseek_codex_home = Path(deepseek_codex_home_value) if deepseek_codex_home_value else config.deepseek_codex_home
+    deepseek_sqlite_value = os.environ.get("CODEX_LITE_DEEPSEEK_CODEX_SQLITE_HOME")
+    if deepseek_sqlite_value:
+        deepseek_codex_sqlite_home = Path(deepseek_sqlite_value)
+    elif config.deepseek_codex_sqlite_home is not None:
+        deepseek_codex_sqlite_home = config.deepseek_codex_sqlite_home
+    elif deepseek_codex_home is not None:
+        deepseek_codex_sqlite_home = deepseek_codex_home / "sqlite"
+    else:
+        deepseek_codex_sqlite_home = None
     return Config(
         host=os.environ.get("CODEX_LITE_HOST", config.host),
         port=int(os.environ.get("CODEX_LITE_PORT", config.port)),
@@ -111,4 +133,6 @@ def _with_env_overrides(config: Config) -> Config:
         model=model,
         auto_compact_token_limit=auto_compact_token_limit,
         auto_compact_token_limit_scope=auto_compact_token_limit_scope,
+        deepseek_codex_home=deepseek_codex_home,
+        deepseek_codex_sqlite_home=deepseek_codex_sqlite_home,
     )

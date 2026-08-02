@@ -246,6 +246,57 @@ class ChatService:
         self.get_chat_row(project_id, chat_id)
         self.db.execute("UPDATE chats SET transcript_path = ? WHERE id = ?", (transcript_path, chat_id))
 
+    def get_provider_thread(self, project_id: str, chat_id: str, provider: str) -> dict | None:
+        self.get_chat_row(project_id, chat_id)
+        return self.db.fetchone(
+            "SELECT * FROM chat_provider_threads WHERE chat_id = ? AND provider = ?",
+            (chat_id, provider),
+        )
+
+    def list_provider_threads(self, project_id: str, chat_id: str) -> list[dict]:
+        self.get_chat_row(project_id, chat_id)
+        return self.db.fetchall(
+            "SELECT * FROM chat_provider_threads WHERE chat_id = ? ORDER BY provider ASC",
+            (chat_id,),
+        )
+
+    def upsert_provider_thread(
+        self,
+        project_id: str,
+        chat_id: str,
+        provider: str,
+        thread_id: str,
+        transcript_path: str | None = None,
+        history_initialized: bool | None = None,
+    ) -> dict:
+        self.get_chat_row(project_id, chat_id)
+        now = utc_now()
+        initialized_value = int(bool(history_initialized)) if history_initialized is not None else None
+        self.db.execute(
+            """
+            INSERT INTO chat_provider_threads(
+                chat_id, provider, thread_id, transcript_path,
+                history_initialized, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, COALESCE(?, 0), ?, ?)
+            ON CONFLICT(chat_id, provider) DO UPDATE SET
+              thread_id = excluded.thread_id,
+              transcript_path = COALESCE(excluded.transcript_path, chat_provider_threads.transcript_path),
+              history_initialized = COALESCE(?, chat_provider_threads.history_initialized),
+              updated_at = excluded.updated_at
+            """,
+            (chat_id, provider, thread_id, transcript_path, initialized_value, now, now, initialized_value),
+        )
+        row = self.get_provider_thread(project_id, chat_id, provider)
+        assert row is not None
+        return row
+
+    def update_provider_thread_transcript_path(self, project_id: str, chat_id: str, provider: str, transcript_path: str) -> None:
+        self.get_chat_row(project_id, chat_id)
+        self.db.execute(
+            "UPDATE chat_provider_threads SET transcript_path = ?, updated_at = ? WHERE chat_id = ? AND provider = ?",
+            (transcript_path, utc_now(), chat_id, provider),
+        )
+
     def archive_chat(self, project_id: str, chat_id: str) -> dict:
         self.get_chat_row(project_id, chat_id)
         now = utc_now()

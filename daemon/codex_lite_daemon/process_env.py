@@ -37,7 +37,7 @@ _SAFE_LOGIN_ENV_NAMES = {
 }
 
 
-def codex_process_env(config: Config) -> dict[str, str]:
+def codex_process_env(config: Config, codex_home: Path | None = None, codex_sqlite_home: Path | None = None) -> dict[str, str]:
     env = _login_shell_env()
     deepseek_api_key = read_deepseek_api_key()
     env.update(
@@ -45,8 +45,8 @@ def codex_process_env(config: Config) -> dict[str, str]:
             "HOME": str(Path.home()),
             "USER": os.environ.get("USER", Path.home().name),
             "SHELL": "/bin/bash",
-            "CODEX_HOME": str(config.codex_home),
-            "CODEX_SQLITE_HOME": str(config.codex_sqlite_home),
+            "CODEX_HOME": str(codex_home or config.codex_home),
+            "CODEX_SQLITE_HOME": str(codex_sqlite_home or config.codex_sqlite_home),
             "PATH": env.get("PATH") or DEFAULT_PATH,
         }
     )

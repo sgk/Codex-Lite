@@ -51,6 +51,20 @@ CREATE TABLE IF NOT EXISTS messages (
   kind TEXT NOT NULL CHECK(kind IN ('instruction', 'work', 'conclusion', 'waiting', 'status', 'activity'))
 );
 
+-- One Codex Lite chat may have a separate internal thread per provider.
+-- Keeping this mapping in the Lite DB prevents provider-specific JSONL
+-- histories from being mixed while the visible chat remains one session.
+CREATE TABLE IF NOT EXISTS chat_provider_threads (
+  chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  transcript_path TEXT,
+  history_initialized INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(chat_id, provider)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -82,6 +96,7 @@ CREATE TABLE IF NOT EXISTS automations (
 
 CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id);
 CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages(chat_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_provider_threads_thread ON chat_provider_threads(provider, thread_id);
 CREATE INDEX IF NOT EXISTS idx_runs_chat_started ON runs(chat_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_automations_chat ON automations(project_id, chat_id);
 CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(enabled, running, next_run_at);
