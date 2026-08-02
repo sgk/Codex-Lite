@@ -11,7 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from codex_lite_daemon.app_server import AppServerClient, AppServerNotification
-from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _merge_messages, _notification_details, _notification_summary
+from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _is_reasoning_delta_notification, _merge_messages, _notification_details, _notification_summary, _reasoning_delta, _reasoning_item_id
 from codex_lite_daemon.automation_service import AutomationService, _run_due_automations
 from codex_lite_daemon.codex_state import CodexStateService
 from codex_lite_daemon.config import Config, default_config
@@ -241,6 +241,16 @@ def test_app_server_progress_notifications_have_readable_summaries() -> None:
     assert _notification_summary(AppServerNotification("mcp_tool_call_begin", {"name": "filesystem.read", "arguments": {"path": "AGENTS.md"}})) == "ファイルを読み取っています: AGENTS.md"
     assert _notification_summary(AppServerNotification("mcp_tool_call_end", {"name": "filesystem.write", "arguments": "{\"path\":\"notes.md\"}"})) == "ファイルを編集しました: notes.md"
     assert _notification_summary(AppServerNotification("exec_command_begin", {"command": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz' https://example.test"})) == "コマンドを開始しました: curl -H 'Authorization=<redacted>' https://example.test"
+
+
+def test_reasoning_delta_notifications_are_identified_and_read_without_fallback() -> None:
+    notification = AppServerNotification("item/reasoning/textDelta", {"itemId": "reasoning-1", "delta": "考"})
+
+    assert _is_reasoning_delta_notification(notification)
+    assert _reasoning_delta(notification) == "考"
+    assert _reasoning_item_id(notification) == "reasoning-1"
+    assert not _is_reasoning_delta_notification(AppServerNotification("item/reasoning/started", {"itemId": "reasoning-1"}))
+    assert _reasoning_delta(AppServerNotification("item/reasoning/textDelta", {"delta": 42})) == ""
 
 
 def test_app_server_progress_notification_details_include_output_and_redact_secrets() -> None:

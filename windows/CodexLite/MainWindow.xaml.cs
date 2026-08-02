@@ -43,6 +43,8 @@ public partial class MainWindow : Window
     private static readonly TimeSpan ExternalProcessingWindow = TimeSpan.FromMinutes(30);
     private const int StreamingCharactersPerTick = 512;
     private static readonly TimeSpan StreamingTextInterval = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan ReasoningProgressInterval = TimeSpan.FromMilliseconds(160);
+    private const int ReasoningProgressDisplayLimit = 24000;
     private static readonly TimeSpan AutoScrollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan ProjectListLoadTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ChatListLoadTimeout = TimeSpan.FromSeconds(10);
@@ -64,11 +66,13 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<FileTreeItem> _files = new();
     private readonly ObservableCollection<MessageAttachmentDto> _pendingAttachments = new();
     private readonly Dictionary<string, StreamingTextState> _streamingText = new();
+    private readonly Dictionary<string, ReasoningProgressState> _reasoningProgressByRun = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _chatLoadVersions = new();
     private readonly Dictionary<string, int> _runActivityDepthByChat = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _runProgressTextByChat = new(StringComparer.Ordinal);
     private readonly Dictionary<string, IReadOnlyList<string>> _reasoningEffortsByModel = new(StringComparer.Ordinal);
     private readonly DispatcherTimer _streamingTextTimer = new() { Interval = StreamingTextInterval };
+    private readonly DispatcherTimer _reasoningProgressTimer = new() { Interval = ReasoningProgressInterval };
     private readonly DispatcherTimer _messageRefreshTimer = new() { Interval = TimeSpan.FromSeconds(3) };
     private readonly DispatcherTimer _uiHeartbeatTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     private readonly DispatcherTimer _daemonHealthTimer = new() { Interval = DaemonHealthCheckInterval };
@@ -167,6 +171,7 @@ public partial class MainWindow : Window
         RegisterComposerImeHandlers(MessageBox);
         RegisterComposerImeHandlers(NewChatMessageBox);
         _streamingTextTimer.Tick += StreamingTextTimer_Tick;
+        _reasoningProgressTimer.Tick += ReasoningProgressTimer_Tick;
         _messageRefreshTimer.Tick += MessageRefreshTimer_Tick;
         _daemonHealthTimer.Tick += DaemonHealthTimer_Tick;
         StartUiWatchdog();
@@ -269,6 +274,7 @@ public partial class MainWindow : Window
         _uiWatchdogCts.Cancel();
         _uiHeartbeatTimer.Stop();
         _daemonHealthTimer.Stop();
+        _reasoningProgressTimer.Stop();
         PersistExpandedStateFromTree();
         await _client.ShutdownDaemonAsync();
         Close();
@@ -5608,6 +5614,12 @@ public partial class MainWindow : Window
                     var progress = ExtractSseText(item.Data);
                     var progressMethod = ExtractSseString(item.Data, "method");
                     var progressDetails = ExtractSseString(item.Data, "details");
+                    if (IsReasoningDeltaProgress(progressMethod))
+                    {
+                        QueueReasoningProgress(chatId, runId, progressMethod, ExtractReasoningDelta(progressDetails, progress));
+                        continue;
+                    }
+                    FlushReasoningProgress(runId);
                     WritePerformanceLog("stream-progress", $"runId={LogText(runId)} method={LogText(progressMethod)} summary={LogText(progress)} raw={LogText(item.Data)}");
                     if (progressMethod.Equals("app_server/reconnecting", StringComparison.Ordinal))
                     {
@@ -5653,6 +5665,7 @@ public partial class MainWindow : Window
                 }
                 if (item.Event is "done" or "error")
                 {
+                    FlushReasoningProgress(runId);
                     WritePerformanceLog(
                         "stream-terminal",
                         $"runId={LogText(runId)} event={LogText(item.Event)} outputChars={receivedOutputChars} raw={LogText(item.Data)}");
@@ -5688,6 +5701,7 @@ public partial class MainWindow : Window
         finally
         {
             heartbeat.Stop();
+            FlushReasoningProgress(runId, remove: true);
             if (_activeRunsByChat.TryGetValue(chatId, out var activeRun) && activeRun.RunId == runId)
             {
                 _activeRunsByChat.Remove(chatId);
@@ -5826,6 +5840,140 @@ public partial class MainWindow : Window
             scrollToEnd: shouldFollow);
     }
 
+    private void QueueReasoningProgress(string chatId, string runId, string method, string delta)
+    {
+        if (string.IsNullOrEmpty(delta))
+        {
+            return;
+        }
+        if (!_reasoningProgressByRun.TryGetValue(runId, out var state))
+        {
+            state = new ReasoningProgressState(runId, chatId);
+            _reasoningProgressByRun[runId] = state;
+        }
+        state.Method = method;
+        state.Pending.Append(delta);
+        if (!_reasoningProgressTimer.IsEnabled)
+        {
+            _reasoningProgressTimer.Start();
+        }
+    }
+
+    private void ReasoningProgressTimer_Tick(object? sender, EventArgs e)
+    {
+        using var phase = EnterUiPhase("ReasoningProgressTimer");
+        foreach (var state in _reasoningProgressByRun.Values.ToList())
+        {
+            FlushReasoningProgressState(state);
+        }
+    }
+
+    private void FlushReasoningProgress(string runId, bool remove = false)
+    {
+        if (_reasoningProgressByRun.TryGetValue(runId, out var state))
+        {
+            FlushReasoningProgressState(state);
+            if (remove)
+            {
+                _reasoningProgressByRun.Remove(runId);
+            }
+        }
+        if (_reasoningProgressByRun.Count == 0)
+        {
+            _reasoningProgressTimer.Stop();
+        }
+    }
+
+    private void FlushReasoningProgressState(ReasoningProgressState state)
+    {
+        if (state.Pending.Length == 0)
+        {
+            return;
+        }
+        state.Displayed.Append(state.Pending);
+        state.Pending.Clear();
+        if (state.Displayed.Length > ReasoningProgressDisplayLimit)
+        {
+            state.Displayed.Remove(0, state.Displayed.Length - ReasoningProgressDisplayLimit);
+        }
+        WritePerformanceLog(
+            "stream-reasoning-batch",
+            $"runId={LogText(state.RunId)} chars={state.Displayed.Length}");
+        UpsertReasoningProgressMessage(state);
+    }
+
+    private void UpsertReasoningProgressMessage(ReasoningProgressState state)
+    {
+        if (_selectedChat?.Id != state.ChatId)
+        {
+            return;
+        }
+        var shouldFollow = IsMessagesScrolledNearEnd();
+        var detail = state.Displayed.ToString();
+        for (var i = _messages.Count - 1; i >= 0; i--)
+        {
+            var message = _messages[i];
+            if (!message.Role.Equals("status", StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+            if (message.RunId == state.RunId)
+            {
+                _messages[i] = message with
+                {
+                    Content = string.IsNullOrWhiteSpace(state.Method) ? "思考中" : state.Method,
+                    ActivityDetails = detail,
+                    CreatedAt = DateTimeOffset.UtcNow.ToString("O")
+                };
+                if (shouldFollow)
+                {
+                    ScrollMessagesToEnd();
+                }
+                return;
+            }
+        }
+        AppendMessage(
+            new MessageDto(
+                $"local-reasoning-progress-{Guid.NewGuid():N}",
+                state.ChatId,
+                "status",
+                string.IsNullOrWhiteSpace(state.Method) ? "思考中" : state.Method,
+                state.RunId,
+                DateTimeOffset.UtcNow.ToString("O"),
+                "status",
+                ActivityDetails: detail),
+            scrollToEnd: shouldFollow);
+    }
+
+    private static bool IsReasoningDeltaProgress(string method)
+    {
+        return method.StartsWith("item/reasoning/", StringComparison.OrdinalIgnoreCase)
+            && method.Contains("delta", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ExtractReasoningDelta(string details, string fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(details))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(details);
+                if (document.RootElement.ValueKind == JsonValueKind.Object
+                    && document.RootElement.TryGetProperty("delta", out var delta)
+                    && delta.ValueKind == JsonValueKind.String)
+                {
+                    return delta.GetString() ?? "";
+                }
+            }
+            catch (JsonException)
+            {
+                // Legacy daemons may send the delta as plain text.
+            }
+            return details;
+        }
+        return fallback;
+    }
+
     private static string InlineProgressDetailLine(string method, string content, string details)
     {
         var timestamp = DateTimeOffset.Now.ToString("HH:mm:ss", CultureInfo.CurrentCulture);
@@ -5881,8 +6029,7 @@ public partial class MainWindow : Window
             return false;
         }
         if (IsLowLevelDeltaProgress(method, content)
-            && !method.Equals("exec_command_output_delta", StringComparison.Ordinal)
-            && !method.Contains("reasoning", StringComparison.OrdinalIgnoreCase))
+            && !method.Equals("exec_command_output_delta", StringComparison.Ordinal))
         {
             return false;
         }
@@ -7120,6 +7267,19 @@ public sealed class StreamingTextState(string runId, string chatId)
     public string ChatId { get; } = chatId;
 
     public StringBuilder Pending { get; } = new();
+}
+
+public sealed class ReasoningProgressState(string runId, string chatId)
+{
+    public string RunId { get; } = runId;
+
+    public string ChatId { get; } = chatId;
+
+    public string Method { get; set; } = "";
+
+    public StringBuilder Pending { get; } = new();
+
+    public StringBuilder Displayed { get; } = new();
 }
 
 public sealed class RunProgressEntry(DateTimeOffset timestamp, string content, string? category = null)

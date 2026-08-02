@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import shlex
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,10 @@ from .services import ChatService, MessageService, ProjectService
 from .transcript_import import TranscriptImportService
 from .util.ids import new_id
 from .util.time import utc_now
+
+
+REASONING_PROGRESS_BATCH_SECONDS = 0.15
+REASONING_PROGRESS_MAX_BATCH_CHARS = 4096
 
 
 @dataclass
@@ -363,13 +368,63 @@ class AppServerRunService:
     async def _watch_run(self, run_id: str, notification_queue: asyncio.Queue[AppServerNotification]) -> None:
         run = self.runs[run_id]
         assistant_parts: list[str] = []
+        reasoning_buffers: dict[tuple[str, str], list[str]] = {}
+        reasoning_buffered_chars = 0
+        last_reasoning_flush = time.monotonic()
+
+        async def flush_reasoning_progress() -> None:
+            nonlocal last_reasoning_flush, reasoning_buffered_chars
+            if not reasoning_buffers:
+                last_reasoning_flush = time.monotonic()
+                return
+            pending = list(reasoning_buffers.items())
+            reasoning_buffers.clear()
+            reasoning_buffered_chars = 0
+            for (method, item_id), parts in pending:
+                delta = "".join(parts)
+                if not delta:
+                    continue
+                await self.events.publish(
+                    run_id,
+                    "progress",
+                    {
+                        "method": method,
+                        "summary": method,
+                        "details": json.dumps(
+                            {"itemId": item_id, "delta": delta},
+                            ensure_ascii=False,
+                        ),
+                    },
+                )
+            last_reasoning_flush = time.monotonic()
+
         try:
             while True:
-                notification = await notification_queue.get()
+                try:
+                    notification = await asyncio.wait_for(
+                        notification_queue.get(),
+                        timeout=REASONING_PROGRESS_BATCH_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    await flush_reasoning_progress()
+                    continue
                 if not _notification_matches(notification, run):
                     continue
                 if run.status != "running":
                     return
+                if _is_reasoning_delta_notification(notification):
+                    delta = _reasoning_delta(notification)
+                    if delta:
+                        key = (notification.method, _reasoning_item_id(notification))
+                        reasoning_buffers.setdefault(key, []).append(delta)
+                        reasoning_buffered_chars += len(delta)
+                    if (
+                        time.monotonic() - last_reasoning_flush >= REASONING_PROGRESS_BATCH_SECONDS
+                        or reasoning_buffered_chars >= REASONING_PROGRESS_MAX_BATCH_CHARS
+                    ):
+                        await flush_reasoning_progress()
+                    continue
+                await flush_reasoning_progress()
                 if notification.method == "item/agentMessage/delta":
                     delta = str(notification.params.get("delta") or "")
                     assistant_parts.append(delta)
@@ -434,12 +489,31 @@ class AppServerRunService:
                     await self.events.publish(run_id, "error", {"code": "app_server_error", "message": run.error})
                     return
         except Exception as exc:
+            await flush_reasoning_progress()
             run.status = "failed"
             run.error = str(exc)
             run.finished_at = utc_now()
             await self.events.publish(run_id, "error", {"code": "app_server_run_failed", "message": str(exc)})
         finally:
             self.app_server.unsubscribe_queue(notification_queue)
+
+
+def _is_reasoning_delta_notification(notification: AppServerNotification) -> bool:
+    method = notification.method
+    return method.startswith("item/reasoning/") and "delta" in method.lower()
+
+
+def _reasoning_delta(notification: AppServerNotification) -> str:
+    value = notification.params.get("delta")
+    return value if isinstance(value, str) else ""
+
+
+def _reasoning_item_id(notification: AppServerNotification) -> str:
+    for key in ("itemId", "item_id"):
+        value = notification.params.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _notification_matches(notification: AppServerNotification, run: AppServerActiveRun) -> bool:
