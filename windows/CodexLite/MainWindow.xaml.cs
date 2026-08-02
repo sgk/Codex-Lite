@@ -4691,13 +4691,33 @@ public partial class MainWindow : Window
         OpenContextMenu(sender, e);
     }
 
+    private void TreeContextMenu_Opened(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ContextMenu { PlacementTarget: FrameworkElement element })
+        {
+            return;
+        }
+
+        SelectTreeItemForContextMenu(element);
+    }
+
     private static void OpenContextMenu(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { ContextMenu: not null } element)
         {
+            SelectTreeItemForContextMenu(element);
             element.ContextMenu.PlacementTarget = element;
             element.ContextMenu.IsOpen = true;
             e.Handled = true;
+        }
+    }
+
+    private static void SelectTreeItemForContextMenu(FrameworkElement element)
+    {
+        if (FindVisualAncestor<TreeViewItem>(element) is TreeViewItem treeItem)
+        {
+            treeItem.IsSelected = true;
+            treeItem.Focus();
         }
     }
 
