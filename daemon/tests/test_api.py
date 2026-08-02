@@ -2227,6 +2227,72 @@ def test_codex_state_threads_are_indexed_and_archived_threads_are_hidden(linux_t
     db.close()
 
 
+def test_codex_state_sync_hides_guardian_sessions_only(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    sessions = cfg.codex_home / "sessions"
+    sessions.mkdir(parents=True)
+    guardian_transcript = sessions / "guardian.jsonl"
+    worker_transcript = sessions / "worker.jsonl"
+    guardian_transcript.write_text(
+        json_line(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "thr_guardian",
+                    "cwd": str(project_dir),
+                    "source": {"subagent": {"other": "guardian"}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    worker_transcript.write_text(
+        json_line(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "thr_worker",
+                    "cwd": str(project_dir),
+                    "source": {"subagent": {"other": "worker"}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_codex_state_db(
+        cfg,
+        [
+            ("thr_guardian", str(project_dir), "Approval review", str(guardian_transcript), 0, 1_782_550_800_000, 1_782_550_801_000, None),
+            ("thr_worker", str(project_dir), "Worker task", str(worker_transcript), 0, 1_782_550_800_000, 1_782_550_801_000, None),
+        ],
+    )
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    transcripts = TranscriptImportService(cfg, projects, chats, CodexStateService(cfg))
+    project = projects.create_project(str(project_dir))
+    chats.upsert_chat_index(
+        project["id"],
+        "thr_guardian",
+        "Previously imported guardian",
+        "thr_guardian",
+        "2026-06-26T00:00:00Z",
+        "2026-06-26T00:00:00Z",
+        str(guardian_transcript),
+    )
+
+    transcripts.index_project(project)
+
+    visible = chats.list_chats(project["id"])
+    assert [(chat["id"], chat["title"]) for chat in visible] == [("thr_worker", "Worker task")]
+    guardian = db.fetchone("SELECT archived_at FROM chats WHERE id = ?", ("thr_guardian",))
+    assert guardian is not None and guardian["archived_at"] is not None
+    db.close()
+
+
 def test_codex_state_sync_ignores_jsonl_only_sessions_when_db_is_available(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()

@@ -108,6 +108,8 @@ OpenAIとDeepSeekの切り替えは、Codex app-serverのプロバイダー設�
 
 Windowsアプリは `wsl.exe -d <ディストリビューション> -- bash -c ...` で同梱スクリプトを起動する。起動時に login shell は使わない。これは `.bash_profile` 等で ssh-agent や ssh-add がパスフレーズ入力待ちになり、デーモン起動が止まることを避けるためである。スクリプトは `$HOME/.local/share/codex-lite/daemon-venv` を作成または再利用し、同梱 `pyproject.toml` のハッシュが変わった場合だけパッケージを再導入する。
 
+開発ビルドでは `windows/CodexLite/bin` をビルド成果物、`runtime/CodexLite` を実行用配置先として分離する。ビルドが成功するまでは実行中クライアントを停止しない。成功後の配置は独立したWindowsプロセスへ引き渡し、隣接ディレクトリへのコピー完了後にクライアントを正常終了して実行用ディレクトリを入れ替え、最新クライアントを起動する。デスクトップショートカットは実行用配置先を参照する。
+
 初回起動時間と Python バージョン差の影響を抑えるため、デーモンのHTTP層は Starlette と標準 uvicorn を使い、FastAPI/Pydantic や `uvicorn[standard]` のようなネイティブ拡張を含みやすい依存には頼らない。配布ZIPには仮想環境そのものを同梱しない。仮想環境は起動先WSLのPythonで作成し、Python 3.11以上の複数バージョンに対応する。
 
 デーモンは必ず `127.0.0.1` にbindし、既定ではOSが選んだ空きポートを使う。待受完了時、標準出力へ `{"event":"ready","host":"127.0.0.1","port":...}` を1行出す。Windowsアプリはこの行を読んでHTTP接続先を決める。標準エラーはログとして回収する。
@@ -166,6 +168,8 @@ Codex Liteは、選択中の本人の `CODEX_HOME` に対応する `sqlite` デ�
 DBは候補の存在、`threads` テーブル、必須カラムを検査してから読む。想定スキーマでない場合は推測で処理せず同期を停止し、理由だけを診断情報へ出す。認証情報、Cookie、トークン、APIキー、`auth.json` は読まない。
 
 `cwd` はWindowsドライブ表記なら `/mnt/<ドライブ>/...` に変換し、実在するディレクトリだけを候補にする。`rollout_path` は実在する `.jsonl` で、選択中の `CODEX_HOME` の `sessions` または `archived_sessions` 配下にある場合だけ採用する。
+
+対応するJSONLの `session_meta.payload.source.subagent.other` が `guardian` のスレッドは、Codexの自動承認判断に使われる内部セッションのため、プロジェクト候補とチャット一覧へ表示しない。その他のサブエージェントセッションは通常どおり同期する。
 
 ### 6.2 履歴の表示
 

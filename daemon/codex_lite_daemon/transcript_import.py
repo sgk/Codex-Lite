@@ -32,6 +32,7 @@ class TranscriptSession:
     archived_state_known: bool = False
     can_continue: bool = False
     continue_disabled_reason: str | None = "このチャットは取り込み済み履歴のため、Codex Liteからは継続できません。"
+    hidden: bool = False
 
 
 class TranscriptImportService:
@@ -45,7 +46,7 @@ class TranscriptImportService:
         candidates: dict[Path, ProjectCandidate] = {}
         registered = {_path_key(Path(project["path"]).resolve()) for project in self.projects.list_projects()}
         for session in self._transcript_sessions():
-            if session.archived or _path_key(session.path) in registered:
+            if session.hidden or session.archived or _path_key(session.path) in registered:
                 continue
             candidate = candidates.setdefault(session.path, ProjectCandidate(path=session.path))
             candidate.thread_count += 1
@@ -92,9 +93,9 @@ class TranscriptImportService:
         if not sessions:
             project_key = _path_key(project_path)
             sessions = [session for path, path_sessions in all_sessions.items() if _path_key(path) == project_key for session in path_sessions]
-        active_session_ids = {session.id for session in sessions if session.can_continue}
+        active_session_ids = {session.id for session in sessions if session.can_continue and not session.hidden}
         for session in sessions:
-            if not session.can_continue:
+            if session.hidden or not session.can_continue:
                 continue
             self.chats.upsert_chat_index(
                 project["id"],
@@ -172,6 +173,7 @@ class TranscriptImportService:
             archived_state_known=True,
             can_continue=thread.can_continue,
             continue_disabled_reason=thread.continue_disabled_reason,
+            hidden=thread.hidden,
         )
 
     def _codex_homes(self) -> list[Path]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ class CodexThreadMetadata:
     archived: bool
     can_continue: bool
     continue_disabled_reason: str | None
+    hidden: bool = False
 
 
 class CodexStateService:
@@ -118,6 +120,7 @@ class CodexStateService:
         if project_path is None:
             return None
         transcript_path = self._transcript_path(row["rollout_path"])
+        hidden = _is_guardian_session(transcript_path)
         archived = bool(row["archived"])
         can_continue, continue_disabled_reason = self._continue_state(transcript_path, archived)
         created_at = _timestamp(row["created_at_ms"]) or _timestamp(row["created_at"])
@@ -135,6 +138,7 @@ class CodexStateService:
             archived=archived,
             can_continue=can_continue,
             continue_disabled_reason=continue_disabled_reason,
+            hidden=hidden,
         )
 
     def _continue_state(self, transcript_path: Path | None, archived: bool) -> tuple[bool, str | None]:
@@ -192,6 +196,31 @@ class CodexStateService:
 def _has_threads_table(conn: sqlite3.Connection) -> bool:
     row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'threads'").fetchone()
     return row is not None
+
+
+def _is_guardian_session(transcript_path: Path | None) -> bool:
+    if transcript_path is None:
+        return False
+    try:
+        with transcript_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for _, line in zip(range(200), handle):
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if item.get("type") != "session_meta":
+                    continue
+                payload = item.get("payload")
+                if not isinstance(payload, dict):
+                    return False
+                source = payload.get("source")
+                if not isinstance(source, dict):
+                    return False
+                subagent = source.get("subagent")
+                return isinstance(subagent, dict) and subagent.get("other") == "guardian"
+    except OSError:
+        return False
+    return False
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:

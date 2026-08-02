@@ -17,7 +17,7 @@ debug-build:
 	"$(POWERSHELL)" -NoProfile -ExecutionPolicy Bypass -File scripts/build-debug.ps1
 
 debug-build-launch:
-	"$(POWERSHELL)" -NoProfile -ExecutionPolicy Bypass -File scripts/build-debug.ps1 -Launch
+	"$(POWERSHELL)" -NoProfile -ExecutionPolicy Bypass -File scripts/build-debug.ps1
 
 release-zip:
 	mkdir -p "$(ARTIFACTS_DIR)"

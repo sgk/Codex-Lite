@@ -36,31 +36,30 @@ WSL のプロジェクトルートで、Windows の .NET SDKを使ってビル�
 '/mnt/c/Program Files/dotnet/dotnet.exe' build windows/CodexLite.sln
 ```
 
-開発中に Codex Lite 自身からビルドする場合は、実行中の自分自身を終了しないよう、次の補助ターゲットを使います。このターゲットは Windows 側で親プロセスを辿り、その親系譜に含まれる `CodexLite.exe` は終了対象から除外します。
+開発中は次の補助ターゲットを使います。先にビルドを完了し、成功後の配置処理は独立したWindowsプロセスへ引き渡します。出力一式を実行用ディレクトリの隣へ準備してから、実行中のCodex Liteを正常終了し、実行用ディレクトリを短時間で入れ替えます。その後、デスクトップの `Codex Lite` ショートカットを実行用ディレクトリへ向け、最新ビルドを起動します。Windows側の親プロセスを辿り、その親系譜に含まれるプロセスは停止対象から除外します。
 
 ```bash
 make debug-build
 ```
 
-出力先は通常、次のディレクトリです。
+ビルド成果物と実行用ファイルは次の別々のディレクトリを使います。
 
 ```text
-windows/CodexLite/bin/Debug/net8.0-windows/
+ビルド成果物: windows/CodexLite/bin/Debug/net8.0-windows/
+実行用:       runtime/CodexLite/
 ```
 
-ビルド時には `CodexLite.exe`、`CodexLite.dll` に加え、`run-daemon.sh` と `daemon/` が出力先へコピーされます。配布する場合は、この一式を同じディレクトリ構成のまままとめてください。
+ビルド時には `CodexLite.exe`、`CodexLite.dll` に加え、`run-daemon.sh` と `daemon/` が出力先へコピーされます。実行中プロセスを止めるのは、準備済みディレクトリを実行用ディレクトリへ切り替える間だけです。配置結果とエラーは `runtime/deploy-debug.log` で確認できます。
 
 ## 起動方法
 
-開発中は、WSL上のDLLをWindowsの `dotnet.exe` で起動します。PowerShellで次を実行してください（パスとディストリビューション名は環境に合わせて変更します）。
+通常は `make debug-build` が配置と起動まで行います。手動で起動する場合は、実行用ディレクトリの `CodexLite.exe` を使います。
 
 ```powershell
-$dotnet = "C:\Program Files\dotnet\dotnet.exe"
-$dll = "C:\path\to\Codex-Lite\windows\CodexLite\bin\Debug\net8.0-windows\CodexLite.dll"
-Start-Process -FilePath $dotnet -ArgumentList @($dll) -WindowStyle Hidden
+Start-Process "\\wsl.localhost\Ubuntu-24.04\home\user\Codex-Lite\runtime\CodexLite\CodexLite.exe"
 ```
 
-`\\wsl.localhost\...` 上の `CodexLite.exe` を直接起動すると、Windows がネットワーク上の実行ファイルと判断して警告する場合があります。開発時は上記のDLL起動を推奨します。Windows側へ出力一式をコピーした場合は、`CodexLite.exe` を直接起動できます。
+デスクトップショートカットも同じ実行用ファイルを参照します。`windows/CodexLite/bin` 内のビルド成果物を直接起動しません。
 
 起動すると、アプリが `wsl.exe` 経由で同梱の `run-daemon.sh` を実行します。初回は WSL の `$HOME/.local/share/codex-lite/daemon-venv` に仮想環境を作成し、必要なPythonパッケージを導入するため、少し時間がかかることがあります。デーモン依存は Python 3.11以上の複数バージョンで動かしやすいよう、Starlette と標準 uvicorn を中心にした軽量構成です。以後は `pyproject.toml` が変わったときだけ再導入します。
 
