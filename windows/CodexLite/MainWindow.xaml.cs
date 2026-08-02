@@ -1721,6 +1721,11 @@ public partial class MainWindow : Window
         }
         _selectedProject = item.Project;
         _selectedChat = item.Chat;
+        await LoadChatRuntimeSettingsAsync(item.Project.Id, item.Chat.Id, generation);
+        if (!IsSelectionCurrent(generation, item.Project.Id, item.Chat.Id))
+        {
+            return;
+        }
         UpdateCommandButtonState();
         UpdateRightPaneVisibility();
         MarkSelectedConversationSeen();
@@ -1743,6 +1748,26 @@ public partial class MainWindow : Window
             ? $"chat | {item.Project.Name} | {item.Chat.Title}"
             : $"chat | {item.Project.Name} | {item.Chat.Title} | read-only | {item.Chat.ContinueDisabledReason}";
         SaveUiState();
+    }
+
+    private async Task LoadChatRuntimeSettingsAsync(string projectId, string chatId, long? requestedGeneration = null)
+    {
+        try
+        {
+            var settings = await _client.GetChatSettingsAsync(projectId, chatId);
+            if (settings is null)
+            {
+                return;
+            }
+            if (requestedGeneration is null || IsSelectionCurrent(requestedGeneration.Value, projectId, chatId))
+            {
+                ApplyChatRuntimeSettingsSelection(settings);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"chat settings load error | {ShortError(ex)}";
+        }
     }
 
     private bool IsSelectionCurrent(long generation, string projectId, string? chatId)
@@ -3783,24 +3808,32 @@ public partial class MainWindow : Window
     {
         _runtimeSettings = settings;
         UpdateModelChoices(settings.AvailableModels);
+        ApplyRuntimeSettingsToControls(settings, NewChatPermissionModeBox, NewChatModelBox, NewChatReasoningEffortBox);
+        if (_selectedProject is not null && _selectedChat is null)
+        {
+            _ = RefreshUsageCapacityAsync();
+        }
+    }
+
+    private void ApplyChatRuntimeSettingsSelection(AppSettingsDto settings)
+    {
+        UpdateModelChoices(settings.AvailableModels);
+        ApplyRuntimeSettingsToControls(settings, ChatPermissionModeBox, ChatModelBox, ChatReasoningEffortBox);
+    }
+
+    private void ApplyRuntimeSettingsToControls(AppSettingsDto settings, ComboBox permissionModeBox, ComboBox modelBox, ComboBox reasoningBox)
+    {
         _isLoadingRuntimeSettings = true;
         try
         {
-            var mode = PermissionModeForSettings(settings);
-            SelectPermissionMode(NewChatPermissionModeBox, mode);
-            SelectPermissionMode(ChatPermissionModeBox, mode);
-            SelectModel(NewChatModelBox, settings.Model);
-            SelectModel(ChatModelBox, settings.Model);
-            SelectReasoningEffort(NewChatReasoningEffortBox, settings.ReasoningEffort);
-            SelectReasoningEffort(ChatReasoningEffortBox, settings.ReasoningEffort);
+            SelectPermissionMode(permissionModeBox, PermissionModeForSettings(settings));
+            SelectModel(modelBox, settings.Model);
+            UpdateReasoningEffortChoices(reasoningBox, settings.Model);
+            SelectReasoningEffort(reasoningBox, settings.ReasoningEffort);
         }
         finally
         {
             _isLoadingRuntimeSettings = false;
-        }
-        if (_selectedProject is not null && _selectedChat is null)
-        {
-            _ = RefreshUsageCapacityAsync();
         }
     }
 
@@ -3869,22 +3902,28 @@ public partial class MainWindow : Window
                 choices.Add(normalized);
             }
         }
-        var selectedModel = _runtimeSettings?.Model;
-        if (!string.IsNullOrWhiteSpace(selectedModel) && !choices.Contains(selectedModel, StringComparer.Ordinal))
+        var selectedModels = new[] { _runtimeSettings?.Model, SelectedModel(NewChatModelBox), SelectedModel(ChatModelBox) }
+            .Where(model => !string.IsNullOrWhiteSpace(model))
+            .Distinct(StringComparer.Ordinal);
+        foreach (var selectedModel in selectedModels)
         {
-            choices.Add(selectedModel);
+            if (!choices.Contains(selectedModel, StringComparer.Ordinal))
+            {
+                choices.Add(selectedModel!);
+            }
         }
 
         _isLoadingRuntimeSettings = true;
         try
         {
+            var newChatModel = SelectedModel(NewChatModelBox);
+            var chatModel = SelectedModel(ChatModelBox);
             PopulateModelChoices(NewChatModelBox, choices);
             PopulateModelChoices(ChatModelBox, choices);
-            var currentModel = _runtimeSettings?.Model ?? "";
-            SelectModel(NewChatModelBox, currentModel);
-            SelectModel(ChatModelBox, currentModel);
-            UpdateReasoningEffortChoices(NewChatReasoningEffortBox, currentModel);
-            UpdateReasoningEffortChoices(ChatReasoningEffortBox, currentModel);
+            SelectModel(NewChatModelBox, newChatModel);
+            SelectModel(ChatModelBox, chatModel);
+            UpdateReasoningEffortChoices(NewChatReasoningEffortBox, SelectedModel(NewChatModelBox));
+            UpdateReasoningEffortChoices(ChatReasoningEffortBox, SelectedModel(ChatModelBox));
         }
         finally
         {
@@ -4034,16 +4073,34 @@ public partial class MainWindow : Window
         _isApplyingRuntimeSetting = true;
         try
         {
-            var settings = await _client.UpdateSettingsAsync(
-                modeSettings.PermissionProfile,
-                modeSettings.ApprovalPolicy,
-                SelectedModel(modelBox),
-                SelectedReasoningEffort(reasoningBox),
-                modeSettings.ApprovalsReviewer);
+            var settings = isNewChat
+                ? await _client.UpdateSettingsAsync(
+                    modeSettings.PermissionProfile,
+                    modeSettings.ApprovalPolicy,
+                    SelectedModel(modelBox),
+                    SelectedReasoningEffort(reasoningBox),
+                    modeSettings.ApprovalsReviewer)
+                : _selectedProject is ProjectDto project && _selectedChat is ChatDto chat
+                    ? await _client.UpdateChatSettingsAsync(
+                        project.Id,
+                        chat.Id,
+                        modeSettings.PermissionProfile,
+                        modeSettings.ApprovalPolicy,
+                        SelectedModel(modelBox),
+                        SelectedReasoningEffort(reasoningBox),
+                        modeSettings.ApprovalsReviewer)
+                    : null;
             if (settings is not null)
             {
-                ApplyRuntimeSettingsSelection(settings);
-                StatusText.Text = $"実行設定 | {DisplayRuntimeSettings(settings)}";
+                if (isNewChat)
+                {
+                    ApplyRuntimeSettingsSelection(settings);
+                }
+                else
+                {
+                    ApplyChatRuntimeSettingsSelection(settings);
+                }
+                StatusText.Text = $"このチャットの実行設定 | {DisplayRuntimeSettings(settings)}";
             }
         }
         catch (Exception ex)
@@ -5454,7 +5511,17 @@ public partial class MainWindow : Window
         var title = TitleFromFirstInstruction(firstMessage);
         try
         {
-            var created = await RunActivityAsync("チャットを作成中...", () => _client.CreateChatAsync(project.Id, title));
+            var modeSettings = SettingsForPermissionMode(SelectedPermissionMode(NewChatPermissionModeBox) ?? "ask-for-approval");
+            var created = await RunActivityAsync(
+                "チャットを作成中...",
+                () => _client.CreateChatAsync(
+                    project.Id,
+                    title,
+                    modeSettings.PermissionProfile,
+                    modeSettings.ApprovalPolicy,
+                    SelectedModel(NewChatModelBox),
+                    SelectedReasoningEffort(NewChatReasoningEffortBox),
+                    modeSettings.ApprovalsReviewer));
             if (created is null)
             {
                 return null;
@@ -5465,6 +5532,7 @@ public partial class MainWindow : Window
             _messages.Clear();
             UpdateCommandButtonState();
             UpdateRightPaneVisibility();
+            await LoadChatRuntimeSettingsAsync(project.Id, created.Id);
             StatusText.Text = $"chat | {project.Name} | {created.Title}";
             return created;
         }

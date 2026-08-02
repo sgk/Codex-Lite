@@ -52,22 +52,23 @@ class AppServerThreadService:
     async def get_chat(self, project_id: str, chat_id: str) -> dict:
         return self.chats.get_chat(project_id, chat_id)
 
-    async def create_chat(self, project_id: str, title: str | None = None) -> dict:
+    async def create_chat(self, project_id: str, title: str | None = None, settings: AppServerRuntimeSettings | None = None) -> dict:
         project = self.projects.get_project_row(project_id)
-        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(self.settings.model))
+        runtime_settings = replace(settings or self.settings)
+        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(runtime_settings.model))
         start_params: dict[str, Any] = {"cwd": project["path"]}
-        if self.settings.model:
-            start_params["model"] = self.settings.model
-            provider = model_provider_for_model(self.settings.model)
+        if runtime_settings.model:
+            start_params["model"] = runtime_settings.model
+            provider = model_provider_for_model(runtime_settings.model)
             if provider == DEEPSEEK_PROVIDER:
                 start_params["modelProvider"] = provider
         response = await app_server.request("thread/start", start_params)
         thread = response["thread"]
-        await _apply_codex_lite_thread_settings(app_server, thread["id"], self.settings)
+        await _apply_codex_lite_thread_settings(app_server, thread["id"], runtime_settings)
         clean_title = (title or "New Chat").strip() or "New Chat"
         await app_server.request("thread/name/set", {"threadId": thread["id"], "name": clean_title})
         chat = _chat_out(project_id, thread) | {"title": clean_title}
-        return self.chats.upsert_chat_index(
+        result = self.chats.upsert_chat_index(
             project_id,
             chat["id"],
             chat["title"],
@@ -75,6 +76,8 @@ class AppServerThreadService:
             chat["createdAt"],
             chat["updatedAt"],
         )
+        self.chats.update_chat_settings(project_id, result["id"], _runtime_settings_values(runtime_settings))
+        return result
 
     async def update_chat(self, project_id: str, chat_id: str, title: str | None) -> dict:
         chat = self.chats.get_chat_row(project_id, chat_id)
@@ -83,7 +86,8 @@ class AppServerThreadService:
             raise AppError("validation_error", "Chat title must not be empty.")
         updated = self.chats.update_chat(project_id, chat_id, clean_title)
         thread_id = str(chat.get("codex_session_id") or chat_id)
-        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(self.settings.model))
+        runtime_settings = self.settings_for_chat(project_id, chat_id)
+        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(runtime_settings.model))
         try:
             await app_server.request("thread/name/set", {"threadId": thread_id, "name": clean_title})
         except AppError:
@@ -92,7 +96,8 @@ class AppServerThreadService:
 
     async def archive_chat(self, project_id: str, chat_id: str) -> dict:
         chat = self.chats.get_chat_row(project_id, chat_id)
-        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(self.settings.model))
+        runtime_settings = self.settings_for_chat(project_id, chat_id)
+        app_server = _app_server_for_provider(self.app_server, model_provider_for_model(runtime_settings.model))
         for candidate_thread_id in _candidate_thread_ids(chat_id, chat.get("codex_session_id")):
             try:
                 await app_server.request("thread/archive", {"threadId": candidate_thread_id})
@@ -107,6 +112,20 @@ class AppServerThreadService:
         # Imported JSONL sessions may no longer be known to app-server. They
         # still need to disappear from Codex Lite's active list.
         return self.chats.archive_chat(project_id, chat_id)
+
+    def settings_for_chat(self, project_id: str, chat_id: str) -> AppServerRuntimeSettings:
+        stored = self.chats.get_chat_settings_row(project_id, chat_id)
+        settings = replace(
+            self.settings,
+            permission_profile=stored.get("permission_profile") or self.settings.permission_profile,
+            approval_policy=stored.get("approval_policy") or self.settings.approval_policy,
+            approvals_reviewer=stored.get("approvals_reviewer") or self.settings.approvals_reviewer,
+            model=stored.get("model") or self.settings.model,
+            reasoning_effort=stored.get("reasoning_effort") or self.settings.reasoning_effort,
+        )
+        if any(value is None for value in stored.values()):
+            self.chats.update_chat_settings(project_id, chat_id, _runtime_settings_values(settings))
+        return settings
 
     async def delete_chat(self, project_id: str, chat_id: str) -> None:
         # Codex app surfaces archive as the normal way to remove a thread from
@@ -204,6 +223,16 @@ def _app_server_for_provider(app_server: Any, provider: str) -> Any:
     return app_server
 
 
+def _runtime_settings_values(settings: AppServerRuntimeSettings) -> dict[str, str]:
+    return {
+        "permission_profile": settings.permission_profile,
+        "approval_policy": settings.approval_policy,
+        "approvals_reviewer": settings.approvals_reviewer,
+        "model": settings.model,
+        "reasoning_effort": settings.reasoning_effort,
+    }
+
+
 def _acquire_run_lease(app_server: Any) -> None:
     acquire_run = getattr(app_server, "acquire_run", None)
     if callable(acquire_run):
@@ -240,7 +269,7 @@ class AppServerRunService:
             raise AppError("chat_read_only", str(chat.get("continue_disabled_reason") or "This imported Codex history cannot be continued by Codex Lite."), 409)
         input_items = _build_turn_input(content, attachments or [])
         run_id = new_id("run")
-        run_settings = replace(self.settings)
+        run_settings = self.threads.settings_for_chat(project_id, chat_id)
         provider = model_provider_for_model(run_settings.model)
         app_server = _app_server_for_provider(self.app_server, provider)
         user_message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")

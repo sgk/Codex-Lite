@@ -420,11 +420,20 @@ public sealed class DaemonClient
     public Task<ChatDto?> CreateChatAsync(string projectId, string title, CancellationToken cancellationToken = default) =>
         PostAsync<ChatDto>($"/projects/{projectId}/chats", new { title }, cancellationToken);
 
+    public Task<ChatDto?> CreateChatAsync(string projectId, string title, string permissionProfile, string approvalPolicy, string model, string reasoningEffort, string approvalsReviewer = "user", CancellationToken cancellationToken = default) =>
+        PostAsync<ChatDto>($"/projects/{projectId}/chats", new { title, permissionProfile, approvalPolicy, approvalsReviewer, model, reasoningEffort }, cancellationToken);
+
     public Task<ChatDto?> RenameChatAsync(string projectId, string chatId, string title, CancellationToken cancellationToken = default) =>
         PatchAsync<ChatDto>($"/projects/{projectId}/chats/{chatId}", new { title }, cancellationToken);
 
     public Task<ChatDto?> ArchiveChatAsync(string projectId, string chatId, CancellationToken cancellationToken = default) =>
         PostAsync<ChatDto>($"/projects/{projectId}/chats/{chatId}/archive", new { }, cancellationToken);
+
+    public Task<AppSettingsDto?> GetChatSettingsAsync(string projectId, string chatId, CancellationToken cancellationToken = default) =>
+        _http.GetFromJsonAsync<AppSettingsDto>($"/projects/{projectId}/chats/{chatId}/settings", JsonOptions, cancellationToken);
+
+    public Task<AppSettingsDto?> UpdateChatSettingsAsync(string projectId, string chatId, string permissionProfile, string approvalPolicy, string model, string reasoningEffort, string approvalsReviewer = "user", CancellationToken cancellationToken = default) =>
+        PatchAsync<AppSettingsDto>($"/projects/{projectId}/chats/{chatId}/settings", new { permissionProfile, approvalPolicy, approvalsReviewer, model, reasoningEffort }, cancellationToken);
 
     public Task<List<AutomationDto>?> ListAutomationsAsync(string projectId, string chatId, CancellationToken cancellationToken = default) =>
         _http.GetFromJsonAsync<List<AutomationDto>>($"/projects/{projectId}/chats/{chatId}/automations", JsonOptions, cancellationToken);

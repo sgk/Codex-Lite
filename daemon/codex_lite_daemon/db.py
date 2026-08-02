@@ -33,7 +33,12 @@ CREATE TABLE IF NOT EXISTS chats (
   updated_at TEXT NOT NULL,
   archived_at TEXT,
   can_continue INTEGER NOT NULL DEFAULT 1,
-  continue_disabled_reason TEXT
+  continue_disabled_reason TEXT,
+  permission_profile TEXT,
+  approval_policy TEXT,
+  approvals_reviewer TEXT,
+  model TEXT,
+  reasoning_effort TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -104,6 +109,16 @@ class Database:
                 self._conn.execute("ALTER TABLE chats ADD COLUMN can_continue INTEGER NOT NULL DEFAULT 1")
             if "continue_disabled_reason" not in columns:
                 self._conn.execute("ALTER TABLE chats ADD COLUMN continue_disabled_reason TEXT")
+            if "permission_profile" not in columns:
+                self._conn.execute("ALTER TABLE chats ADD COLUMN permission_profile TEXT")
+            if "approval_policy" not in columns:
+                self._conn.execute("ALTER TABLE chats ADD COLUMN approval_policy TEXT")
+            if "approvals_reviewer" not in columns:
+                self._conn.execute("ALTER TABLE chats ADD COLUMN approvals_reviewer TEXT")
+            if "model" not in columns:
+                self._conn.execute("ALTER TABLE chats ADD COLUMN model TEXT")
+            if "reasoning_effort" not in columns:
+                self._conn.execute("ALTER TABLE chats ADD COLUMN reasoning_effort TEXT")
             message_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()}
             if "kind" not in message_columns:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'conclusion'")

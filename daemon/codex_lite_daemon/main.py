@@ -238,9 +238,10 @@ def create_app(config: Config | None = None) -> Starlette:
 
     @post("/projects/{project_id}/chats")
     async def create_chat(project_id: str, body: dict) -> dict:
+        requested_settings = _runtime_settings_from_body(app_settings, body)
         if use_app_server:
-            return await app_threads.create_chat(project_id, _optional_str(body, "title"))
-        return chats.create_chat(project_id, _optional_str(body, "title"))
+            return await app_threads.create_chat(project_id, _optional_str(body, "title"), requested_settings)
+        return chats.create_chat(project_id, _optional_str(body, "title"), _runtime_settings_values(requested_settings))
 
     @get("/projects/{project_id}/chats/{chat_id}")
     async def get_chat(project_id: str, chat_id: str) -> dict:
@@ -259,6 +260,21 @@ def create_app(config: Config | None = None) -> Starlette:
         if use_app_server:
             return await app_threads.archive_chat(project_id, chat_id)
         return chats.archive_chat(project_id, chat_id)
+
+    @get("/projects/{project_id}/chats/{chat_id}/settings")
+    async def get_chat_settings(project_id: str, chat_id: str) -> dict:
+        stored = chats.get_chat_settings_row(project_id, chat_id)
+        settings = _runtime_settings_for_chat(app_settings, stored)
+        if any(value is None for value in stored.values()):
+            chats.update_chat_settings(project_id, chat_id, _runtime_settings_values(settings))
+        return _settings_out(settings, _static_model_options(settings.model))
+
+    @patch("/projects/{project_id}/chats/{chat_id}/settings")
+    async def update_chat_settings(project_id: str, chat_id: str, body: dict) -> dict:
+        current = _runtime_settings_for_chat(app_settings, chats.get_chat_settings_row(project_id, chat_id))
+        settings = _runtime_settings_from_body(current, body)
+        chats.update_chat_settings(project_id, chat_id, _runtime_settings_values(settings))
+        return _settings_out(settings, _static_model_options(settings.model))
 
     @get("/projects/{project_id}/chats/{chat_id}/automations")
     async def list_automations(project_id: str, chat_id: str) -> list[dict]:
@@ -661,6 +677,55 @@ def _settings_out(settings: AppServerRuntimeSettings, models: list[str]) -> dict
         "availableModels": models,
         "availableReasoningEfforts": _static_reasoning_efforts(settings.model),
     }
+
+
+def _runtime_settings_values(settings: AppServerRuntimeSettings) -> dict[str, str]:
+    return {
+        "permission_profile": settings.permission_profile,
+        "approval_policy": settings.approval_policy,
+        "approvals_reviewer": settings.approvals_reviewer,
+        "model": settings.model,
+        "reasoning_effort": settings.reasoning_effort,
+    }
+
+
+def _runtime_settings_for_chat(defaults: AppServerRuntimeSettings, row: dict) -> AppServerRuntimeSettings:
+    def stored(name: str, fallback: str) -> str:
+        value = row.get(name)
+        return value if isinstance(value, str) and value != "" else fallback
+
+    return AppServerRuntimeSettings(
+        permission_profile=_normalized_permission_profile(stored("permission_profile", defaults.permission_profile)),
+        approval_policy=_normalized_approval_policy(stored("approval_policy", defaults.approval_policy)),
+        model=_normalized_model(stored("model", defaults.model)),
+        reasoning_effort=_normalized_reasoning_effort(stored("reasoning_effort", defaults.reasoning_effort)),
+        approvals_reviewer=_normalized_approvals_reviewer(stored("approvals_reviewer", defaults.approvals_reviewer)),
+    )
+
+
+def _runtime_settings_from_body(defaults: AppServerRuntimeSettings, body: dict) -> AppServerRuntimeSettings:
+    permission_profile = defaults.permission_profile
+    approval_policy = defaults.approval_policy
+    approvals_reviewer = defaults.approvals_reviewer
+    model = defaults.model
+    reasoning_effort = defaults.reasoning_effort
+    if "permissionProfile" in body:
+        permission_profile = _normalized_permission_profile(str(body.get("permissionProfile") or ""))
+    if "approvalPolicy" in body:
+        approval_policy = _normalized_approval_policy(str(body.get("approvalPolicy") or ""))
+    if "approvalsReviewer" in body:
+        approvals_reviewer = _normalized_approvals_reviewer(str(body.get("approvalsReviewer") or ""))
+    if "model" in body:
+        model = _normalized_model(str(body.get("model") or ""))
+    if "reasoningEffort" in body:
+        reasoning_effort = _normalized_reasoning_effort(str(body.get("reasoningEffort") or ""))
+    return AppServerRuntimeSettings(
+        permission_profile=permission_profile,
+        approval_policy=approval_policy,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        approvals_reviewer=approvals_reviewer,
+    )
 
 
 def _settings_path(config: Config) -> Path:

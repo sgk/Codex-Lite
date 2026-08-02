@@ -110,16 +110,64 @@ class ChatService:
     def get_chat(self, project_id: str, chat_id: str) -> dict:
         return chat_out(self.get_chat_row(project_id, chat_id))
 
-    def create_chat(self, project_id: str, title: str | None = None) -> dict:
+    def create_chat(self, project_id: str, title: str | None = None, settings: dict[str, str] | None = None) -> dict:
         self.projects.get_project_row(project_id)
         now = utc_now()
         chat_id = new_id("cht")
         clean_title = _clean_title(title)
         self.db.execute(
-            "INSERT INTO chats(id, project_id, title, codex_session_id, transcript_path, created_at, updated_at, archived_at, can_continue, continue_disabled_reason) VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, 1, NULL)",
-            (chat_id, project_id, clean_title, now, now),
+            """
+            INSERT INTO chats(
+                id, project_id, title, codex_session_id, transcript_path,
+                created_at, updated_at, archived_at, can_continue,
+                continue_disabled_reason, permission_profile, approval_policy,
+                approvals_reviewer, model, reasoning_effort
+            ) VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL, 1, NULL, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                project_id,
+                clean_title,
+                now,
+                now,
+                (settings or {}).get("permission_profile"),
+                (settings or {}).get("approval_policy"),
+                (settings or {}).get("approvals_reviewer"),
+                (settings or {}).get("model"),
+                (settings or {}).get("reasoning_effort"),
+            ),
         )
         return self.get_chat(project_id, chat_id)
+
+    def get_chat_settings_row(self, project_id: str, chat_id: str) -> dict:
+        row = self.get_chat_row(project_id, chat_id)
+        return {
+            "permission_profile": row.get("permission_profile"),
+            "approval_policy": row.get("approval_policy"),
+            "approvals_reviewer": row.get("approvals_reviewer"),
+            "model": row.get("model"),
+            "reasoning_effort": row.get("reasoning_effort"),
+        }
+
+    def update_chat_settings(self, project_id: str, chat_id: str, settings: dict[str, str]) -> dict:
+        self.get_chat_row(project_id, chat_id)
+        self.db.execute(
+            """
+            UPDATE chats
+            SET permission_profile = ?, approval_policy = ?, approvals_reviewer = ?,
+                model = ?, reasoning_effort = ?
+            WHERE id = ?
+            """,
+            (
+                settings.get("permission_profile"),
+                settings.get("approval_policy"),
+                settings.get("approvals_reviewer"),
+                settings.get("model"),
+                settings.get("reasoning_effort"),
+                chat_id,
+            ),
+        )
+        return self.get_chat_settings_row(project_id, chat_id)
 
     def upsert_chat_index(
         self,

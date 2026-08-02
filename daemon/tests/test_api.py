@@ -707,6 +707,54 @@ async def test_runtime_settings_endpoint(linux_tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_runtime_settings_are_saved_per_chat(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    app = create_app(make_test_config(linux_tmp_path))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        project = (await client.post("/projects", json={"path": str(project_dir), "name": "settings"})).json()
+        chat_one = (
+            await client.post(
+                f"/projects/{project['id']}/chats",
+                json={
+                    "title": "one",
+                    "permissionProfile": ":workspace",
+                    "approvalPolicy": "on-request",
+                    "approvalsReviewer": "auto_review",
+                    "model": "gpt-5.6-sol",
+                    "reasoningEffort": "high",
+                },
+            )
+        ).json()
+        chat_two = (await client.post(f"/projects/{project['id']}/chats", json={"title": "two"})).json()
+
+        one_settings = await client.get(f"/projects/{project['id']}/chats/{chat_one['id']}/settings")
+        two_settings = await client.get(f"/projects/{project['id']}/chats/{chat_two['id']}/settings")
+        assert one_settings.status_code == 200
+        assert one_settings.json()["permissionProfile"] == ":workspace"
+        assert one_settings.json()["approvalsReviewer"] == "auto_review"
+        assert one_settings.json()["model"] == "gpt-5.6-sol"
+        assert one_settings.json()["reasoningEffort"] == "high"
+        assert two_settings.json()["permissionProfile"] == ":danger-full-access"
+        assert two_settings.json()["model"] == ""
+
+        updated = await client.patch(
+            f"/projects/{project['id']}/chats/{chat_two['id']}/settings",
+            json={
+                "permissionProfile": ":read-only",
+                "approvalPolicy": "on-failure",
+                "approvalsReviewer": "user",
+                "model": "deepseek-v4-flash",
+                "reasoningEffort": "max",
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["model"] == "deepseek-v4-flash"
+        assert (await client.get(f"/projects/{project['id']}/chats/{chat_one['id']}/settings")).json()["model"] == "gpt-5.6-sol"
+        assert (await client.get(f"/projects/{project['id']}/chats/{chat_two['id']}/settings")).json()["model"] == "deepseek-v4-flash"
+
+
+@pytest.mark.asyncio
 async def test_app_server_mode_does_not_start_app_server_during_lifespan(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
@@ -1571,6 +1619,52 @@ async def test_app_server_run_uses_runtime_settings(linux_tmp_path: Path) -> Non
     await runs.start_message_run(project_id, chat_id, "hello")
 
     assert app_server.requests[0] == ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "on-request", "approvalsReviewer": "user", "permissions": ":workspace", "model": "gpt-5-codex"})
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_app_server_run_uses_chat_specific_runtime_settings(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = TurnStartAppServer()
+    defaults = make_runtime_settings(":workspace", "on-request", "gpt-5-codex")
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, defaults)  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=defaults)  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    chats.update_chat_settings(
+        project_id,
+        chat_id,
+        {
+            "permission_profile": ":read-only",
+            "approval_policy": "never",
+            "approvals_reviewer": "user",
+            "model": "deepseek-v4-flash",
+            "reasoning_effort": "max",
+        },
+    )
+
+    await runs.start_message_run(project_id, chat_id, "hello")
+
+    assert app_server.requests[0] == (
+        "thread/settings/update",
+        {
+            "threadId": "thread_1",
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "permissions": ":read-only",
+            "model": "deepseek-v4-flash",
+            "effort": "max",
+        },
+    )
     db.close()
 
 
