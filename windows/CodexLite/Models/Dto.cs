@@ -31,7 +31,10 @@ public sealed record UsageCapacityDto(
     string? PlanType,
     string? RateLimitReachedType,
     ResetCreditsDto? ResetCredits,
-    string FetchedAt);
+    string FetchedAt,
+    string? Provider = null,
+    CodexCreditsDto? CodexCredits = null,
+    DeepSeekBalanceDto? DeepSeekBalance = null);
 
 public sealed record UsageWindowDto(
     double UsedPercent,
@@ -40,6 +43,19 @@ public sealed record UsageWindowDto(
     string? ResetsAt);
 
 public sealed record ResetCreditsDto(int AvailableCount);
+
+public sealed record CodexCreditsDto(bool HasCredits, bool Unlimited, string? Balance);
+
+public sealed record DeepSeekBalanceDto(
+    string Status,
+    bool IsAvailable,
+    IReadOnlyList<DeepSeekBalanceInfoDto> BalanceInfos);
+
+public sealed record DeepSeekBalanceInfoDto(
+    string Currency,
+    string TotalBalance,
+    string GrantedBalance,
+    string ToppedUpBalance);
 
 public sealed record ChatDto(
     string Id,

@@ -140,7 +140,7 @@ APIはWindowsクライアント用のローカルAPIであり、外部公開し�
 | 分類 | 主なAPI |
 |---|---|
 | 稼働・設定 | `GET /health`、`GET /diagnostics`、`GET/PATCH /settings`、`POST /shutdown` |
-| 使用状況 | `GET /usage/capacity` |
+| 使用状況 | `GET /usage/capacity`（OpenAI/Codexの5時間・1週間容量、Codexクレジット、DeepSeek選択時の残高） |
 | プロジェクト | `GET/POST /projects`、`GET/PATCH/DELETE /projects/{id}`、履歴候補の一覧・取込 |
 | チャット | 一覧、作成、取得、名前変更、アーカイブ、削除 |
 | メッセージ | 一覧、カーソル付きページ取得、送信 |

@@ -98,6 +98,8 @@ public partial class MainWindow : Window
     private DateTimeOffset _nextChatTreePollAt = DateTimeOffset.MinValue;
     private UsageWindowDto? _fiveHourUsageWindow;
     private UsageWindowDto? _weeklyUsageWindow;
+    private CodexCreditsDto? _codexCredits;
+    private DeepSeekBalanceDto? _deepSeekBalance;
     private System.Windows.Point? _projectDragStart;
     private ProjectTreeItem? _projectDragItem;
     private ChatTreeItem? _chatDragItem;
@@ -121,6 +123,7 @@ public partial class MainWindow : Window
     private bool _isPollingChatTree;
     private bool _isRestartingDaemon;
     private bool _isRefreshingUsageCapacity;
+    private bool _usageRefreshPending;
     private bool _isRefreshingAutomations;
     private bool _isSavingAutomation;
     private bool _isRunningAutomationNow;
@@ -1768,14 +1771,24 @@ public partial class MainWindow : Window
         NoChatPlaceholder.Visibility = hasProject ? Visibility.Collapsed : Visibility.Visible;
         if (!hasProject || hasChat)
         {
-            SetUsageCapacityText("未取得", "未取得");
+            ResetUsageDisplay();
+        }
+        else
+        {
+            SetUsageProviderText(CurrentUsageProvider());
         }
         UpdateUsageRefreshButtonState();
     }
 
     private async Task RefreshUsageCapacityAsync()
     {
-        if (_isRefreshingUsageCapacity || _treeLoadingDepth > 0 || _selectedProject is null || _selectedChat is not null)
+        if (_isRefreshingUsageCapacity)
+        {
+            _usageRefreshPending = true;
+            _usageCapacityCts?.Cancel();
+            return;
+        }
+        if (_treeLoadingDepth > 0 || _selectedProject is null || _selectedChat is not null)
         {
             return;
         }
@@ -1785,17 +1798,41 @@ public partial class MainWindow : Window
         _usageCapacityCts?.Dispose();
         var cts = new CancellationTokenSource(UsageCapacityTimeout);
         _usageCapacityCts = cts;
-        SetUsageCapacityText("取得中...", "取得中...");
+        var provider = CurrentUsageProvider();
+        SetUsageProviderText(provider);
+        _fiveHourUsageWindow = null;
+        _weeklyUsageWindow = null;
+        SetUsageCapacityText(
+            provider == "openai" ? "取得中..." : "DeepSeekでは対象外",
+            provider == "openai" ? "取得中..." : "DeepSeekでは対象外");
+        SetUsageBalanceText(
+            provider == "openai" ? "取得中..." : "OpenAI選択時に表示",
+            provider == "deepseek" ? "取得中..." : "DeepSeek選択時に表示",
+            "");
         try
         {
             var usage = await _client.GetUsageCapacityAsync(cts.Token);
-            if (cts.IsCancellationRequested || _selectedProject is null || _selectedChat is not null)
+            if (cts.IsCancellationRequested
+                || _selectedProject is null
+                || _selectedChat is not null
+                || CurrentUsageProvider() != provider)
             {
                 return;
             }
             _fiveHourUsageWindow = usage?.FiveHour;
             _weeklyUsageWindow = usage?.Weekly;
-            SetUsageCapacityText(FormatUsageWindow(_fiveHourUsageWindow), FormatUsageWindow(_weeklyUsageWindow));
+            _codexCredits = usage?.CodexCredits;
+            _deepSeekBalance = usage?.DeepSeekBalance;
+            if (provider == "openai")
+            {
+                SetUsageCapacityText(FormatUsageWindow(_fiveHourUsageWindow), FormatUsageWindow(_weeklyUsageWindow));
+                SetUsageBalanceText(FormatCodexCredits(_codexCredits), "DeepSeek選択時に表示", "");
+            }
+            else
+            {
+                SetUsageCapacityText("DeepSeekでは対象外", "DeepSeekでは対象外");
+                SetUsageBalanceText("OpenAI選択時に表示", FormatDeepSeekBalance(_deepSeekBalance), FormatDeepSeekBalanceDetail(_deepSeekBalance));
+            }
             RedrawUsageGraphs();
         }
         catch (OperationCanceledException)
@@ -1808,6 +1845,9 @@ public partial class MainWindow : Window
                 SetUsageCapacityText("取得不可", "取得不可");
                 _fiveHourUsageWindow = null;
                 _weeklyUsageWindow = null;
+                _codexCredits = null;
+                _deepSeekBalance = null;
+                SetUsageBalanceText("取得不可", "取得不可", "");
                 RedrawUsageGraphs();
                 StatusText.Text = $"usage error | {ShortError(ex)}";
             }
@@ -1821,6 +1861,11 @@ public partial class MainWindow : Window
             _isRefreshingUsageCapacity = false;
             UpdateUsageRefreshButtonState();
             cts.Dispose();
+            if (_usageRefreshPending && !_isClosing && _selectedProject is not null && _selectedChat is null)
+            {
+                _usageRefreshPending = false;
+                _ = RefreshUsageCapacityAsync();
+            }
         }
     }
 
@@ -1850,6 +1895,83 @@ public partial class MainWindow : Window
             _weeklyUsageWindow = null;
         }
         RedrawUsageGraphs();
+    }
+
+    private void ResetUsageDisplay()
+    {
+        _fiveHourUsageWindow = null;
+        _weeklyUsageWindow = null;
+        _codexCredits = null;
+        _deepSeekBalance = null;
+        UsageProviderText.Text = "提供元: 未取得";
+        OpenAiUsagePanel.Visibility = Visibility.Visible;
+        SetUsageCapacityText("未取得", "未取得");
+        SetUsageBalanceText("未取得", "未取得", "");
+    }
+
+    private void SetUsageProviderText(string provider)
+    {
+        var isDeepSeek = string.Equals(provider, "deepseek", StringComparison.OrdinalIgnoreCase);
+        UsageProviderText.Text = isDeepSeek ? "提供元: DeepSeek" : "提供元: OpenAI / Codex";
+        OpenAiUsagePanel.Visibility = isDeepSeek ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void SetUsageBalanceText(string codex, string deepSeek, string detail)
+    {
+        CodexCreditsText.Text = codex;
+        DeepSeekBalanceText.Text = deepSeek;
+        DeepSeekBalanceDetailText.Text = detail;
+    }
+
+    private string CurrentUsageProvider()
+    {
+        return _runtimeSettings?.Model.StartsWith("deepseek-", StringComparison.OrdinalIgnoreCase) == true
+            ? "deepseek"
+            : "openai";
+    }
+
+    private static string FormatCodexCredits(CodexCreditsDto? credits)
+    {
+        if (credits is null)
+        {
+            return "未取得";
+        }
+        if (credits.Unlimited)
+        {
+            return "無制限";
+        }
+        if (!string.IsNullOrWhiteSpace(credits.Balance))
+        {
+            return $"残り {credits.Balance}";
+        }
+        return credits.HasCredits ? "利用可能" : "なし";
+    }
+
+    private static string FormatDeepSeekBalance(DeepSeekBalanceDto? balance)
+    {
+        if (balance is null)
+        {
+            return "未設定";
+        }
+        if (!string.Equals(balance.Status, "ok", StringComparison.OrdinalIgnoreCase))
+        {
+            return "取得不可";
+        }
+        if (balance.BalanceInfos.Count == 0)
+        {
+            return balance.IsAvailable ? "残高情報なし" : "利用不可";
+        }
+        return string.Join(" / ", balance.BalanceInfos.Select(info => $"{info.Currency} {info.TotalBalance}"));
+    }
+
+    private static string FormatDeepSeekBalanceDetail(DeepSeekBalanceDto? balance)
+    {
+        if (balance is null || !string.Equals(balance.Status, "ok", StringComparison.OrdinalIgnoreCase))
+        {
+            return "";
+        }
+        return string.Join(" / ", balance.BalanceInfos.Select(info =>
+            $"付与 {info.GrantedBalance}・チャージ {info.ToppedUpBalance}"));
     }
 
     private void UsageGraph_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -3663,6 +3785,10 @@ public partial class MainWindow : Window
         finally
         {
             _isLoadingRuntimeSettings = false;
+        }
+        if (_selectedProject is not null && _selectedChat is null)
+        {
+            _ = RefreshUsageCapacityAsync();
         }
     }
 

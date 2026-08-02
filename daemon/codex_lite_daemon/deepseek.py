@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 DEEPSEEK_PROVIDER = "deepseek"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 DEEPSEEK_API_KEY_FILE = Path(".config") / "codex-lite" / "deepseek.env"
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+DEEPSEEK_BALANCE_TIMEOUT_SECONDS = 5
 
 # Codex requires a complete model metadata entry when a custom catalog is used.
 # Keep the catalog limited to the currently supported Codex model and leave the
@@ -89,6 +95,62 @@ def read_deepseek_api_key() -> str | None:
     if value and value.startswith("sk-") and not any(char.isspace() for char in value):
         return value
     return _read_api_key_file()
+
+
+async def read_deepseek_balance() -> dict | None:
+    """Read the provider's balance without exposing the API key to callers."""
+    api_key = read_deepseek_api_key()
+    if not api_key:
+        return None
+    return await asyncio.to_thread(_fetch_deepseek_balance, api_key)
+
+
+def _fetch_deepseek_balance(api_key: str) -> dict:
+    request = Request(
+        DEEPSEEK_BALANCE_URL,
+        headers={"Accept": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=DEEPSEEK_BALANCE_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {"status": "unavailable", "isAvailable": False, "balanceInfos": []}
+    return _normalize_deepseek_balance(payload)
+
+
+def _normalize_deepseek_balance(payload: Any) -> dict:
+    if not isinstance(payload, dict):
+        return {"status": "unavailable", "isAvailable": False, "balanceInfos": []}
+    infos: list[dict[str, str]] = []
+    raw_infos = payload.get("balance_infos")
+    if isinstance(raw_infos, list):
+        for item in raw_infos:
+            if not isinstance(item, dict):
+                continue
+            currency = item.get("currency")
+            total = _balance_value(item.get("total_balance"))
+            if not isinstance(currency, str) or not total:
+                continue
+            infos.append(
+                {
+                    "currency": currency,
+                    "totalBalance": total,
+                    "grantedBalance": _balance_value(item.get("granted_balance")),
+                    "toppedUpBalance": _balance_value(item.get("topped_up_balance")),
+                }
+            )
+    return {
+        "status": "ok",
+        "isAvailable": payload.get("is_available") is True,
+        "balanceInfos": infos,
+    }
+
+
+def _balance_value(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return ""
+    return str(value)
 
 
 def ensure_model_catalog(app_data_dir: Path) -> Path:

@@ -969,6 +969,35 @@ async def test_app_server_usage_capacity_reads_rate_limits() -> None:
     }
     assert capacity["planType"] == "prolite"
     assert capacity["resetCredits"] == {"availableCount": 1}
+    assert capacity["codexCredits"] == {"hasCredits": False, "unlimited": False, "balance": "0"}
+
+
+@pytest.mark.asyncio
+async def test_app_server_usage_capacity_reads_deepseek_balance_without_app_server() -> None:
+    async def fake_balance() -> dict:
+        return {
+            "status": "ok",
+            "isAvailable": True,
+            "balanceInfos": [
+                {
+                    "currency": "USD",
+                    "totalBalance": "12.50",
+                    "grantedBalance": "2.50",
+                    "toppedUpBalance": "10.00",
+                }
+            ],
+        }
+
+    app_server = UsageAppServer()
+    service = AppServerUsageService(app_server, fake_balance)  # type: ignore[arg-type]
+
+    capacity = await service.read_capacity("deepseek")
+
+    assert app_server.requests == []
+    assert capacity["provider"] == "deepseek"
+    assert capacity["fiveHour"] is None
+    assert capacity["weekly"] is None
+    assert capacity["deepseekBalance"]["balanceInfos"][0]["totalBalance"] == "12.50"
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .app_server import AppServerClient, AppServerNotification
-from .deepseek import DEEPSEEK_PROVIDER, model_provider_for_model
+from .deepseek import DEEPSEEK_PROVIDER, model_provider_for_model, read_deepseek_balance
 from .errors import AppError
 from .run_service import EventHub
 from .services import ChatService, MessageService, ProjectService
@@ -137,10 +137,23 @@ class AppServerThreadService:
 
 
 class AppServerUsageService:
-    def __init__(self, app_server: AppServerClient) -> None:
+    def __init__(self, app_server: AppServerClient, deepseek_balance_reader=read_deepseek_balance) -> None:
         self.app_server = app_server
+        self.deepseek_balance_reader = deepseek_balance_reader
 
-    async def read_capacity(self) -> dict:
+    async def read_capacity(self, provider: str = "openai") -> dict:
+        if provider == DEEPSEEK_PROVIDER:
+            return {
+                "provider": DEEPSEEK_PROVIDER,
+                "fiveHour": None,
+                "weekly": None,
+                "planType": None,
+                "rateLimitReachedType": None,
+                "resetCredits": None,
+                "codexCredits": None,
+                "deepseekBalance": await self.deepseek_balance_reader(),
+                "fetchedAt": utc_now(),
+            }
         response = await self.app_server.request("account/rateLimits/read")
         rate_limits = response.get("rateLimits")
         if not isinstance(rate_limits, dict):
@@ -153,6 +166,8 @@ class AppServerUsageService:
             "planType": rate_limits.get("planType") if isinstance(rate_limits.get("planType"), str) else None,
             "rateLimitReachedType": rate_limits.get("rateLimitReachedType") if isinstance(rate_limits.get("rateLimitReachedType"), str) else None,
             "resetCredits": _reset_credits(response.get("rateLimitResetCredits")),
+            "codexCredits": _codex_credits(rate_limits.get("credits")),
+            "deepseekBalance": None,
             "fetchedAt": utc_now(),
         }
 
@@ -940,6 +955,21 @@ def _reset_credits(value: Any) -> dict | None:
         return None
     available_count = value.get("availableCount")
     return {"availableCount": int(available_count)} if isinstance(available_count, int) else None
+
+
+def _codex_credits(value: Any) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    balance = value.get("balance")
+    if isinstance(balance, bool) or not isinstance(balance, (str, int, float)):
+        balance = None
+    else:
+        balance = str(balance)
+    has_credits = value.get("hasCredits") if isinstance(value.get("hasCredits"), bool) else False
+    unlimited = value.get("unlimited") if isinstance(value.get("unlimited"), bool) else False
+    if balance is None and not has_credits and not unlimited:
+        return None
+    return {"hasCredits": has_credits, "unlimited": unlimited, "balance": balance}
 
 
 def _number(value: Any) -> float | None:

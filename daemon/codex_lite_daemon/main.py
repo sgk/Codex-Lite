@@ -167,7 +167,9 @@ def create_app(config: Config | None = None) -> Starlette:
     async def usage_capacity() -> dict:
         if not use_app_server:
             raise AppError("usage_unavailable", "Codex usage capacity requires app-server mode.", 503)
-        return await app_usage.read_capacity()
+        capacity = await app_usage.read_capacity(model_provider_for_model(app_settings.model))
+        capacity["provider"] = model_provider_for_model(app_settings.model)
+        return capacity
 
     @patch("/settings")
     async def update_settings(body: dict) -> dict:
