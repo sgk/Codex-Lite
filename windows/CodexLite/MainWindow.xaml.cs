@@ -3914,6 +3914,10 @@ public partial class MainWindow : Window
         {
             comboBox.Items.Add(new ComboBoxItem { Content = choice.Label, Tag = choice.Value, ToolTip = choice.Tip });
         }
+        if (comboBox.Items.Count > 0)
+        {
+            comboBox.SelectedIndex = 0;
+        }
     }
 
     private static (string PermissionProfile, string ApprovalPolicy, string ApprovalsReviewer) SettingsForPermissionMode(string mode)
