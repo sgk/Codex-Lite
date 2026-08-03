@@ -1755,6 +1755,73 @@ async def test_app_server_run_routes_each_run_to_selected_provider(linux_tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_provider_context_only_includes_messages_added_since_target_provider_was_active(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    threads = AppServerThreadService(projects, chats, messages, transcripts, TurnStartAppServer(), make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    old_user = messages.insert_message(chat_id, "user", "already known", kind="instruction")
+    old_assistant = messages.insert_message(chat_id, "assistant", "known answer", kind="conclusion")
+    new_user = messages.insert_message(chat_id, "user", "deepseek question", kind="instruction")
+    new_assistant = messages.insert_message(chat_id, "assistant", "deepseek answer", kind="conclusion")
+    synthetic = messages.insert_message(
+        chat_id,
+        "user",
+        "以下はCodex Liteの同じチャットで、別のモデル提供元が応答した過去の表示内容です。nested",
+        kind="instruction",
+    )
+    chats.upsert_provider_thread(project_id, chat_id, "openai", "thread_1", history_initialized=True)
+    db.execute("UPDATE messages SET created_at = ? WHERE id IN (?, ?)", ("2026-08-03T00:00:01Z", old_user["id"], old_assistant["id"]))
+    db.execute("UPDATE chat_provider_threads SET updated_at = ? WHERE chat_id = ? AND provider = ?", ("2026-08-03T00:00:02Z", chat_id, "openai"))
+    db.execute("UPDATE messages SET created_at = ? WHERE id IN (?, ?, ?)", ("2026-08-03T00:00:03Z", new_user["id"], new_assistant["id"], synthetic["id"]))
+
+    context = await threads.context_for_provider(project_id, chat_id, "openai")
+
+    assert context == "User: deepseek question\n\nAssistant: deepseek answer"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_first_provider_context_excludes_work_messages_and_nested_context_prompts(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    threads = AppServerThreadService(projects, chats, messages, transcripts, TurnStartAppServer(), make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    messages.insert_message(chat_id, "user", "question", run_id="run_1", kind="instruction")
+    messages.insert_message(chat_id, "assistant", "working details", run_id="run_1", kind="work")
+    messages.insert_message(chat_id, "assistant", "final answer", run_id="run_1", kind="conclusion")
+    messages.insert_message(
+        chat_id,
+        "user",
+        "以下はCodex Liteの同じチャットで、別のモデル提供元が応答した過去の表示内容です。nested",
+        kind="instruction",
+    )
+
+    context = await threads.context_for_provider(project_id, chat_id, "deepseek")
+
+    assert context == "User: question\n\nAssistant: final answer"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_run_resumes_not_loaded_thread_before_turn(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()

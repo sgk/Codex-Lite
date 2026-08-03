@@ -88,7 +88,7 @@ Codexの実行設定はWSL側の `settings.json` に保存し、スレッド作�
 
 モデルと承認レベルはチャット入力欄から選択する。モデル候補はデーモンの `/models` を介して app-server の `model/list` から取得し、新しいモデルIDが返ればクライアントの変更なしで表示する。「既定」は空のモデル値としてCodex側の既定に従う。app-serverでモデル一覧を取得できない場合に限り、デーモンが持つ最小限の静的候補を表示する。DeepSeek APIキーがWSL側のユーザー専用ファイル（`~/.config/codex-lite/deepseek.env`）に設定されている場合は `deepseek-v4-flash` を候補へ追加する。
 
-OpenAIとDeepSeekの切り替えは、Codex app-serverのプロバイダー設定をアプリ全体で切り替える。DeepSeekを選択した場合はDeepSeekのResponses API設定とモデルカタログを使い、プロバイダーが変わるときは次回のapp-server要求で再起動する。実行中のRunを切断する切り替えは行わず、APIキーの内容はログ・診断・画面へ出さない。
+OpenAIとDeepSeekの切り替えは、チャットごとのモデル選択に応じて、それぞれ専用のCodex app-serverと内部スレッドを使い分ける。DeepSeekを選択した場合はDeepSeekのResponses API設定とモデルカタログを使う。プロバイダーを切り替えたときは、切替先を最後に使用してから増えたユーザー指示と最終回答だけを表示会話の文脈として渡し、切替先自身が保持する履歴、提供元固有のreasoning、作業中表示、ツール詳細、過去に合成した引き継ぎ文脈を重複して渡さない。切替先を初めて使う場合も、引き継ぎ文脈はメッセージ境界を保って上限内に収める。実行中のRunを切断する切り替えは行わず、APIキーの内容はログ・診断・画面へ出さない。
 
 自動圧縮は app-server 起動時の Codex config として有効化する。既定では
 `model_auto_compact_token_limit=100000` と

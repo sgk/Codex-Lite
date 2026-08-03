@@ -25,6 +25,8 @@ REASONING_PROGRESS_BATCH_SECONDS = 0.15
 REASONING_PROGRESS_MAX_BATCH_CHARS = 4096
 CANCEL_IDLE_WAIT_SECONDS = 15.0
 CANCEL_IDLE_POLL_SECONDS = 0.1
+PROVIDER_CONTEXT_MAX_CHARS = 32000
+PROVIDER_CONTEXT_PREFIX = "以下はCodex Liteの同じチャットで、別のモデル提供元が応答した過去の表示内容です。"
 
 
 @dataclass
@@ -265,21 +267,42 @@ class AppServerThreadService:
             pass
         return self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=False)
 
-    async def context_for_provider(self, project_id: str, chat_id: str, exclude_content: str | None = None) -> str:
-        messages = await self.list_messages(project_id, chat_id)
+    async def context_for_provider(self, project_id: str, chat_id: str, provider: str, exclude_content: str | None = None) -> str:
+        target_thread = self.chats.get_provider_thread(project_id, chat_id, provider)
+        if target_thread is None:
+            # A provider used for the first time needs the existing visible
+            # conversation. Internal reasoning and tool/status rows are
+            # filtered below.
+            messages = await self.list_messages(project_id, chat_id)
+        else:
+            # Existing provider threads already contain their own history.
+            # Pass only the canonical user/final-answer messages added since
+            # that provider was last active, avoiding nested copies of its
+            # entire transcript on every provider switch.
+            checkpoint = str(target_thread.get("updated_at") or "")
+            messages = [
+                message
+                for message in self.messages.list_messages(project_id, chat_id)
+                if str(message.get("createdAt") or "") > checkpoint
+            ]
         excluded = _message_content_key(exclude_content or "")
-        lines: list[str] = []
+        entries: list[str] = []
         for message in messages:
             role = str(message.get("role") or "").lower()
             if role not in {"user", "assistant"}:
                 continue
+            if role == "assistant" and str(message.get("kind") or "") != "conclusion":
+                continue
             content = str(message.get("content") or "").strip()
-            if not content or (excluded and role == "user" and _message_content_key(content) == excluded):
+            if (
+                not content
+                or content.startswith(PROVIDER_CONTEXT_PREFIX)
+                or (excluded and role == "user" and _message_content_key(content) == excluded)
+            ):
                 continue
             label = "User" if role == "user" else "Assistant"
-            lines.append(f"{label}: {content}")
-        # Keep a provider switch from creating an unbounded synthetic prompt.
-        return "\n\n".join(lines)[-120000:]
+            entries.append(f"{label}: {content}")
+        return _bounded_provider_context(entries)
 
 
 class AppServerUsageService:
@@ -403,7 +426,7 @@ class AppServerRunService:
         # actually sent, regardless of whether the user changed the dropdown
         # immediately beforehand.
         self.chats.record_model_reasoning_choice(run_settings.model, run_settings.reasoning_effort)
-        prior_context = await self.threads.context_for_provider(project_id, chat_id, exclude_content=content)
+        prior_context = await self.threads.context_for_provider(project_id, chat_id, provider, exclude_content=content)
         provider_rows_before = self.chats.list_provider_threads(project_id, chat_id)
         last_provider = _latest_provider(provider_rows_before)
         user_message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
@@ -556,6 +579,7 @@ class AppServerRunService:
     async def _finish_cancelled_run(self, run_id: str, run: AppServerActiveRun) -> None:
         run.status = "cancelled"
         run.finished_at = utc_now()
+        self.chats.touch_provider_thread(run.chat_id, run.provider)
         await self._release_run_lease(run)
         await self.events.publish(run_id, "done", {"status": "cancelled", "exitCode": None})
 
@@ -741,6 +765,7 @@ class AppServerRunService:
                     status = str(turn.get("status") or "succeeded")
                     run.status = "succeeded" if status == "completed" else status
                     run.finished_at = utc_now()
+                    self.chats.touch_provider_thread(run.chat_id, run.provider)
                     if assistant_parts:
                         self.messages.insert_message(run.chat_id, "assistant", "".join(assistant_parts), run_id=run_id, kind="conclusion")
                     await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
@@ -763,6 +788,7 @@ class AppServerRunService:
                     run.status = "failed"
                     run.error = str(notification.params)
                     run.finished_at = utc_now()
+                    self.chats.touch_provider_thread(run.chat_id, run.provider)
                     await self.events.publish(run_id, "error", {"code": "app_server_error", "message": run.error})
                     return
         except Exception as exc:
@@ -770,6 +796,7 @@ class AppServerRunService:
             run.status = "failed"
             run.error = str(exc)
             run.finished_at = utc_now()
+            self.chats.touch_provider_thread(run.chat_id, run.provider)
             await self.events.publish(run_id, "error", {"code": "app_server_run_failed", "message": str(exc)})
         finally:
             app_server.unsubscribe_queue(notification_queue)
@@ -1146,14 +1173,32 @@ def _content_with_direct_attachment_instruction(content: str, file_paths: list[P
 
 def _provider_context_prompt(prior_context: str, current_request: str) -> str:
     return (
-        "以下はCodex Liteの同じチャットで、別のモデル提供元が応答した過去の表示内容です。"
-        "提供元固有の推論状態は引き継がれていないため、必要な事実だけを会話の文脈として利用してください。\n\n"
+        PROVIDER_CONTEXT_PREFIX
+        + "提供元固有の推論状態は引き継がれていないため、必要な事実だけを会話の文脈として利用してください。\n\n"
         "--- 過去の会話 ---\n"
         f"{prior_context}\n"
         "--- 過去の会話ここまで ---\n\n"
         "--- 今回の依頼 ---\n"
         f"{current_request}"
     )
+
+
+def _bounded_provider_context(entries: list[str]) -> str:
+    selected: list[str] = []
+    used = 0
+    separator_chars = 2
+    for entry in reversed(entries):
+        extra = len(entry) + (separator_chars if selected else 0)
+        if used + extra <= PROVIDER_CONTEXT_MAX_CHARS:
+            selected.append(entry)
+            used += extra
+            continue
+        if not selected:
+            marker = "[前半を省略]\n"
+            selected.append(marker + entry[-(PROVIDER_CONTEXT_MAX_CHARS - len(marker)):])
+        break
+    selected.reverse()
+    return "\n\n".join(selected)
 
 
 def _validated_attachment_path(attachment: dict[str, Any]) -> Path:

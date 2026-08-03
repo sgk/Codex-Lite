@@ -355,6 +355,12 @@ class ChatService:
             (transcript_path, utc_now(), chat_id, provider),
         )
 
+    def touch_provider_thread(self, chat_id: str, provider: str) -> None:
+        self.db.execute(
+            "UPDATE chat_provider_threads SET updated_at = ? WHERE chat_id = ? AND provider = ?",
+            (utc_now(), chat_id, provider),
+        )
+
     def archive_chat(self, project_id: str, chat_id: str) -> dict:
         self.get_chat_row(project_id, chat_id)
         now = utc_now()
