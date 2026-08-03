@@ -28,6 +28,35 @@ Codex Desktop を WSL と組み合わせた際に、PC 全体が重くなるこ�
 
 Codex CLI はあらかじめユーザー自身で導入・認証してください。Codex Lite は認証情報を読み取ったり、ログインを代行したりしません。
 
+## DeepSeek APIキーの設定
+
+DeepSeekを使用する場合は、WSL側の次のファイルにAPIキーを保存します。Windows側の `.codex` や、このリポジトリ内には保存しません。
+
+```text
+~/.config/codex-lite/deepseek.env
+```
+
+WSLのシェルで保存先を作成し、任意のエディターでファイルを開きます。
+
+```bash
+install -d -m 700 ~/.config/codex-lite
+${EDITOR:-nano} ~/.config/codex-lite/deepseek.env
+```
+
+ファイルには次の1行を記載します。値の前後に引用符や空白を付けず、DeepSeekで発行したAPIキーへ置き換えてください。
+
+```env
+DEEPSEEK_API_KEY=sk-...
+```
+
+保存後、所有者以外が読めない権限にします。
+
+```bash
+chmod 600 ~/.config/codex-lite/deepseek.env
+```
+
+Codex Liteを再起動すると、モデル選択肢に `deepseek-v4-flash` が表示されます。ファイルがない、キーが空、`sk-` で始まらない、または空白を含む場合はDeepSeekモデルを候補へ追加しません。APIキーの値は診断画面やログへ表示しません。
+
 ## ビルド方法
 
 WSL のプロジェクトルートで、Windows の .NET SDKを使ってビルドします。
