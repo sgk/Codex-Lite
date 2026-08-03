@@ -107,6 +107,7 @@ class AppServerClient:
             if self.is_running:
                 await self.close()
             codex = await self.codex_runner.resolve()
+            self._prepare_codex_home()
             env = self._env()
             self._last_env = dict(env)
             self._process = await asyncio.create_subprocess_exec(
@@ -140,6 +141,20 @@ class AppServerClient:
                 raise AppError("app_server_initialize_failed", "Codex app-server did not initialize.", 503)
             self._active_model_provider = self._desired_model_provider
             await self.notify("initialized")
+
+    def _prepare_codex_home(self) -> None:
+        """Create the provider's Codex homes before launching app-server.
+
+        Codex validates CODEX_HOME during startup and exits if it does not
+        exist.  DeepSeek uses a private home that is intentionally created on
+        first use rather than during daemon startup.
+        """
+        home = self.config.deepseek_codex_home if self.provider == DEEPSEEK_PROVIDER else self.config.codex_home
+        sqlite_home = self.config.deepseek_codex_sqlite_home if self.provider == DEEPSEEK_PROVIDER else self.config.codex_sqlite_home
+        if home is not None:
+            home.mkdir(parents=True, exist_ok=True)
+        if sqlite_home is not None:
+            sqlite_home.mkdir(parents=True, exist_ok=True)
 
     def set_model_provider(self, provider: str) -> None:
         if self.provider is not None:
