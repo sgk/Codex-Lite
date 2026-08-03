@@ -94,7 +94,7 @@ public partial class MainWindow : Window
     private readonly HashSet<(string ProjectId, string ChatId)> _chatsWithUnloadedHistory = new();
     private readonly List<string> _persistedProjectOrderIds = new();
     private readonly Dictionary<string, List<string>> _persistedChatOrderIdsByProject = new(StringComparer.Ordinal);
-    private readonly List<string> _composerHistory = new();
+    private readonly Dictionary<string, List<string>> _composerHistoryByChat = new(StringComparer.Ordinal);
     private string _textSizeSetting = "small";
     private string _codexHomeMode = DefaultCodexHomeMode();
     private bool _wrapFileText;
@@ -145,6 +145,7 @@ public partial class MainWindow : Window
     private string _composerHistoryDraft = "";
     private int _automationDraftCounter;
     private int? _composerHistoryIndex;
+    private string? _composerHistoryContextChatId;
     private int _daemonHealthFailureCount;
     private int _busyDepth;
     private int _activityDepth;
@@ -2668,6 +2669,7 @@ public partial class MainWindow : Window
             MarkSelectedConversationSeen();
             SetHistorySpacer(Math.Max(0, _messageTotalCount - loadedMessages.Count));
             await AddLoadedMessagesInBatchesAsync(loadedMessages, startedAt, chat.Title);
+            await LoadComposerHistoryFromJsonlAsync(project, chat);
             UpdateHistorySpacer();
             ScrollMessagesToEnd();
             var elapsed = DateTimeOffset.Now - startedAt;
@@ -2689,6 +2691,46 @@ public partial class MainWindow : Window
             heartbeat.Stop();
             _isLoadingMessages = false;
             EndActivity();
+        }
+    }
+
+    private async Task LoadComposerHistoryFromJsonlAsync(ProjectDto project, ChatDto chat)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(InitialMessageLoadTimeout);
+            var messages = await _client.ListMessagesAsync(project.Id, chat.Id, timeout.Token);
+            if (_selectedProject?.Id != project.Id || _selectedChat?.Id != chat.Id)
+            {
+                return;
+            }
+
+            var loadedHistory = OrderMessages(messages ?? [])
+                .Where(message => message.IsUserMessage && !string.IsNullOrWhiteSpace(message.Content))
+                .Select(message => message.Content.Trim())
+                .ToList();
+            var history = GetComposerHistory(chat.Id);
+            var mergedHistory = loadedHistory.ToList();
+            foreach (var entry in history)
+            {
+                if (!mergedHistory.Contains(entry, StringComparer.Ordinal))
+                {
+                    mergedHistory.Add(entry);
+                }
+            }
+            history.Clear();
+            history.AddRange(mergedHistory.TakeLast(ComposerHistoryLimit));
+            _composerHistoryContextChatId = chat.Id;
+            _composerHistoryIndex = null;
+            _composerHistoryDraft = "";
+        }
+        catch (OperationCanceledException)
+        {
+            WritePerformanceLog("composer-history-load-timeout", $"chatId={LogText(chat.Id)}");
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog("composer-history-load-error", $"chatId={LogText(chat.Id)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
         }
     }
 
@@ -5155,37 +5197,39 @@ public partial class MainWindow : Window
 
     private void ShowPreviousComposerHistory(TextBox textBox)
     {
-        if (_composerHistory.Count == 0)
+        var history = CurrentComposerHistory();
+        if (history.Count == 0)
         {
             return;
         }
         if (_composerHistoryIndex is null)
         {
             _composerHistoryDraft = textBox.Text;
-            _composerHistoryIndex = _composerHistory.Count;
+            _composerHistoryIndex = history.Count;
         }
         if (_composerHistoryIndex <= 0)
         {
             return;
         }
         _composerHistoryIndex--;
-        ApplyComposerHistoryText(textBox, _composerHistory[_composerHistoryIndex.Value], caretAtEnd: false);
+        ApplyComposerHistoryText(textBox, history[_composerHistoryIndex.Value], caretAtEnd: false);
     }
 
     private void ShowNextComposerHistory(TextBox textBox)
     {
+        var history = CurrentComposerHistory();
         if (_composerHistoryIndex is null)
         {
             return;
         }
-        if (_composerHistoryIndex >= _composerHistory.Count)
+        if (_composerHistoryIndex >= history.Count)
         {
             return;
         }
         _composerHistoryIndex++;
         ApplyComposerHistoryText(
             textBox,
-            _composerHistoryIndex == _composerHistory.Count ? _composerHistoryDraft : _composerHistory[_composerHistoryIndex.Value],
+            _composerHistoryIndex == history.Count ? _composerHistoryDraft : history[_composerHistoryIndex.Value],
             caretAtEnd: true);
     }
 
@@ -5204,26 +5248,55 @@ public partial class MainWindow : Window
         UpdateCommandButtonState();
     }
 
-    private void AddComposerHistory(string content)
+    private List<string> CurrentComposerHistory()
+    {
+        var chatId = _selectedChat?.Id;
+        if (!string.Equals(_composerHistoryContextChatId, chatId, StringComparison.Ordinal))
+        {
+            _composerHistoryContextChatId = chatId;
+            _composerHistoryIndex = null;
+            _composerHistoryDraft = "";
+        }
+        return chatId is null ? [] : GetComposerHistory(chatId);
+    }
+
+    private List<string> GetComposerHistory(string chatId)
+    {
+        if (!_composerHistoryByChat.TryGetValue(chatId, out var history))
+        {
+            history = new List<string>();
+            _composerHistoryByChat[chatId] = history;
+        }
+        return history;
+    }
+
+    private void AddComposerHistory(string chatId, string content)
     {
         var clean = content.Trim();
         if (clean.Length == 0)
         {
             return;
         }
-        if (_composerHistory.Count > 0 && _composerHistory[^1] == clean)
+        var history = GetComposerHistory(chatId);
+        if (history.Count > 0 && history[^1] == clean)
+        {
+            if (string.Equals(_composerHistoryContextChatId, chatId, StringComparison.Ordinal))
+            {
+                _composerHistoryIndex = null;
+                _composerHistoryDraft = "";
+            }
+            return;
+        }
+        history.Add(clean);
+        while (history.Count > ComposerHistoryLimit)
+        {
+            history.RemoveAt(0);
+        }
+        if (string.Equals(_composerHistoryContextChatId, chatId, StringComparison.Ordinal))
         {
             _composerHistoryIndex = null;
             _composerHistoryDraft = "";
-            return;
         }
-        _composerHistory.Add(clean);
-        while (_composerHistory.Count > ComposerHistoryLimit)
-        {
-            _composerHistory.RemoveAt(0);
-        }
-        _composerHistoryIndex = null;
-        _composerHistoryDraft = "";
     }
 
     private async Task SubmitMessageBoxAsync()
@@ -5418,7 +5491,6 @@ public partial class MainWindow : Window
         WritePerformanceLog(
             "send-request",
             $"projectId={LogText(project.Id)} selectedChatId={LogText(_selectedChat?.Id)} startsNewChat={startsNewChat} content={LogText(content)} attachments={LogText(AttachmentLogText(attachments), 12000)}");
-        AddComposerHistory(content);
         _isPreparingSend = true;
         UpdateCommandButtonState();
         ChatDto? chat;
@@ -5433,6 +5505,7 @@ public partial class MainWindow : Window
             WritePerformanceLog("send-aborted", "reason=chat-null");
             return;
         }
+        AddComposerHistory(chat.Id, content);
         WritePerformanceLog("send-chat-ready", $"chatId={LogText(chat.Id)} title={LogText(chat.Title)}");
         var runCts = new CancellationTokenSource();
         var runToken = runCts.Token;
@@ -5650,7 +5723,7 @@ public partial class MainWindow : Window
             $"chatId={LogText(chat.Id)} runId={LogText(runId)} content={LogText(content)} attachments={LogText(AttachmentLogText(attachments), 12000)}");
         MessageBox.Text = "";
         _pendingAttachments.Clear();
-        AddComposerHistory(content);
+        AddComposerHistory(chat.Id, content);
         var localMessageId = $"local-steer-{Guid.NewGuid():N}";
         AppendMessage(new MessageDto(
             localMessageId,
