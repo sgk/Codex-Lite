@@ -3961,12 +3961,19 @@ public partial class MainWindow : Window
     private static void PopulateModelChoices(ComboBox comboBox, IEnumerable<ModelChoice> choices)
     {
         comboBox.Items.Clear();
-        foreach (var choice in choices)
+        var choiceList = choices.ToList();
+        var recentCount = choiceList.Count(choice => choice.IsRecent);
+        for (var index = 0; index < choiceList.Count; index++)
         {
+            var choice = choiceList[index];
             var content = choice.IsRecent
-                ? $"最近: {choice.Model} / {ReasoningEffortLabel(choice.ReasoningEffort)}"
+                ? $"{choice.Model} / {ReasoningEffortLabel(choice.ReasoningEffort)}"
                 : choice.Model.Length == 0 ? "既定" : choice.Model;
             comboBox.Items.Add(new ComboBoxItem { Content = content, Tag = choice });
+            if (recentCount > 0 && index == recentCount - 1)
+            {
+                comboBox.Items.Add(new Separator { Margin = new Thickness(0, 2, 0, 2), IsEnabled = false });
+            }
         }
         if (comboBox.Items.Count > 0)
         {
