@@ -396,6 +396,10 @@ class AppServerRunService:
         run_settings = self.threads.settings_for_chat(project_id, chat_id)
         provider = model_provider_for_model(run_settings.model)
         app_server = _app_server_for_provider(self.app_server, provider)
+        # A combination is considered recently used when a chat message is
+        # actually sent, regardless of whether the user changed the dropdown
+        # immediately beforehand.
+        self.chats.record_model_reasoning_choice(run_settings.model, run_settings.reasoning_effort)
         prior_context = await self.threads.context_for_provider(project_id, chat_id, exclude_content=content)
         provider_rows_before = self.chats.list_provider_threads(project_id, chat_id)
         last_provider = _latest_provider(provider_rows_before)
@@ -547,6 +551,9 @@ class AppServerRunService:
             raise AppError("validation_error", "Steer content must not be empty.", 400)
         input_items = _build_turn_input(clean_content, attachments or [])
         app_server = _app_server_for_provider(self.app_server, run.provider)
+        chat_row = self.chats.get_chat_row_by_id(run.chat_id)
+        run_settings = self.threads.settings_for_chat(str(chat_row["project_id"]), run.chat_id)
+        self.chats.record_model_reasoning_choice(run_settings.model, run_settings.reasoning_effort)
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "sending additional instructions"})
         try:
             await app_server.request(

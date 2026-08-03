@@ -1670,6 +1670,11 @@ async def test_app_server_run_uses_chat_specific_runtime_settings(linux_tmp_path
 
     await runs.start_message_run(project_id, chat_id, "hello")
 
+    assert chats.list_model_reasoning_history()[0] == {
+        "model": "deepseek-v4-flash",
+        "reasoning_effort": "max",
+    }
+
     assert app_server.requests[0] == (
         "thread/settings/update",
         {

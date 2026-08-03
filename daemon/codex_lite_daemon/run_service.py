@@ -114,6 +114,11 @@ class RunService:
                 raise AppError("run_already_active_in_chat", "Another run is already active in this chat.", 409)
         project = self.projects.get_project_row(project_id)
         chat = self.chats.get_chat_row(project_id, chat_id)
+        settings = self.chats.get_chat_settings_row(project_id, chat_id)
+        self.chats.record_model_reasoning_choice(
+            settings.get("model") or self.config.model,
+            settings.get("reasoning_effort") or "",
+        )
         user_message = self.messages.insert_message(chat_id, "user", content, kind="instruction")
         run_id = new_id("run")
         log_path = self._log_path(run_id)
