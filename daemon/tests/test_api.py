@@ -763,6 +763,12 @@ async def test_chat_runtime_settings_are_saved_per_chat(linux_tmp_path: Path) ->
         assert (await client.get(f"/projects/{project['id']}/chats/{chat_one['id']}/settings")).json()["model"] == "gpt-5.6-sol"
         assert (await client.get(f"/projects/{project['id']}/chats/{chat_two['id']}/settings")).json()["model"] == "deepseek-v4-flash"
 
+    restarted = create_app(make_test_config(linux_tmp_path))
+    async with AsyncClient(transport=ASGITransport(app=restarted), base_url="http://test") as client:
+        recent = (await client.get("/settings")).json()["recentModelReasoningChoices"]
+        assert recent[0] == {"model": "deepseek-v4-flash", "reasoningEffort": "max"}
+        assert recent[1] == {"model": "gpt-5.6-sol", "reasoningEffort": "high"}
+
 
 @pytest.mark.asyncio
 async def test_app_server_mode_does_not_start_app_server_during_lifespan(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

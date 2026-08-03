@@ -200,6 +200,33 @@ class ChatService:
             "SELECT model, reasoning_effort FROM model_reasoning_history ORDER BY used_at DESC, id DESC LIMIT 3"
         )
 
+    def seed_model_reasoning_history(self, current_model: str, current_reasoning_effort: str) -> list[dict]:
+        """Backfill the first history entries from settings that predate the feature."""
+        if self.db.fetchone("SELECT id FROM model_reasoning_history LIMIT 1") is not None:
+            return self.list_model_reasoning_history()
+
+        rows = self.db.fetchall(
+            """
+            SELECT model, reasoning_effort
+            FROM chats
+            WHERE model IS NOT NULL AND trim(model) <> ''
+            ORDER BY updated_at DESC, created_at DESC
+            """
+        )
+        choices: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in reversed(rows):
+            choice = (str(row.get("model") or "").strip(), str(row.get("reasoning_effort") or "").strip())
+            if choice[0] and choice not in seen:
+                choices.append(choice)
+                seen.add(choice)
+        current = (str(current_model or "").strip(), str(current_reasoning_effort or "").strip())
+        if current[0] and current not in seen:
+            choices.append(current)
+        for model, effort in choices:
+            self.record_model_reasoning_choice(model, effort)
+        return self.list_model_reasoning_history()
+
     def upsert_chat_index(
         self,
         project_id: str,

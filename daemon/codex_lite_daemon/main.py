@@ -55,6 +55,7 @@ def create_app(config: Config | None = None) -> Starlette:
     files = FileService(db, projects)
     transcript_import = TranscriptImportService(cfg, projects, chats, codex_state)
     app_settings = _load_app_settings(cfg)
+    chats.seed_model_reasoning_history(app_settings.model, app_settings.reasoning_effort)
     app_threads = AppServerThreadService(projects, chats, messages, transcript_import, app_servers, app_settings)
     app_runs = AppServerRunService(projects, app_threads, messages, app_servers, cfg.max_concurrent_runs, app_settings)
     app_usage = AppServerUsageService(app_servers)
