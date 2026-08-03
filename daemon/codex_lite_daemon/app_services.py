@@ -23,6 +23,8 @@ from .util.time import utc_now
 
 REASONING_PROGRESS_BATCH_SECONDS = 0.15
 REASONING_PROGRESS_MAX_BATCH_CHARS = 4096
+CANCEL_IDLE_WAIT_SECONDS = 15.0
+CANCEL_IDLE_POLL_SECONDS = 0.1
 
 
 @dataclass
@@ -331,6 +333,7 @@ class AppServerActiveRun:
     last_reconnect_at: str | None = None
     last_reconnect_message: str | None = None
     lease_released: bool = False
+    replacing_idle_turn: bool = False
 
 
 def _app_server_for_provider(app_server: Any, provider: str) -> Any:
@@ -534,11 +537,39 @@ class AppServerRunService:
             await app_server.notify("turn/interrupt", {"threadId": run.thread_id, "turnId": run.turn_id})
         except AppError as exc:
             await self.events.publish(run_id, "progress", {"method": "turn/interrupt", "summary": exc.message})
+            if _is_no_active_turn(exc):
+                await self._finish_cancelled_run(run_id, run)
+                return _run_out(run_id, run)
+            raise
+        try:
+            await self._wait_for_thread_idle(app_server, run.thread_id)
+        except asyncio.TimeoutError as exc:
+            raise AppError(
+                "cancel_pending",
+                "Codex is still stopping the active turn. Please wait before starting the next turn.",
+                409,
+            ) from exc
+        if run.status == "running":
+            await self._finish_cancelled_run(run_id, run)
+        return _run_out(run_id, run)
+
+    async def _finish_cancelled_run(self, run_id: str, run: AppServerActiveRun) -> None:
         run.status = "cancelled"
         run.finished_at = utc_now()
         await self._release_run_lease(run)
         await self.events.publish(run_id, "done", {"status": "cancelled", "exitCode": None})
-        return _run_out(run_id, run)
+
+    async def _wait_for_thread_idle(self, app_server: Any, thread_id: str) -> None:
+        deadline = time.monotonic() + CANCEL_IDLE_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            response = await app_server.request("thread/read", {"threadId": thread_id})
+            thread = response.get("thread") or {}
+            status = thread.get("status") if isinstance(thread, dict) else None
+            status_type = status.get("type") if isinstance(status, dict) else None
+            if status_type in {"idle", "notLoaded", "systemError"}:
+                return
+            await asyncio.sleep(CANCEL_IDLE_POLL_SECONDS)
+        raise asyncio.TimeoutError
 
     async def steer_run(self, run_id: str, content: str, attachments: list[dict[str, Any]] | None = None) -> dict:
         run = self.runs.get(run_id)
@@ -565,8 +596,38 @@ class AppServerRunService:
                 },
             )
         except AppError as exc:
+            no_active_turn = _is_no_active_turn(exc)
+            if no_active_turn:
+                # Keep a delayed completion notification for the previous turn
+                # from terminating the run while its replacement is starting.
+                run.replacing_idle_turn = True
             await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": exc.message})
-            raise
+            if not no_active_turn:
+                raise
+            project_id = str(chat_row["project_id"])
+            project = self.projects.get_project_row(project_id)
+            try:
+                response = await self._start_turn(app_server, run.thread_id, str(project["path"]), input_items, run_settings)
+                turn_id = _turn_id_from_response(response)
+                if not turn_id:
+                    raise AppError("app_server_error", "turn/start did not return a turn id.", 502)
+                run.turn_id = turn_id
+            except Exception as start_exc:
+                run.status = "failed"
+                run.error = str(start_exc)
+                run.finished_at = utc_now()
+                await self.events.publish(run_id, "error", {"code": "app_server_error", "message": run.error})
+                raise
+            finally:
+                run.replacing_idle_turn = False
+            await self.events.publish(
+                run_id,
+                "progress",
+                {
+                    "method": "turn/start",
+                    "summary": "The previous turn had already completed; the instruction was started as the next turn.",
+                },
+            )
         self.messages.insert_message(run.chat_id, "user", _content_with_attachment_summary(clean_content, attachments or []), run_id=run_id, kind="instruction")
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
         return _run_out(run_id, run)
@@ -612,6 +673,8 @@ class AppServerRunService:
 
         try:
             while True:
+                if run.status != "running":
+                    return
                 try:
                     notification = await asyncio.wait_for(
                         notification_queue.get(),
@@ -624,6 +687,8 @@ class AppServerRunService:
                     continue
                 if run.status != "running":
                     return
+                if notification.method == "turn/completed" and run.replacing_idle_turn:
+                    continue
                 if _is_reasoning_delta_notification(notification):
                     delta = _reasoning_delta(notification)
                     if delta:
@@ -1037,6 +1102,10 @@ def _short_text(value: str, limit: int = 96) -> str:
 def _is_thread_not_found(exc: AppError) -> bool:
     message = exc.message.lower()
     return "thread not found" in message or ("not found" in message and "thread" in message)
+
+
+def _is_no_active_turn(exc: AppError) -> bool:
+    return "no active turn" in exc.message.lower()
 
 
 def _candidate_thread_ids(chat_id: str, codex_session_id: Any) -> list[str]:

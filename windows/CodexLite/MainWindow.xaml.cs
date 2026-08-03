@@ -99,6 +99,7 @@ public partial class MainWindow : Window
     private string _codexHomeMode = DefaultCodexHomeMode();
     private bool _wrapFileText;
     private readonly Dictionary<string, ActiveUiRun> _activeRunsByChat = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _cancellingRunChatIds = new(StringComparer.Ordinal);
     private CancellationTokenSource? _usageCapacityCts;
     private DateTimeOffset _nextBackgroundMessagePollAt = DateTimeOffset.MinValue;
     private DateTimeOffset _nextChatTreePollAt = DateTimeOffset.MinValue;
@@ -2182,6 +2183,7 @@ public partial class MainWindow : Window
         var canContinueChat = _selectedChat is { CanContinue: true } && !_isPreparingSend;
         var canStartNewChat = _selectedProject is not null && _selectedChat is null && !_isPreparingSend;
         var selectedRun = SelectedActiveRun();
+        var isCancellingSelectedRun = _selectedChat is not null && _cancellingRunChatIds.Contains(_selectedChat.Id);
         var hasLiteRun = _activeRunsByChat.Count > 0;
         var isViewingActiveRunChat = selectedRun is not null;
         var hasChatComposerContent = HasChatComposerContent();
@@ -2190,6 +2192,7 @@ public partial class MainWindow : Window
         var canAttach = CanAttachToComposer();
         var canSendOrSteer = canContinueChat
             && hasChatComposerContent
+            && !isCancellingSelectedRun
             && !externalProcessing;
         var canCreateAndSend = canStartNewChat
             && hasNewChatComposerContent;
@@ -2220,7 +2223,7 @@ public partial class MainWindow : Window
             : !hasNewChatComposerContent
             ? "メッセージを入力するか、ファイルを添付してください。"
             : "最初のメッセージで新しいチャットを作成して送信します。";
-        CancelButton.IsEnabled = isViewingActiveRunChat;
+        CancelButton.IsEnabled = isViewingActiveRunChat && !isCancellingSelectedRun;
         CancelButton.ToolTip = isViewingActiveRunChat
             ? "Codex Liteで開始した応答を停止します。"
             : hasLiteRun
@@ -6597,20 +6600,34 @@ public partial class MainWindow : Window
     {
         var activeRun = SelectedActiveRun();
         var runId = activeRun?.RunId;
+        var chatId = activeRun?.ChatId;
         CancelButton.IsEnabled = false;
         StatusText.Text = runId is null ? "キャンセル要求中 | 開始待ち" : "キャンセル要求中";
-        activeRun?.Cancellation.Cancel();
+        if (chatId is not null)
+        {
+            _cancellingRunChatIds.Add(chatId);
+            UpdateCommandButtonState();
+        }
         try
         {
             if (runId is not null)
             {
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
                 await _client.CancelRunAsync(runId, timeout.Token);
+                activeRun?.Cancellation.Cancel();
             }
         }
         catch (Exception ex)
         {
             StatusText.Text = $"cancel warning | {ShortError(ex)}";
+        }
+        finally
+        {
+            if (chatId is not null)
+            {
+                _cancellingRunChatIds.Remove(chatId);
+            }
+            UpdateCommandButtonState();
         }
     }
 

@@ -1811,6 +1811,32 @@ async def test_app_server_cancel_treats_already_finished_turn_as_cancelled(linux
 
 
 @pytest.mark.asyncio
+async def test_app_server_cancel_waits_until_thread_is_idle(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = InterruptThenIdleAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+
+    cancelled = await runs.cancel_run(result["runId"])
+
+    assert cancelled["status"] == "cancelled"
+    assert app_server.thread_read_count == 2
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
@@ -1964,6 +1990,38 @@ async def test_app_server_run_steer_failure_does_not_store_message(linux_tmp_pat
     assert app_server.requests[-1][0] == "turn/steer"
     stored_messages = messages.list_messages(project_id, chat_id)
     assert [message["content"] for message in stored_messages] == ["hello"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_app_server_steer_starts_next_turn_when_previous_turn_is_already_idle(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = NoActiveSteerAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+
+    steered = await runs.steer_run(result["runId"], "continue")
+
+    assert steered["status"] == "running"
+    assert steered["turnId"] == "turn_2"
+    assert app_server.requests[-1] == (
+        "turn/start",
+        {"threadId": "thread_1", "cwd": str(project_dir), "input": [{"type": "text", "text": "continue"}]},
+    )
+    stored_messages = messages.list_messages(project_id, chat_id)
+    assert [message["content"] for message in stored_messages] == ["hello", "continue"]
     db.close()
 
 
@@ -3025,6 +3083,29 @@ class FailingSteerAppServer(TurnStartAppServer):
         if method == "turn/start":
             return {"turn": {"id": "turn_1"}}
         if method == "turn/steer":
+            raise AppError("app_server_error", "steering was rejected", 502)
+        return {}
+
+
+class NoActiveSteerAppServer(TurnStartAppServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.turn_start_count = 0
+
+    async def request(self, method: str, params: dict) -> dict:
+        self.requests.append((method, params))
+        if method == "turn/start":
+            self.turn_start_count += 1
+            if self.turn_start_count == 2:
+                await self.subscribers[-1].put(
+                    AppServerNotification(
+                        "turn/completed",
+                        {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "completed"}},
+                    )
+                )
+                await asyncio.sleep(0)
+            return {"turn": {"id": f"turn_{self.turn_start_count}"}}
+        if method == "turn/steer":
             raise AppError("app_server_error", "no active turn to steer", 502)
         return {}
 
@@ -3063,6 +3144,25 @@ class InterruptAlreadyFinishedAppServer(TurnStartAppServer):
         self.notifications.append((method, params))
         if method == "turn/interrupt":
             raise AppError("app_server_error", "no active turn to interrupt", 502)
+
+
+class InterruptThenIdleAppServer(TurnStartAppServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.thread_read_count = 0
+
+    async def request(self, method: str, params: dict) -> dict:
+        self.requests.append((method, params))
+        if method == "turn/start":
+            return {"turn": {"id": "turn_1"}}
+        if method == "thread/read":
+            self.thread_read_count += 1
+            status_type = "active" if self.thread_read_count == 1 else "idle"
+            status = {"type": status_type}
+            if status_type == "active":
+                status["activeFlags"] = []
+            return {"thread": {"id": params["threadId"], "status": status}}
+        return {}
 
 
 class ReplacingAppServer:
