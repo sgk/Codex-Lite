@@ -45,7 +45,6 @@ public partial class MainWindow : Window
     private static readonly TimeSpan StreamingTextInterval = TimeSpan.FromMilliseconds(120);
     private static readonly TimeSpan ReasoningProgressInterval = TimeSpan.FromMilliseconds(160);
     private const int ReasoningProgressDisplayLimit = 24000;
-    private const string SelectedChoiceBullet = "● ";
     private static readonly TimeSpan AutoScrollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan ProjectListLoadTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ChatListLoadTimeout = TimeSpan.FromSeconds(10);
@@ -3915,7 +3914,6 @@ public partial class MainWindow : Window
         {
             comboBox.Items.Add(new ComboBoxItem { Content = choice.Label, Tag = choice.Value, ToolTip = choice.Tip });
         }
-        UpdateChoiceSelectionMarker(comboBox);
     }
 
     private static (string PermissionProfile, string ApprovalPolicy, string ApprovalsReviewer) SettingsForPermissionMode(string mode)
@@ -4023,7 +4021,6 @@ public partial class MainWindow : Window
         {
             comboBox.SelectedIndex = 0;
         }
-        UpdateChoiceSelectionMarker(comboBox);
     }
 
     private void ApplyModelList(ModelListDto modelList)
@@ -4069,7 +4066,6 @@ public partial class MainWindow : Window
         {
             comboBox.SelectedIndex = 0;
         }
-        UpdateChoiceSelectionMarker(comboBox);
     }
 
     private static string ReasoningEffortLabel(string effort)
@@ -4095,11 +4091,9 @@ public partial class MainWindow : Window
             if ((item.Tag as string) == mode)
             {
                 comboBox.SelectedItem = item;
-                UpdateChoiceSelectionMarker(comboBox);
                 return;
             }
         }
-        UpdateChoiceSelectionMarker(comboBox);
     }
 
     private static void SelectModel(ComboBox comboBox, string model)
@@ -4109,18 +4103,15 @@ public partial class MainWindow : Window
             if (item.Tag is ModelChoice choice && string.Equals(choice.Model, model, StringComparison.Ordinal))
             {
                 comboBox.SelectedItem = item;
-                UpdateChoiceSelectionMarker(comboBox);
                 return;
             }
             if (item.Tag is string legacyModel && string.Equals(legacyModel, model, StringComparison.Ordinal))
             {
                 comboBox.SelectedItem = item;
-                UpdateChoiceSelectionMarker(comboBox);
                 return;
             }
         }
         comboBox.SelectedIndex = 0;
-        UpdateChoiceSelectionMarker(comboBox);
     }
 
     private static void SelectReasoningEffort(ComboBox comboBox, string effort)
@@ -4130,25 +4121,10 @@ public partial class MainWindow : Window
             if ((item.Tag as string) == effort)
             {
                 comboBox.SelectedItem = item;
-                UpdateChoiceSelectionMarker(comboBox);
                 return;
             }
         }
         comboBox.SelectedIndex = 0;
-        UpdateChoiceSelectionMarker(comboBox);
-    }
-
-    private static void UpdateChoiceSelectionMarker(ComboBox comboBox)
-    {
-        foreach (var item in comboBox.Items.OfType<ComboBoxItem>())
-        {
-            var label = item.Content?.ToString() ?? "";
-            if (label.StartsWith(SelectedChoiceBullet, StringComparison.Ordinal))
-            {
-                label = label[SelectedChoiceBullet.Length..];
-            }
-            item.Content = item.IsSelected ? $"{SelectedChoiceBullet}{label}" : label;
-        }
     }
 
     private async void ChatRuntimeSetting_Changed(object sender, SelectionChangedEventArgs e)
@@ -4157,7 +4133,6 @@ public partial class MainWindow : Window
         {
             return;
         }
-        UpdateChoiceSelectionMarker(source);
         if (_isLoadingRuntimeSettings || _isApplyingRuntimeSetting || _runtimeSettings is null)
         {
             return;

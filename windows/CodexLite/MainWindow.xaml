@@ -14,6 +14,52 @@
         <local:SubtractConverter x:Key="SubtractConverter"/>
         <local:ScaleConverter x:Key="ScaleConverter"/>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+        <Style x:Key="ChatRuntimeChoiceItem" TargetType="{x:Type ComboBoxItem}">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ComboBoxItem}">
+                        <Border x:Name="ChoiceBorder"
+                                Background="Transparent"
+                                Padding="4,1">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="14"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="ChoiceBullet"
+                                           Grid.Column="0"
+                                           Text="✓"
+                                           FontSize="10"
+                                           FontWeight="Bold"
+                                           Foreground="#2F6FED"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           Visibility="Collapsed"/>
+                                <ContentPresenter Grid.Column="1"
+                                                  Content="{TemplateBinding Content}"
+                                                  ContentTemplate="{TemplateBinding ContentTemplate}"
+                                                  ContentStringFormat="{TemplateBinding ContentStringFormat}"
+                                                  HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                  VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="ChoiceBullet" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="ChoiceBorder" Property="Background" Value="#E7EEF9"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#888"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style x:Key="InlineIconButton" TargetType="{x:Type Button}">
             <Setter Property="MinWidth" Value="20"/>
             <Setter Property="Height" Value="22"/>
@@ -801,11 +847,11 @@
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Orientation="Horizontal">
                             <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                            <ComboBox x:Name="NewChatPermissionModeBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="Codexの権限モード" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                            <ComboBox x:Name="NewChatPermissionModeBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="Codexの権限モード" SelectionChanged="ChatRuntimeSetting_Changed"/>
                             <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                            <ComboBox x:Name="NewChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                            <ComboBox x:Name="NewChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
                             <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                            <ComboBox x:Name="NewChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                            <ComboBox x:Name="NewChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
                             <Button x:Name="NewChatAttachButton" Content="添付" Click="AttachFiles_Click" Height="24" MinWidth="56" Margin="0,0,6,0"/>
@@ -1105,11 +1151,11 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Orientation="Horizontal">
                                 <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                                <ComboBox x:Name="ChatPermissionModeBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="Codexの権限モード" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                                <ComboBox x:Name="ChatPermissionModeBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="Codexの権限モード" SelectionChanged="ChatRuntimeSetting_Changed"/>
                                 <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                                <ComboBox x:Name="ChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                                <ComboBox x:Name="ChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
                                 <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                                <ComboBox x:Name="ChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                                <ComboBox x:Name="ChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
                                 <Button x:Name="AttachButton" Content="添付" Click="AttachFiles_Click" Height="24" MinWidth="56" Margin="0,0,6,0"/>
