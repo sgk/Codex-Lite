@@ -518,12 +518,24 @@ def _attachments(body: dict) -> list[dict]:
             raise _validation_error("Attachment must be an object.", {"field": "attachments", "index": index})
         attachments.append(
             {
-                "path": _required_str(item, "path", min_length=1),
+                "path": _attachment_path_to_wsl(_required_str(item, "path", min_length=1)),
                 "name": _optional_str(item, "name"),
                 "kind": _optional_str(item, "kind") or "file",
             }
         )
     return attachments
+
+
+def _attachment_path_to_wsl(value: str) -> str:
+    normalized = value.replace("\\", "/")
+    for prefix in ("//wsl.localhost/", "//wsl$/"):
+        if normalized.lower().startswith(prefix):
+            distro_and_path = normalized[len(prefix):]
+            slash_index = distro_and_path.find("/")
+            return "/" if slash_index < 0 else "/" + distro_and_path[slash_index + 1:]
+    if len(normalized) >= 3 and normalized[0].isalpha() and normalized[1:3] == ":/":
+        return f"/mnt/{normalized[0].lower()}/{normalized[3:]}"
+    return normalized
 
 
 def _validation_error(message: str, details: dict | None = None) -> AppError:

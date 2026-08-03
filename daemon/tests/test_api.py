@@ -17,7 +17,7 @@ from codex_lite_daemon.codex_state import CodexStateService
 from codex_lite_daemon.config import Config, default_config
 from codex_lite_daemon.db import Database
 from codex_lite_daemon.errors import AppError
-from codex_lite_daemon.main import _model_list_out, create_app, message_page
+from codex_lite_daemon.main import _attachment_path_to_wsl, _model_list_out, create_app, message_page
 import codex_lite_daemon.process_env as process_env
 import codex_lite_daemon.deepseek as deepseek
 from codex_lite_daemon.process_env import codex_process_env
@@ -311,6 +311,12 @@ def test_clipboard_attachment_summary_hides_path() -> None:
     )
 
     assert summary == "確認して\n\nAttachments:\n- clipboard-20260713-174210-abcd.png\n- note.txt: /home/sgk/project/note.txt"
+
+
+def test_attachment_path_to_wsl_converts_windows_and_wsl_unc_paths() -> None:
+    assert _attachment_path_to_wsl(r"C:\Users\sgk\note.txt") == "/mnt/c/Users/sgk/note.txt"
+    assert _attachment_path_to_wsl("//wsl.localhost/Ubuntu-24.04/home/sgk/note.txt") == "/home/sgk/note.txt"
+    assert _attachment_path_to_wsl("/home/sgk/note.txt") == "/home/sgk/note.txt"
 
 
 def test_merge_messages_dedupes_adjacent_same_text_at_same_second_and_sorts_by_time() -> None:

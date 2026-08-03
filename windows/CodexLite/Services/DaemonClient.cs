@@ -486,13 +486,46 @@ public sealed class DaemonClient
     }
 
     public Task<MessagePostResult?> SendMessageAsync(string projectId, string chatId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default) =>
-        PostAsync<MessagePostResult>($"/projects/{projectId}/chats/{chatId}/messages", new { content, attachments = attachments ?? Array.Empty<MessageAttachmentDto>() }, cancellationToken);
+        PostAsync<MessagePostResult>($"/projects/{projectId}/chats/{chatId}/messages", new { content, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
 
     public Task<RunDto?> CancelRunAsync(string runId, CancellationToken cancellationToken = default) =>
         PostAsync<RunDto>($"/runs/{runId}/cancel", new { }, cancellationToken);
 
     public Task<RunDto?> SteerRunAsync(string runId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default) =>
-        PostAsync<RunDto>($"/runs/{runId}/steer", new { content, attachments = attachments ?? Array.Empty<MessageAttachmentDto>() }, cancellationToken);
+        PostAsync<RunDto>($"/runs/{runId}/steer", new { content, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
+
+    private static IReadOnlyList<MessageAttachmentDto> NormalizeAttachmentPaths(IReadOnlyList<MessageAttachmentDto>? attachments)
+    {
+        return (attachments ?? Array.Empty<MessageAttachmentDto>())
+            .Select(attachment => attachment with { Path = AttachmentPathToWsl(attachment.Path) })
+            .ToArray();
+    }
+
+    private static string AttachmentPathToWsl(string path)
+    {
+        var normalized = (path ?? "").Replace('\\', '/');
+        const string wslLocalhostPrefix = "//wsl.localhost/";
+        const string wslLegacyPrefix = "//wsl$/";
+        if (normalized.StartsWith(wslLocalhostPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return StripWslUncDistro(normalized[wslLocalhostPrefix.Length..]);
+        }
+        if (normalized.StartsWith(wslLegacyPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return StripWslUncDistro(normalized[wslLegacyPrefix.Length..]);
+        }
+        if (normalized.Length >= 3 && char.IsAsciiLetter(normalized[0]) && normalized[1] == ':' && normalized[2] == '/')
+        {
+            return $"/mnt/{char.ToLowerInvariant(normalized[0])}/{normalized[3..]}";
+        }
+        return normalized;
+    }
+
+    private static string StripWslUncDistro(string distroAndPath)
+    {
+        var slashIndex = distroAndPath.IndexOf('/');
+        return slashIndex < 0 ? "/" : "/" + distroAndPath[(slashIndex + 1)..];
+    }
 
     public Task<FileListDto?> ListFilesAsync(string projectId, string path, CancellationToken cancellationToken = default) =>
         _http.GetFromJsonAsync<FileListDto>($"/projects/{projectId}/files?path={Uri.EscapeDataString(path)}", JsonOptions, cancellationToken);
