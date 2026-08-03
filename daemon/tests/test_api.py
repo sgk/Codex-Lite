@@ -668,6 +668,7 @@ async def test_runtime_settings_endpoint(linux_tmp_path: Path) -> None:
         assert initial.json()["approvalsReviewer"] == "user"
         assert initial.json()["model"] == ""
         assert initial.json()["reasoningEffort"] == ""
+        assert initial.json()["recentModelReasoningChoices"] == []
         assert "gpt-5.6-luna" in initial.json()["availableModels"]
 
         models = await client.get("/models")
@@ -682,6 +683,7 @@ async def test_runtime_settings_endpoint(linux_tmp_path: Path) -> None:
         assert updated.json()["approvalsReviewer"] == "auto_review"
         assert updated.json()["model"] == "gpt-5-codex"
         assert updated.json()["reasoningEffort"] == "high"
+        assert updated.json()["recentModelReasoningChoices"][0] == {"model": "gpt-5-codex", "reasoningEffort": "high"}
 
         invalid = await client.patch("/settings", json={"permissionProfile": "invalid"})
         assert invalid.status_code == 400
@@ -704,6 +706,7 @@ async def test_runtime_settings_endpoint(linux_tmp_path: Path) -> None:
         assert persisted.json()["approvalsReviewer"] == "auto_review"
         assert persisted.json()["model"] == "gpt-5-codex"
         assert persisted.json()["reasoningEffort"] == "high"
+        assert persisted.json()["recentModelReasoningChoices"][0] == {"model": "gpt-5-codex", "reasoningEffort": "high"}
 
 
 @pytest.mark.asyncio
@@ -750,6 +753,7 @@ async def test_chat_runtime_settings_are_saved_per_chat(linux_tmp_path: Path) ->
         )
         assert updated.status_code == 200
         assert updated.json()["model"] == "deepseek-v4-flash"
+        assert updated.json()["recentModelReasoningChoices"][0] == {"model": "deepseek-v4-flash", "reasoningEffort": "max"}
         assert (await client.get(f"/projects/{project['id']}/chats/{chat_one['id']}/settings")).json()["model"] == "gpt-5.6-sol"
         assert (await client.get(f"/projects/{project['id']}/chats/{chat_two['id']}/settings")).json()["model"] == "deepseek-v4-flash"
 

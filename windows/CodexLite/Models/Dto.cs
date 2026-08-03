@@ -255,7 +255,10 @@ public sealed record AppSettingsDto(
     IReadOnlyList<string> AvailablePermissionProfiles,
     IReadOnlyList<string> AvailableApprovalPolicies,
     IReadOnlyList<string> AvailableModels,
-    IReadOnlyList<string> AvailableReasoningEfforts);
+    IReadOnlyList<string> AvailableReasoningEfforts,
+    IReadOnlyList<RecentModelReasoningChoiceDto> RecentModelReasoningChoices);
+
+public sealed record RecentModelReasoningChoiceDto(string Model, string ReasoningEffort);
 
 public sealed record ModelListDto(
     IReadOnlyList<string> AvailableModels,

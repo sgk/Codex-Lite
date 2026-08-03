@@ -169,6 +169,37 @@ class ChatService:
         )
         return self.get_chat_settings_row(project_id, chat_id)
 
+    def record_model_reasoning_choice(self, model: str, reasoning_effort: str) -> list[dict]:
+        clean_model = str(model or "").strip()
+        clean_effort = str(reasoning_effort or "").strip()
+        if not clean_model:
+            return self.list_model_reasoning_history()
+        now = utc_now()
+        self.db.execute(
+            "DELETE FROM model_reasoning_history WHERE model = ? AND reasoning_effort = ?",
+            (clean_model, clean_effort),
+        )
+        self.db.execute(
+            "INSERT INTO model_reasoning_history(model, reasoning_effort, used_at) VALUES (?, ?, ?)",
+            (clean_model, clean_effort, now),
+        )
+        self.db.execute(
+            """
+            DELETE FROM model_reasoning_history
+            WHERE id NOT IN (
+                SELECT id FROM model_reasoning_history
+                ORDER BY used_at DESC, id DESC
+                LIMIT 3
+            )
+            """
+        )
+        return self.list_model_reasoning_history()
+
+    def list_model_reasoning_history(self) -> list[dict]:
+        return self.db.fetchall(
+            "SELECT model, reasoning_effort FROM model_reasoning_history ORDER BY used_at DESC, id DESC LIMIT 3"
+        )
+
     def upsert_chat_index(
         self,
         project_id: str,

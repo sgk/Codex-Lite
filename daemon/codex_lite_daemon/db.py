@@ -65,6 +65,14 @@ CREATE TABLE IF NOT EXISTS chat_provider_threads (
   PRIMARY KEY(chat_id, provider)
 );
 
+CREATE TABLE IF NOT EXISTS model_reasoning_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  model TEXT NOT NULL,
+  reasoning_effort TEXT NOT NULL,
+  used_at TEXT NOT NULL,
+  UNIQUE(model, reasoning_effort)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
@@ -97,6 +105,7 @@ CREATE TABLE IF NOT EXISTS automations (
 CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id);
 CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages(chat_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_chat_provider_threads_thread ON chat_provider_threads(provider, thread_id);
+CREATE INDEX IF NOT EXISTS idx_model_reasoning_history_used ON model_reasoning_history(used_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_chat_started ON runs(chat_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_automations_chat ON automations(project_id, chat_id);
 CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(enabled, running, next_run_at);

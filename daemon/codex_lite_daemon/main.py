@@ -154,7 +154,7 @@ def create_app(config: Config | None = None) -> Starlette:
 
     @get("/settings")
     async def get_settings() -> dict:
-        return _settings_out(app_settings, _static_model_options(app_settings.model))
+        return _settings_out(app_settings, _static_model_options(app_settings.model), chats.list_model_reasoning_history())
 
     @get("/models")
     async def list_models() -> dict:
@@ -194,7 +194,8 @@ def create_app(config: Config | None = None) -> Starlette:
         if "reasoningEffort" in body:
             app_settings.reasoning_effort = _normalized_reasoning_effort(str(body.get("reasoningEffort") or ""))
         _save_app_settings(cfg, app_settings)
-        return _settings_out(app_settings, _static_model_options(app_settings.model))
+        chats.record_model_reasoning_choice(app_settings.model, app_settings.reasoning_effort)
+        return _settings_out(app_settings, _static_model_options(app_settings.model), chats.list_model_reasoning_history())
 
     @post("/shutdown")
     async def shutdown() -> dict:
@@ -243,6 +244,7 @@ def create_app(config: Config | None = None) -> Starlette:
     @post("/projects/{project_id}/chats")
     async def create_chat(project_id: str, body: dict) -> dict:
         requested_settings = _runtime_settings_from_body(app_settings, body)
+        chats.record_model_reasoning_choice(requested_settings.model, requested_settings.reasoning_effort)
         if use_app_server:
             return await app_threads.create_chat(project_id, _optional_str(body, "title"), requested_settings)
         return chats.create_chat(project_id, _optional_str(body, "title"), _runtime_settings_values(requested_settings))
@@ -271,14 +273,15 @@ def create_app(config: Config | None = None) -> Starlette:
         settings = _runtime_settings_for_chat(app_settings, stored)
         if any(value is None for value in stored.values()):
             chats.update_chat_settings(project_id, chat_id, _runtime_settings_values(settings))
-        return _settings_out(settings, _static_model_options(settings.model))
+        return _settings_out(settings, _static_model_options(settings.model), chats.list_model_reasoning_history())
 
     @patch("/projects/{project_id}/chats/{chat_id}/settings")
     async def update_chat_settings(project_id: str, chat_id: str, body: dict) -> dict:
         current = _runtime_settings_for_chat(app_settings, chats.get_chat_settings_row(project_id, chat_id))
         settings = _runtime_settings_from_body(current, body)
         chats.update_chat_settings(project_id, chat_id, _runtime_settings_values(settings))
-        return _settings_out(settings, _static_model_options(settings.model))
+        chats.record_model_reasoning_choice(settings.model, settings.reasoning_effort)
+        return _settings_out(settings, _static_model_options(settings.model), chats.list_model_reasoning_history())
 
     @get("/projects/{project_id}/chats/{chat_id}/automations")
     async def list_automations(project_id: str, chat_id: str) -> list[dict]:
@@ -668,7 +671,7 @@ def _model_list_out(models: list[str], efforts_by_model: dict[str, list[str]], s
     }
 
 
-def _settings_out(settings: AppServerRuntimeSettings, models: list[str]) -> dict:
+def _settings_out(settings: AppServerRuntimeSettings, models: list[str], recent_choices: list[dict] | None = None) -> dict:
     return {
         "permissionProfile": settings.permission_profile,
         "approvalPolicy": settings.approval_policy,
@@ -680,6 +683,13 @@ def _settings_out(settings: AppServerRuntimeSettings, models: list[str]) -> dict
         "availableApprovalReviewers": ["user", "auto_review"],
         "availableModels": models,
         "availableReasoningEfforts": _static_reasoning_efforts(settings.model),
+        "recentModelReasoningChoices": [
+            {
+                "model": str(choice.get("model") or ""),
+                "reasoningEffort": str(choice.get("reasoning_effort") or ""),
+            }
+            for choice in (recent_choices or [])
+        ],
     }
 
 

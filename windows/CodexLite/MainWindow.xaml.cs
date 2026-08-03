@@ -51,6 +51,7 @@ public partial class MainWindow : Window
     private static readonly TimeSpan InitialMessageLoadTimeout = TimeSpan.FromSeconds(10);
 
     private sealed record ActiveUiRun(string RunId, string ProjectId, string ChatId, CancellationTokenSource Cancellation);
+    private sealed record ModelChoice(string Model, string ReasoningEffort, bool IsRecent);
     private static readonly TimeSpan BackgroundMessagePollTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan UsageCapacityTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan SlowUiPhaseThreshold = TimeSpan.FromMilliseconds(250);
@@ -71,6 +72,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, int> _runActivityDepthByChat = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _runProgressTextByChat = new(StringComparer.Ordinal);
     private readonly Dictionary<string, IReadOnlyList<string>> _reasoningEffortsByModel = new(StringComparer.Ordinal);
+    private readonly List<RecentModelReasoningChoiceDto> _recentModelReasoningChoices = new();
     private readonly DispatcherTimer _streamingTextTimer = new() { Interval = StreamingTextInterval };
     private readonly DispatcherTimer _reasoningProgressTimer = new() { Interval = ReasoningProgressInterval };
     private readonly DispatcherTimer _messageRefreshTimer = new() { Interval = TimeSpan.FromSeconds(3) };
@@ -3796,7 +3798,19 @@ public partial class MainWindow : Window
 
     private static string SelectedModel(ComboBox comboBox)
     {
-        return (comboBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+        return (comboBox.SelectedItem as ComboBoxItem)?.Tag switch
+        {
+            ModelChoice choice => choice.Model,
+            string model => model,
+            _ => ""
+        };
+    }
+
+    private static string? SelectedRecentReasoningEffort(ComboBox comboBox)
+    {
+        return (comboBox.SelectedItem as ComboBoxItem)?.Tag is ModelChoice choice && choice.IsRecent
+            ? choice.ReasoningEffort
+            : null;
     }
 
     private static string SelectedReasoningEffort(ComboBox comboBox)
@@ -3807,7 +3821,7 @@ public partial class MainWindow : Window
     private void ApplyRuntimeSettingsSelection(AppSettingsDto settings)
     {
         _runtimeSettings = settings;
-        UpdateModelChoices(settings.AvailableModels);
+        UpdateModelChoices(settings.AvailableModels, settings.RecentModelReasoningChoices);
         ApplyRuntimeSettingsToControls(settings, NewChatPermissionModeBox, NewChatModelBox, NewChatReasoningEffortBox);
         if (_selectedProject is not null && _selectedChat is null)
         {
@@ -3817,7 +3831,7 @@ public partial class MainWindow : Window
 
     private void ApplyChatRuntimeSettingsSelection(AppSettingsDto settings)
     {
-        UpdateModelChoices(settings.AvailableModels);
+        UpdateModelChoices(settings.AvailableModels, settings.RecentModelReasoningChoices);
         ApplyRuntimeSettingsToControls(settings, ChatPermissionModeBox, ChatModelBox, ChatReasoningEffortBox);
     }
 
@@ -3891,15 +3905,28 @@ public partial class MainWindow : Window
         };
     }
 
-    private void UpdateModelChoices(IEnumerable<string> models)
+    private void UpdateModelChoices(IEnumerable<string> models, IEnumerable<RecentModelReasoningChoiceDto>? recentChoices = null)
     {
-        var choices = new List<string> { "" };
+        if (recentChoices is not null)
+        {
+            _recentModelReasoningChoices.Clear();
+            _recentModelReasoningChoices.AddRange(
+                recentChoices
+                    .Where(choice => !string.IsNullOrWhiteSpace(choice.Model))
+                    .GroupBy(choice => $"{choice.Model}\u001f{choice.ReasoningEffort}", StringComparer.Ordinal)
+                    .Select(group => group.First())
+                    .Take(3));
+        }
+
+        var choices = new List<ModelChoice>();
+        choices.AddRange(_recentModelReasoningChoices.Select(choice => new ModelChoice(choice.Model, choice.ReasoningEffort, true)));
+        choices.Add(new ModelChoice("", "", false));
         foreach (var model in models)
         {
             var normalized = (model ?? "").Trim();
-            if (normalized.Length > 0 && !choices.Contains(normalized, StringComparer.Ordinal))
+            if (normalized.Length > 0 && !choices.Any(choice => string.Equals(choice.Model, normalized, StringComparison.Ordinal) && !choice.IsRecent))
             {
-                choices.Add(normalized);
+                choices.Add(new ModelChoice(normalized, "", false));
             }
         }
         var selectedModels = new[] { _runtimeSettings?.Model, SelectedModel(NewChatModelBox), SelectedModel(ChatModelBox) }
@@ -3907,9 +3934,9 @@ public partial class MainWindow : Window
             .Distinct(StringComparer.Ordinal);
         foreach (var selectedModel in selectedModels)
         {
-            if (!choices.Contains(selectedModel, StringComparer.Ordinal))
+            if (!choices.Any(choice => string.Equals(choice.Model, selectedModel, StringComparison.Ordinal)))
             {
-                choices.Add(selectedModel!);
+                choices.Add(new ModelChoice(selectedModel!, "", false));
             }
         }
 
@@ -3931,12 +3958,15 @@ public partial class MainWindow : Window
         }
     }
 
-    private static void PopulateModelChoices(ComboBox comboBox, IEnumerable<string> choices)
+    private static void PopulateModelChoices(ComboBox comboBox, IEnumerable<ModelChoice> choices)
     {
         comboBox.Items.Clear();
-        foreach (var model in choices)
+        foreach (var choice in choices)
         {
-            comboBox.Items.Add(new ComboBoxItem { Content = model.Length == 0 ? "既定" : model, Tag = model });
+            var content = choice.IsRecent
+                ? $"最近: {choice.Model} / {ReasoningEffortLabel(choice.ReasoningEffort)}"
+                : choice.Model.Length == 0 ? "既定" : choice.Model;
+            comboBox.Items.Add(new ComboBoxItem { Content = content, Tag = choice });
         }
         if (comboBox.Items.Count > 0)
         {
@@ -3980,24 +4010,29 @@ public partial class MainWindow : Window
         comboBox.Items.Clear();
         foreach (var effort in choices.Distinct(StringComparer.Ordinal))
         {
-            var label = effort switch
-            {
-                "" => "既定",
-                "minimal" => "最小",
-                "low" => "低",
-                "medium" => "中",
-                "high" => "高",
-                "xhigh" => "最大",
-                "max" => "最大+",
-                "ultra" => "超高",
-                _ => effort
-            };
+            var label = ReasoningEffortLabel(effort);
             comboBox.Items.Add(new ComboBoxItem { Content = label, Tag = effort, ToolTip = effort.Length == 0 ? "モデルの既定値" : $"reasoning effort: {effort}" });
         }
         if (comboBox.Items.Count > 0)
         {
             comboBox.SelectedIndex = 0;
         }
+    }
+
+    private static string ReasoningEffortLabel(string effort)
+    {
+        return effort switch
+        {
+            "" => "既定",
+            "minimal" => "最小",
+            "low" => "低",
+            "medium" => "中",
+            "high" => "高",
+            "xhigh" => "最大",
+            "max" => "最大+",
+            "ultra" => "超高",
+            _ => effort
+        };
     }
 
     private static void SelectPermissionMode(ComboBox comboBox, string mode)
@@ -4016,7 +4051,12 @@ public partial class MainWindow : Window
     {
         foreach (var item in comboBox.Items.OfType<ComboBoxItem>())
         {
-            if ((item.Tag as string) == model)
+            if (item.Tag is ModelChoice choice && string.Equals(choice.Model, model, StringComparison.Ordinal))
+            {
+                comboBox.SelectedItem = item;
+                return;
+            }
+            if (item.Tag is string legacyModel && string.Equals(legacyModel, model, StringComparison.Ordinal))
             {
                 comboBox.SelectedItem = item;
                 return;
@@ -4057,6 +4097,11 @@ public partial class MainWindow : Window
             try
             {
                 UpdateReasoningEffortChoices(reasoningBox, SelectedModel(modelBox));
+                var recentEffort = SelectedRecentReasoningEffort(modelBox);
+                if (recentEffort is not null)
+                {
+                    SelectReasoningEffort(reasoningBox, recentEffort);
+                }
             }
             finally
             {
