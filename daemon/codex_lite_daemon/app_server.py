@@ -260,6 +260,12 @@ class AppServerClient:
             if not future.done():
                 future.set_exception(AppError("app_server_closed", "Codex app-server exited.", 503))
         self._pending.clear()
+        exit_notification = AppServerNotification(
+            "app_server/exited",
+            {"message": "Codex app-server exited."},
+        )
+        for queue in list(self._subscribers):
+            await queue.put(exit_notification)
 
     async def _read_stderr(self) -> None:
         process = self._process

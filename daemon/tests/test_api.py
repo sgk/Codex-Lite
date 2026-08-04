@@ -20,6 +20,7 @@ from codex_lite_daemon.errors import AppError
 from codex_lite_daemon.main import _attachment_path_to_wsl, _model_list_out, create_app, message_page
 import codex_lite_daemon.process_env as process_env
 import codex_lite_daemon.deepseek as deepseek
+import codex_lite_daemon.app_services as app_services
 from codex_lite_daemon.process_env import codex_process_env
 from codex_lite_daemon.run_service import EventHub
 from codex_lite_daemon.runner.codex_runner import CodexRunner
@@ -2003,6 +2004,69 @@ async def test_app_server_run_keeps_active_turn_id_after_steer(linux_tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_app_server_exit_finishes_stream_with_error(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = TurnStartAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+    await app_server.subscribers[-1].put(AppServerNotification("app_server/exited", {"message": "Codex app-server exited."}))
+
+    events = []
+    async for event in runs.stream_events(result["runId"]):
+        events.append(event)
+        if "event: error" in event:
+            break
+
+    assert any('"code": "app_server_closed"' in event for event in events)
+    assert runs.get_run(result["runId"])["status"] == "failed"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_app_server_idle_state_recovers_missing_completed_notification(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_services, "REASONING_PROGRESS_BATCH_SECONDS", 0.005)
+    monkeypatch.setattr(app_services, "RUN_STATE_RECONCILE_SECONDS", 0.01)
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = IdleReadAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+
+    events = []
+    async for event in runs.stream_events(result["runId"]):
+        events.append(event)
+        if "event: done" in event:
+            break
+
+    assert any('"status": "succeeded"' in event for event in events)
+    assert runs.get_run(result["runId"])["status"] == "succeeded"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_agent_message_boundary_is_published(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
@@ -3142,6 +3206,16 @@ class TurnStartAppServer:
 
     async def notify(self, method: str, params: dict) -> None:
         self.notifications.append((method, params))
+
+
+class IdleReadAppServer(TurnStartAppServer):
+    async def request(self, method: str, params: dict) -> dict:
+        self.requests.append((method, params))
+        if method == "turn/start":
+            return {"turn": {"id": "turn_1"}}
+        if method == "thread/read":
+            return {"thread": {"id": params["threadId"], "status": {"type": "idle"}}}
+        return {}
 
 
 class FailingSteerAppServer(TurnStartAppServer):

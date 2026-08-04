@@ -280,8 +280,15 @@ public partial class MainWindow : Window
         _daemonHealthTimer.Stop();
         _reasoningProgressTimer.Stop();
         PersistExpandedStateFromTree();
-        await _client.ShutdownDaemonAsync();
-        Close();
+        Hide();
+        try
+        {
+            await _client.ShutdownDaemonAsync();
+        }
+        finally
+        {
+            Close();
+        }
     }
 
     private async Task InitializeAsync()
