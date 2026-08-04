@@ -1874,7 +1874,7 @@ async def test_app_server_cancel_treats_already_finished_turn_as_cancelled(linux
     cancelled = await runs.cancel_run(result["runId"])
 
     assert cancelled["status"] == "cancelled"
-    assert app_server.notifications[-1] == ("turn/interrupt", {"threadId": "thread_1", "turnId": "turn_1"})
+    assert app_server.requests[-1] == ("turn/interrupt", {"threadId": "thread_1", "turnId": "turn_1"})
     db.close()
 
 
@@ -3281,10 +3281,13 @@ class NotLoadedThreadAppServer(TurnStartAppServer):
 
 
 class InterruptAlreadyFinishedAppServer(TurnStartAppServer):
-    async def notify(self, method: str, params: dict) -> None:
-        self.notifications.append((method, params))
+    async def request(self, method: str, params: dict) -> dict:
+        self.requests.append((method, params))
         if method == "turn/interrupt":
             raise AppError("app_server_error", "no active turn to interrupt", 502)
+        if method == "turn/start":
+            return {"turn": {"id": "turn_1"}}
+        return {}
 
 
 class InterruptThenIdleAppServer(TurnStartAppServer):
@@ -3296,6 +3299,8 @@ class InterruptThenIdleAppServer(TurnStartAppServer):
         self.requests.append((method, params))
         if method == "turn/start":
             return {"turn": {"id": "turn_1"}}
+        if method == "turn/interrupt":
+            return {}
         if method == "thread/read":
             self.thread_read_count += 1
             status_type = "active" if self.thread_read_count == 1 else "idle"

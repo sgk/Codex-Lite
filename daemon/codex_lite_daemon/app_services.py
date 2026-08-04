@@ -558,7 +558,7 @@ class AppServerRunService:
             return _run_out(run_id, run)
         app_server = _app_server_for_provider(self.app_server, run.provider)
         try:
-            await app_server.notify("turn/interrupt", {"threadId": run.thread_id, "turnId": run.turn_id})
+            await app_server.request("turn/interrupt", {"threadId": run.thread_id, "turnId": run.turn_id})
         except AppError as exc:
             await self.events.publish(run_id, "progress", {"method": "turn/interrupt", "summary": exc.message})
             if _is_no_active_turn(exc):
