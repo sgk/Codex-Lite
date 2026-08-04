@@ -427,7 +427,7 @@
                                 </Style>
                             </Grid.Style>
                             <Grid.ContextMenu>
-                                <ContextMenu Opened="TreeContextMenu_Opened">
+                                <ContextMenu>
                                     <MenuItem Header="プロジェクト名の変更" Click="RenameProjectMenu_Click"
                                               Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
                                     <MenuItem Header="プロジェクト登録解除" Click="DeleteProjectMenu_Click"
@@ -483,7 +483,7 @@
                             </TextBox>
                             <Button Grid.Column="1" Content="..." Style="{StaticResource TreeInlineIconButton}" Click="ProjectMenu_Click" Tag="{Binding}" IsEnabled="{Binding IsAvailable}">
                                 <Button.ContextMenu>
-                                    <ContextMenu Opened="TreeContextMenu_Opened">
+                                    <ContextMenu>
                                         <MenuItem Header="プロジェクト名の変更" Click="RenameProjectMenu_Click"
                                                   Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
                                         <MenuItem Header="プロジェクト登録解除" Click="DeleteProjectMenu_Click"
@@ -518,7 +518,7 @@
                                 </Style>
                             </Grid.Style>
                             <Grid.ContextMenu>
-                                <ContextMenu Opened="TreeContextMenu_Opened">
+                                <ContextMenu>
                                     <MenuItem Header="変更 (F2)" Click="RenameChatMenu_Click"
                                               Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
                                     <MenuItem Header="アーカイブ" Click="ArchiveChatMenu_Click"
@@ -642,7 +642,7 @@
                             </Viewbox>
                             <Button Grid.Column="2" Content="..." Style="{StaticResource TreeInlineIconButton}" Click="ChatMenu_Click" Tag="{Binding}" IsEnabled="{Binding IsAvailable}">
                                 <Button.ContextMenu>
-                                    <ContextMenu Opened="TreeContextMenu_Opened">
+                                    <ContextMenu>
                                         <MenuItem Header="変更 (F2)" Click="RenameChatMenu_Click"
                                                   Tag="{Binding PlacementTarget.Tag, RelativeSource={RelativeSource AncestorType={x:Type ContextMenu}}}"/>
                                         <MenuItem Header="アーカイブ" Click="ArchiveChatMenu_Click"

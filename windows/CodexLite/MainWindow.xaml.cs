@@ -2417,6 +2417,14 @@ public partial class MainWindow : Window
         _projectDragStart = e.GetPosition(ProjectTree);
         _projectDragItem = ProjectItemFromOriginalSource(e.OriginalSource);
         _chatDragItem = ChatItemFromOriginalSource(e.OriginalSource);
+        if (e.ChangedButton == MouseButton.Right
+            && e.OriginalSource is DependencyObject source
+            && FindVisualAncestor<TreeViewItem>(source) is TreeViewItem treeItem)
+        {
+            treeItem.IsSelected = true;
+            treeItem.Focus();
+            return;
+        }
         ProjectTree.Focus();
     }
 
@@ -4851,16 +4859,6 @@ public partial class MainWindow : Window
     private void ChatMenu_Click(object sender, RoutedEventArgs e)
     {
         OpenContextMenu(sender, e);
-    }
-
-    private void TreeContextMenu_Opened(object sender, RoutedEventArgs e)
-    {
-        if (sender is not ContextMenu { PlacementTarget: FrameworkElement element })
-        {
-            return;
-        }
-
-        SelectTreeItemForContextMenu(element);
     }
 
     private static void OpenContextMenu(object sender, RoutedEventArgs e)
