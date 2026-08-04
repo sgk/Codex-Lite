@@ -1756,6 +1756,47 @@ async def test_app_server_run_routes_each_run_to_selected_provider(linux_tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_openai_reuses_primary_thread_after_deepseek_was_mapped(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    transcript = cfg.codex_home / "sessions" / "primary.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("", encoding="utf-8")
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = TurnStartAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings(model="gpt-5-codex"))  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(
+        project_id,
+        "primary_thread",
+        "existing",
+        "primary_thread",
+        utc_now(),
+        utc_now(),
+        str(transcript),
+    )["id"]
+    chats.upsert_provider_thread(project_id, chat_id, "deepseek", "deepseek_thread", history_initialized=True)
+
+    provider_thread = await threads.ensure_provider_thread(
+        project_id,
+        chat_id,
+        str(project_dir),
+        make_runtime_settings(model="gpt-5-codex"),
+    )
+
+    assert provider_thread["thread_id"] == "primary_thread"
+    assert app_server.requests == []
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_provider_context_only_includes_messages_added_since_target_provider_was_active(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
@@ -2528,6 +2569,45 @@ def test_codex_state_threads_are_indexed_and_archived_threads_are_hidden(linux_t
     assert [(chat["id"], chat["title"], chat["canContinue"]) for chat in visible] == [("thr_active", "Active from DB", True)]
     assert [(row["id"], row["archived_at"] is not None, row["can_continue"]) for row in all_rows] == [("thr_active", False, 1)]
     assert all_rows[0]["transcript_path"] == str(active_transcript.resolve())
+    db.close()
+
+
+def test_codex_state_hides_provider_context_threads(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    transcript = cfg.codex_home / "sessions" / "provider-context.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json_line({"type": "session_meta", "payload": {"id": "internal_thread", "cwd": str(project_dir)}}),
+        encoding="utf-8",
+    )
+    write_codex_state_db(
+        cfg,
+        [
+            (
+                "internal_thread",
+                str(project_dir),
+                "以下はCodex Liteの同じチャットで、別のモデル提供元が応答した過去の表示内容です。内部文脈",
+                str(transcript),
+                0,
+                1_782_550_800_000,
+                1_782_550_801_000,
+                None,
+            )
+        ],
+    )
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    transcripts = TranscriptImportService(cfg, projects, chats, CodexStateService(cfg))
+
+    project = projects.create_project(str(project_dir))
+    transcripts.index_project(project)
+
+    assert chats.list_chats(project["id"]) == []
+    assert db.fetchone("SELECT id FROM chats WHERE id = ?", ("internal_thread",)) is None
     db.close()
 
 

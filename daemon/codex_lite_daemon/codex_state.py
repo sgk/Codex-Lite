@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .provider_context import is_provider_context_title
 
 
 class CodexStateSchemaError(Exception):
@@ -127,6 +128,7 @@ class CodexStateService:
         updated_at = _timestamp(row["recency_at_ms"]) or _timestamp(row["updated_at_ms"]) or _timestamp(row["recency_at"]) or _timestamp(row["updated_at"]) or created_at
         archived_at = _timestamp(row["archived_at_ms"]) or _timestamp(row["archived_at"])
         title = _thread_title(row["title"], row["preview"], row["first_user_message"])
+        hidden = hidden or is_provider_context_title(title) or is_provider_context_title(row["first_user_message"])
         return CodexThreadMetadata(
             id=thread_id,
             path=project_path,

@@ -401,7 +401,10 @@ class MessageService:
 
     def list_messages(self, project_id: str, chat_id: str) -> list[dict]:
         self.chats.get_chat_row(project_id, chat_id)
-        rows = self.db.fetchall("SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC", (chat_id,))
+        rows = self.db.fetchall(
+            "SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC, rowid ASC",
+            (chat_id,),
+        )
         return [message_out(row) for row in rows]
 
     def insert_message(self, chat_id: str, role: str, content: str, run_id: str | None = None, kind: str | None = None) -> dict:

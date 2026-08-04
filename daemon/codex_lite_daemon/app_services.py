@@ -14,6 +14,7 @@ from typing import Any
 from .app_server import AppServerClient, AppServerNotification
 from .deepseek import DEEPSEEK_PROVIDER, model_provider_for_model, read_deepseek_balance
 from .errors import AppError
+from .provider_context import PROVIDER_CONTEXT_PREFIX
 from .run_service import EventHub
 from .services import ChatService, MessageService, ProjectService
 from .transcript_import import TranscriptImportService
@@ -27,7 +28,6 @@ CANCEL_IDLE_WAIT_SECONDS = 15.0
 CANCEL_IDLE_POLL_SECONDS = 0.1
 RUN_STATE_RECONCILE_SECONDS = 5.0
 PROVIDER_CONTEXT_MAX_CHARS = 32000
-PROVIDER_CONTEXT_PREFIX = "以下はCodex Liteの同じチャットで、別のモデル提供元が応答した過去の表示内容です。"
 
 
 @dataclass
@@ -230,6 +230,17 @@ class AppServerThreadService:
             return existing
 
         chat = self.chats.get_chat_row(project_id, chat_id)
+        if provider == "openai":
+            primary_thread_id = _primary_openai_thread_id(chat, self.transcripts.config.codex_home)
+            if primary_thread_id is not None:
+                return self.chats.upsert_provider_thread(
+                    project_id,
+                    chat_id,
+                    provider,
+                    primary_thread_id,
+                    chat.get("transcript_path"),
+                    history_initialized=True,
+                )
         app_server = _app_server_for_provider(self.app_server, provider)
         # Existing OpenAI sessions are safe to resume in the primary home.
         # A legacy DeepSeek mapping is only used when no dedicated home is
@@ -383,6 +394,23 @@ def _latest_provider(provider_threads: list[dict]) -> str | None:
     latest = max(provider_threads, key=lambda item: str(item.get("updated_at") or ""))
     provider = latest.get("provider")
     return str(provider) if provider else None
+
+
+def _primary_openai_thread_id(chat: dict, codex_home: Path) -> str | None:
+    thread_id = chat.get("codex_session_id")
+    transcript_path = chat.get("transcript_path")
+    if not isinstance(thread_id, str) or not thread_id or not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    try:
+        transcript = Path(transcript_path).resolve()
+        home = codex_home.resolve()
+    except OSError:
+        return None
+    if transcript.suffix != ".jsonl" or not transcript.is_file():
+        return None
+    if any(transcript.is_relative_to(home / child) for child in ("sessions", "archived_sessions")):
+        return thread_id
+    return None
 
 
 def _acquire_run_lease(app_server: Any) -> None:
@@ -1332,8 +1360,10 @@ def _message_time_slot(message: dict) -> datetime:
     return _message_timestamp(message).replace(microsecond=0)
 
 
-def _message_sort_key(message: dict) -> tuple[datetime, str]:
-    return (_message_timestamp(message), str(message.get("id") or ""))
+def _message_sort_key(message: dict) -> datetime:
+    # Python's sort is stable, so messages with the same second retain their
+    # transcript/local insertion order instead of being shuffled by random IDs.
+    return _message_timestamp(message)
 
 
 def _message_timestamp(message: dict) -> datetime:
