@@ -3882,8 +3882,8 @@ public partial class MainWindow : Window
         if (automation.IsDraft)
         {
             _automations.Remove(automation);
+            ClearDeletedAutomationSelection();
             StatusText.Text = "automation draft deleted";
-            UpdateAutomationButtonState();
             return;
         }
         if (System.Windows.MessageBox.Show(this, $"「{automation.Name}」を削除しますか？", "オートメーション削除", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
@@ -3894,14 +3894,21 @@ public partial class MainWindow : Window
         {
             await _client.DeleteAutomationAsync(project.Id, chat.Id, automation.Id);
             _automations.Remove(automation);
+            ClearDeletedAutomationSelection();
             StatusText.Text = "automation deleted";
-            UpdateAutomationButtonState();
         }
         catch (Exception ex)
         {
             StatusText.Text = $"automation delete error | {ShortError(ex)}";
             UpdateAutomationButtonState();
         }
+    }
+
+    private void ClearDeletedAutomationSelection()
+    {
+        AutomationsGrid.SelectedItem = null;
+        ClearAutomationEditor();
+        UpdateAutomationButtonState();
     }
 
     private void ReplaceAutomation(AutomationDto updated)
