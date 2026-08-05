@@ -147,12 +147,16 @@ class AppServerClient:
 
         Codex validates CODEX_HOME during startup and exits if it does not
         exist.  DeepSeek uses a private home that is intentionally created on
-        first use rather than during daemon startup.
+        first use rather than during daemon startup. Its global instructions
+        are links to the primary Codex home so both providers follow the same
+        user guidance without copying it.
         """
         home = self.config.deepseek_codex_home if self.provider == DEEPSEEK_PROVIDER else self.config.codex_home
         sqlite_home = self.config.deepseek_codex_sqlite_home if self.provider == DEEPSEEK_PROVIDER else self.config.codex_sqlite_home
         if home is not None:
             home.mkdir(parents=True, exist_ok=True)
+            if self.provider == DEEPSEEK_PROVIDER:
+                _link_global_agents_files(self.config.codex_home, home)
         if sqlite_home is not None:
             sqlite_home.mkdir(parents=True, exist_ok=True)
 
@@ -354,6 +358,22 @@ class AppServerClientPool:
 
     async def close(self) -> None:
         await asyncio.gather(*(self._clients[provider].close() for provider in self._used_providers))
+
+
+def _link_global_agents_files(primary_home: Path, provider_home: Path) -> None:
+    for name in ("AGENTS.md", "AGENTS.override.md"):
+        source = primary_home / name
+        destination = provider_home / name
+        if source == destination or not source.is_file():
+            continue
+        if destination.exists() or destination.is_symlink():
+            continue
+        try:
+            destination.symlink_to(source)
+        except FileExistsError:
+            # Another app-server start may have created the same link after
+            # the existence check. Never replace an existing provider file.
+            continue
 
 
 def _normalize_provider(provider: str | None) -> str:

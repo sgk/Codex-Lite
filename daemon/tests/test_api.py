@@ -231,6 +231,53 @@ def test_app_server_pool_keeps_provider_processes_independent(linux_tmp_path: Pa
     assert 'model_provider="deepseek"' not in openai._command_args("/opt/codex")
 
 
+def test_deepseek_codex_home_links_primary_global_agents_files(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    deepseek_home = cfg.app_data_dir / "deepseek-codex-home"
+    cfg = Config(
+        **{
+            **cfg.__dict__,
+            "deepseek_codex_home": deepseek_home,
+            "deepseek_codex_sqlite_home": deepseek_home / "sqlite",
+        }
+    )
+    cfg.codex_home.mkdir(parents=True)
+    (cfg.codex_home / "AGENTS.md").write_text("shared agents\n", encoding="utf-8")
+    (cfg.codex_home / "AGENTS.override.md").write_text("shared override\n", encoding="utf-8")
+    client = AppServerClient(cfg, CodexRunner(cfg), "deepseek")
+
+    client._prepare_codex_home()
+
+    for name in ("AGENTS.md", "AGENTS.override.md"):
+        linked = deepseek_home / name
+        assert linked.is_symlink()
+        assert linked.resolve() == (cfg.codex_home / name).resolve()
+    assert (deepseek_home / "sqlite").is_dir()
+
+
+def test_deepseek_codex_home_preserves_existing_agents_file(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    deepseek_home = cfg.app_data_dir / "deepseek-codex-home"
+    cfg = Config(
+        **{
+            **cfg.__dict__,
+            "deepseek_codex_home": deepseek_home,
+            "deepseek_codex_sqlite_home": deepseek_home / "sqlite",
+        }
+    )
+    cfg.codex_home.mkdir(parents=True)
+    (cfg.codex_home / "AGENTS.md").write_text("primary\n", encoding="utf-8")
+    deepseek_home.mkdir(parents=True)
+    provider_agents = deepseek_home / "AGENTS.md"
+    provider_agents.write_text("provider-specific\n", encoding="utf-8")
+    client = AppServerClient(cfg, CodexRunner(cfg), "deepseek")
+
+    client._prepare_codex_home()
+
+    assert not provider_agents.is_symlink()
+    assert provider_agents.read_text(encoding="utf-8") == "provider-specific\n"
+
+
 @pytest.mark.asyncio
 async def test_app_server_client_closes_after_idle_run_window(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = make_test_config(linux_tmp_path)
