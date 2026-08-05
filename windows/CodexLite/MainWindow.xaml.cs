@@ -707,7 +707,8 @@ public partial class MainWindow : Window
 
     private async Task RefreshProjectsAsync(string? preferredChatId)
     {
-        _selectionGeneration++;
+        var refreshGeneration = ++_selectionGeneration;
+        SetChatRuntimeSettingsControlsEnabled(false);
         BeginProjectTreeLoading("プロジェクトを読み込み中...");
         var projectTreeLoadingEnded = false;
         var selectedProjectId = _selectedProject?.Id ?? _persistedSelectedProjectId;
@@ -769,6 +770,10 @@ public partial class MainWindow : Window
                 }
             }
             await RestoreProjectTreeStateAsync(expandedProjectIds, selectedProjectId, selectedChatId);
+            if (_selectedProject is ProjectDto restoredProject && _selectedChat is ChatDto restoredChat)
+            {
+                await LoadChatRuntimeSettingsAsync(restoredProject.Id, restoredChat.Id, refreshGeneration);
+            }
             UpdateCommandButtonState();
             UpdateAutomationButtonState();
             UpdateRightPaneVisibility();
@@ -1833,6 +1838,7 @@ public partial class MainWindow : Window
     private async Task SelectChatAsync(ChatTreeItem item, long? requestedGeneration = null)
     {
         var generation = requestedGeneration ?? ++_selectionGeneration;
+        SetChatRuntimeSettingsControlsEnabled(false);
         if (FindProjectItem(item.Project.Id) is ProjectTreeItem projectItem)
         {
             var currentItem = projectItem.Chats.FirstOrDefault(chatItem => chatItem.Chat.Id == item.Chat.Id);
@@ -1894,6 +1900,7 @@ public partial class MainWindow : Window
             if (requestedGeneration is null || IsSelectionCurrent(requestedGeneration.Value, projectId, chatId))
             {
                 ApplyChatRuntimeSettingsSelection(settings);
+                SetChatRuntimeSettingsControlsEnabled(true);
                 WritePerformanceLog(
                     "chat-settings-loaded",
                     $"projectId={LogText(projectId)} chatId={LogText(chatId)} permission={LogText(settings.PermissionProfile)} approval={LogText(settings.ApprovalPolicy)} reviewer={LogText(settings.ApprovalsReviewer)} model={LogText(settings.Model)} effort={LogText(settings.ReasoningEffort)}");
@@ -4022,6 +4029,7 @@ public partial class MainWindow : Window
         _runtimeSettings = settings;
         UpdateModelChoices(settings.AvailableModels, settings.RecentModelReasoningChoices);
         ApplyRuntimeSettingsToControls(settings, NewChatPermissionModeBox, NewChatModelBox, NewChatReasoningEffortBox);
+        SetNewChatRuntimeSettingsControlsEnabled(true);
         if (_selectedProject is not null && _selectedChat is null)
         {
             _ = RefreshUsageCapacityAsync();
@@ -4059,6 +4067,22 @@ public partial class MainWindow : Window
         UpdateModelChoices(Array.Empty<string>());
         UpdateReasoningEffortChoices(NewChatReasoningEffortBox, "");
         UpdateReasoningEffortChoices(ChatReasoningEffortBox, "");
+        SetNewChatRuntimeSettingsControlsEnabled(false);
+        SetChatRuntimeSettingsControlsEnabled(false);
+    }
+
+    private void SetNewChatRuntimeSettingsControlsEnabled(bool enabled)
+    {
+        NewChatPermissionModeBox.IsEnabled = enabled;
+        NewChatModelBox.IsEnabled = enabled;
+        NewChatReasoningEffortBox.IsEnabled = enabled;
+    }
+
+    private void SetChatRuntimeSettingsControlsEnabled(bool enabled)
+    {
+        ChatPermissionModeBox.IsEnabled = enabled;
+        ChatModelBox.IsEnabled = enabled;
+        ChatReasoningEffortBox.IsEnabled = enabled;
     }
 
     private static void PopulatePermissionModeChoices(ComboBox comboBox)
