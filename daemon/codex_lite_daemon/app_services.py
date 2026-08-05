@@ -738,6 +738,7 @@ class AppServerRunService:
         assistant_parts: list[str] = []
         final_answer_parts: list[str] = []
         agent_message_phases: dict[str, str] = {}
+        pending_agent_message_parts: dict[str, list[str]] = {}
         reasoning_buffers: dict[tuple[str, str], list[str]] = {}
         reasoning_buffered_chars = 0
         last_reasoning_flush = time.monotonic()
@@ -769,6 +770,31 @@ class AppServerRunService:
                 )
             last_reasoning_flush = time.monotonic()
 
+        async def publish_agent_output(item_id: str, delta: str, phase: str) -> None:
+            if not delta:
+                return
+            if phase == "final_answer":
+                final_answer_parts.append(delta)
+            await self.events.publish(
+                run_id,
+                "output",
+                {
+                    "stream": "stdout",
+                    "text": delta,
+                    "messageId": item_id,
+                    "phase": phase,
+                },
+            )
+
+        async def flush_pending_agent_output(item_id: str, phase: str) -> None:
+            parts = pending_agent_message_parts.pop(item_id, None)
+            if parts:
+                await publish_agent_output(item_id, "".join(parts), phase)
+
+        async def flush_all_pending_agent_output() -> None:
+            for item_id in list(pending_agent_message_parts):
+                await flush_pending_agent_output(item_id, agent_message_phases.get(item_id, ""))
+
         try:
             while True:
                 if run.status != "running":
@@ -788,6 +814,7 @@ class AppServerRunService:
                         status = thread.get("status") if isinstance(thread, dict) else None
                         status_type = status.get("type") if isinstance(status, dict) else None
                         if status_type == "idle" and not run.replacing_idle_turn:
+                            await flush_all_pending_agent_output()
                             run.status = "succeeded"
                             run.finished_at = utc_now()
                             self.chats.touch_provider_thread(run.chat_id, run.provider)
@@ -799,6 +826,7 @@ class AppServerRunService:
                     continue
                 if notification.method == "app_server/exited":
                     await flush_reasoning_progress()
+                    await flush_all_pending_agent_output()
                     run.status = "failed"
                     run.error = str(notification.params.get("message") or "Codex app-server exited.")
                     run.finished_at = utc_now()
@@ -879,6 +907,9 @@ class AppServerRunService:
                     phase = _agent_message_phase(agent_item)
                     if item_id and phase:
                         agent_message_phases[item_id] = phase
+                        await flush_pending_agent_output(item_id, phase)
+                    elif item_id and notification.method == "item/completed":
+                        await flush_pending_agent_output(item_id, "")
                     if phase:
                         boundary = "completed" if notification.method == "item/completed" else "started"
                         await self.events.publish(
@@ -897,18 +928,10 @@ class AppServerRunService:
                     item_id = _agent_message_delta_item_id(notification)
                     phase = agent_message_phases.get(item_id, "")
                     assistant_parts.append(delta)
-                    if phase == "final_answer":
-                        final_answer_parts.append(delta)
-                    await self.events.publish(
-                        run_id,
-                        "output",
-                        {
-                            "stream": "stdout",
-                            "text": delta,
-                            "messageId": item_id,
-                            "phase": phase,
-                        },
-                    )
+                    if phase:
+                        await publish_agent_output(item_id, delta, phase)
+                    else:
+                        pending_agent_message_parts.setdefault(item_id, []).append(delta)
                 elif notification.method.startswith("item/agentMessage"):
                     await self.events.publish(
                         run_id,
@@ -940,6 +963,7 @@ class AppServerRunService:
                         },
                     )
                 elif notification.method == "turn/completed":
+                    await flush_all_pending_agent_output()
                     turn = notification.params.get("turn") or {}
                     status = str(turn.get("status") or "succeeded")
                     run.status = "succeeded" if status == "completed" else status
@@ -966,6 +990,7 @@ class AppServerRunService:
                         )
                         continue
                     run.status = "failed"
+                    await flush_all_pending_agent_output()
                     run.error = str(notification.params)
                     run.finished_at = utc_now()
                     self.chats.touch_provider_thread(run.chat_id, run.provider)
@@ -973,6 +998,7 @@ class AppServerRunService:
                     return
         except Exception as exc:
             await flush_reasoning_progress()
+            await flush_all_pending_agent_output()
             run.status = "failed"
             run.error = str(exc)
             run.finished_at = utc_now()
