@@ -14,6 +14,9 @@ from .process_env import codex_process_env
 from .runner.codex_runner import CodexRunner
 
 
+SERVER_REQUEST_ID_KEY = "serverRequestId"
+
+
 @dataclass
 class AppServerNotification:
     method: str
@@ -80,6 +83,17 @@ class AppServerClient:
             await self._write({"method": method, "params": params or {}})
         finally:
             self._schedule_idle_shutdown()
+
+    async def respond_server_request(self, request_id: int | str, result: dict[str, Any]) -> None:
+        await self._write({"id": request_id, "result": result})
+
+    async def reject_server_request(self, request_id: int | str, message: str) -> None:
+        await self._write(
+            {
+                "id": request_id,
+                "error": {"code": -32601, "message": message},
+            }
+        )
 
     async def subscribe(self) -> AsyncIterator[AppServerNotification]:
         queue = self.subscribe_queue()
@@ -245,6 +259,14 @@ class AppServerClient:
                 message = json.loads(line.decode("utf-8"))
             except json.JSONDecodeError:
                 continue
+            method = message.get("method")
+            if "id" in message and isinstance(method, str):
+                params = dict(message.get("params") or {})
+                params[SERVER_REQUEST_ID_KEY] = message["id"]
+                notification = AppServerNotification(method, params)
+                for queue in list(self._subscribers):
+                    await queue.put(notification)
+                continue
             if "id" in message:
                 request_id = message["id"]
                 future = self._pending.pop(request_id, None)
@@ -255,7 +277,6 @@ class AppServerClient:
                 else:
                     future.set_result(message.get("result") or {})
                 continue
-            method = message.get("method")
             if isinstance(method, str):
                 notification = AppServerNotification(method, message.get("params") or {})
                 for queue in list(self._subscribers):

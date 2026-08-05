@@ -84,7 +84,7 @@ Enterで送信し、改行操作は修飾キーを使う。送信履歴は上下
 
 Codex HOMEは「自動」「Windows側 `.codex`」「WSL側 `$HOME/.codex`」から選ぶ。自動ではWindowsユーザープロファイルの `.codex` が存在すればそれを優先する。変更時はデーモンを再起動し、プロジェクトツリーを読み直す。複数のHOMEを同時に統合しない。
 
-Codexの実行設定はWSL側の `settings.json` に保存し、スレッド作成時と送信前にapp-serverへ適用する。
+Codexの実行設定はWSL側の `settings.json` に保存し、スレッド作成時と送信前にapp-serverへ適用する。Windowsクライアント起動時はプロジェクトツリーの選択状態を復元する前にアプリ全体の設定を読み込み、チャット選択時にチャット固有の保存設定で上書きする。
 
 モデルと承認レベルはチャット入力欄から選択する。モデル候補はデーモンの `/models` を介して app-server の `model/list` から取得し、新しいモデルIDが返ればクライアントの変更なしで表示する。「既定」は空のモデル値としてCodex側の既定に従う。app-serverでモデル一覧を取得できない場合に限り、デーモンが持つ最小限の静的候補を表示する。DeepSeek APIキーがWSL側のユーザー専用ファイル（`~/.config/codex-lite/deepseek.env`）に設定されている場合は `deepseek-v4-flash` を候補へ追加する。
 
@@ -101,6 +101,8 @@ OpenAIとDeepSeekの切り替えは、チャットごとのモデル選択に応
 - フルアクセス: `permissions=:danger-full-access`、`approvalPolicy=never`、`approvalsReviewer=user`
 
 承認モードはサンドボックス境界と承認要求の扱いを一体として切り替える。別のアクセスポリシーを診断画面から変更する経路は設けない。思考レベルはモデル一覧が返す `supportedReasoningEfforts` を使い、モデルごとの候補をチャット入力欄に表示する。候補を取得できない場合は「既定」「低」「中」「高」「最大」を表示し、選択値はapp-serverの `thread/settings/update` の `effort` に渡す。
+
+app-serverから `item/commandExecution/requestApproval` または `item/fileChange/requestApproval` のサーバー要求を受けた場合は、通常のクライアント要求への応答と区別してチャットのRunへ関連付ける。Windowsクライアントは承認内容をダイアログに表示し、承認・拒否・キャンセルの結果を元のJSON-RPC request IDへ返す。未対応のサーバー要求を黙って破棄してRunを待機させない。
 
 ## 5. デーモン
 

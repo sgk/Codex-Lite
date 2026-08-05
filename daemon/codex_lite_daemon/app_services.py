@@ -6,12 +6,12 @@ import re
 import shlex
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .app_server import AppServerClient, AppServerNotification
+from .app_server import SERVER_REQUEST_ID_KEY, AppServerClient, AppServerNotification
 from .deepseek import DEEPSEEK_PROVIDER, model_provider_for_model, read_deepseek_balance
 from .errors import AppError
 from .provider_context import PROVIDER_CONTEXT_PREFIX
@@ -28,6 +28,11 @@ CANCEL_IDLE_WAIT_SECONDS = 15.0
 CANCEL_IDLE_POLL_SECONDS = 0.1
 RUN_STATE_RECONCILE_SECONDS = 5.0
 PROVIDER_CONTEXT_MAX_CHARS = 32000
+APPROVAL_REQUEST_METHODS = {
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+}
+APPROVAL_DECISIONS = {"accept", "acceptForSession", "decline", "cancel"}
 
 
 @dataclass
@@ -369,6 +374,7 @@ class AppServerActiveRun:
     last_reconnect_message: str | None = None
     lease_released: bool = False
     replacing_idle_turn: bool = False
+    pending_approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _app_server_for_provider(app_server: Any, provider: str) -> Any:
@@ -574,6 +580,14 @@ class AppServerRunService:
                 "reconnectCount": run.reconnect_count,
                 "lastReconnectAt": run.last_reconnect_at,
                 "lastReconnectMessage": run.last_reconnect_message,
+                "pendingApprovals": [
+                    {
+                        "requestId": request_id,
+                        "method": approval["method"],
+                        "itemId": approval.get("itemId"),
+                    }
+                    for request_id, approval in run.pending_approvals.items()
+                ],
             }
             for run_id, run in self.runs.items()
         ]
@@ -685,6 +699,34 @@ class AppServerRunService:
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
         return _run_out(run_id, run)
 
+    async def resolve_approval(self, run_id: str, request_id: str, decision: str) -> dict:
+        run = self.runs.get(run_id)
+        if run is None or run.status != "running":
+            raise AppError("approval_failed", "Run is not active.", 409)
+        approval = run.pending_approvals.get(request_id)
+        if approval is None:
+            raise AppError("approval_not_found", "Approval request was not found or was already resolved.", 404)
+        if decision not in APPROVAL_DECISIONS:
+            raise AppError("validation_error", "Approval decision is invalid.", 400)
+        available = approval.get("availableDecisions")
+        if isinstance(available, list) and available and decision not in available:
+            raise AppError("approval_decision_unavailable", "That approval decision is not available for this request.", 400)
+        app_server = _app_server_for_provider(self.app_server, run.provider)
+        responder = getattr(app_server, "respond_server_request", None)
+        if not callable(responder):
+            raise AppError("approval_not_supported", "The app-server client cannot answer approval requests.", 500)
+        await responder(approval["rawRequestId"], {"decision": decision})
+        run.pending_approvals.pop(request_id, None)
+        await self.events.publish(
+            run_id,
+            "progress",
+            {
+                "method": "approval/resolved",
+                "summary": _approval_decision_summary(decision),
+            },
+        )
+        return _run_out(run_id, run)
+
     async def stream_events(self, run_id: str) -> AsyncIterator[str]:
         if run_id not in self.runs:
             raise AppError("run_not_found", "Run was not found.", 404)
@@ -760,11 +802,60 @@ class AppServerRunService:
                     self.chats.touch_provider_thread(run.chat_id, run.provider)
                     await self.events.publish(run_id, "error", {"code": "app_server_closed", "message": run.error})
                     return
+                if notification.method == "serverRequest/resolved" and notification.params.get("threadId") == run.thread_id:
+                    resolved_id = str(notification.params.get("requestId") or "")
+                    if resolved_id:
+                        run.pending_approvals.pop(resolved_id, None)
+                    await self.events.publish(
+                        run_id,
+                        "progress",
+                        {
+                            "method": notification.method,
+                            "summary": "承認要求が解決されました",
+                        },
+                    )
+                    continue
                 if not _notification_matches(notification, run):
                     continue
                 if run.status != "running":
                     return
                 if notification.method == "turn/completed" and run.replacing_idle_turn:
+                    continue
+                if SERVER_REQUEST_ID_KEY in notification.params:
+                    raw_request_id = notification.params[SERVER_REQUEST_ID_KEY]
+                    request_id = str(raw_request_id)
+                    if notification.method not in APPROVAL_REQUEST_METHODS:
+                        rejecter = getattr(app_server, "reject_server_request", None)
+                        message = f"Unsupported app-server request: {notification.method}"
+                        if callable(rejecter):
+                            await rejecter(raw_request_id, message)
+                        run.status = "failed"
+                        run.error = message
+                        run.finished_at = utc_now()
+                        self.chats.touch_provider_thread(run.chat_id, run.provider)
+                        await self.events.publish(run_id, "error", {"code": "unsupported_server_request", "message": message})
+                        return
+                    approval = {
+                        "rawRequestId": raw_request_id,
+                        "method": notification.method,
+                        "itemId": notification.params.get("itemId"),
+                        "availableDecisions": notification.params.get("availableDecisions"),
+                    }
+                    run.pending_approvals[request_id] = approval
+                    await self.events.publish(
+                        run_id,
+                        "approval",
+                        {
+                            "requestId": request_id,
+                            "method": notification.method,
+                            "itemId": notification.params.get("itemId"),
+                            "reason": notification.params.get("reason"),
+                            "command": _approval_command(notification.params.get("command")),
+                            "cwd": notification.params.get("cwd"),
+                            "availableDecisions": notification.params.get("availableDecisions"),
+                            "networkApprovalContext": notification.params.get("networkApprovalContext"),
+                        },
+                    )
                     continue
                 if _is_reasoning_delta_notification(notification):
                     delta = _reasoning_delta(notification)
@@ -852,6 +943,8 @@ class AppServerRunService:
             self.chats.touch_provider_thread(run.chat_id, run.provider)
             await self.events.publish(run_id, "error", {"code": "app_server_run_failed", "message": str(exc)})
         finally:
+            if run.status != "running":
+                run.pending_approvals.clear()
             app_server.unsubscribe_queue(notification_queue)
             await self._release_run_lease(run)
 
@@ -889,6 +982,23 @@ def _notification_matches(notification: AppServerNotification, run: AppServerAct
         turn = params.get("turn") or {}
         return turn.get("id") == run.turn_id
     return params.get("turnId") == run.turn_id
+
+
+def _approval_command(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(str(part) for part in value)
+    return ""
+
+
+def _approval_decision_summary(decision: str) -> str:
+    return {
+        "accept": "今回の操作を承認しました",
+        "acceptForSession": "このセッションで同種の操作を承認しました",
+        "decline": "操作を拒否しました",
+        "cancel": "操作をキャンセルしました",
+    }.get(decision, decision)
 
 
 def _turn_id_from_response(response: dict[str, Any]) -> str | None:

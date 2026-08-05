@@ -494,6 +494,9 @@ public sealed class DaemonClient
     public Task<RunDto?> SteerRunAsync(string runId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default) =>
         PostAsync<RunDto>($"/runs/{runId}/steer", new { content, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
 
+    public Task<RunDto?> ResolveRunApprovalAsync(string runId, string requestId, string decision, CancellationToken cancellationToken = default) =>
+        PostAsync<RunDto>($"/runs/{runId}/approval", new { requestId, decision }, cancellationToken);
+
     private static IReadOnlyList<MessageAttachmentDto> NormalizeAttachmentPaths(IReadOnlyList<MessageAttachmentDto>? attachments)
     {
         return (attachments ?? Array.Empty<MessageAttachmentDto>())

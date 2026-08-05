@@ -6,11 +6,12 @@ import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from codex_lite_daemon.app_server import AppServerClient, AppServerClientPool, AppServerNotification
+from codex_lite_daemon.app_server import SERVER_REQUEST_ID_KEY, AppServerClient, AppServerClientPool, AppServerNotification
 from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _is_reasoning_delta_notification, _merge_messages, _notification_details, _notification_summary, _reasoning_delta, _reasoning_item_id
 from codex_lite_daemon.automation_service import AutomationService, _run_due_automations
 from codex_lite_daemon.codex_state import CodexStateService
@@ -121,6 +122,35 @@ def test_app_server_command_can_disable_auto_compaction(linux_tmp_path: Path) ->
     args = client._command_args("/opt/codex")
 
     assert args == ["/opt/codex", "app-server", "--listen", "stdio://"]
+
+
+@pytest.mark.asyncio
+async def test_app_server_routes_server_requests_instead_of_dropping_their_ids(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    client = AppServerClient(cfg, CodexRunner(cfg))
+    stdout = asyncio.StreamReader()
+    stdout.feed_data(
+        (
+            json.dumps(
+                {
+                    "id": 41,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {"threadId": "thread_1", "turnId": "turn_1", "command": "do work"},
+                }
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+    stdout.feed_eof()
+    client._process = SimpleNamespace(stdout=stdout)  # type: ignore[assignment]
+    queue = client.subscribe_queue()
+
+    await client._read_stdout()
+
+    notification = queue.get_nowait()
+    assert notification.method == "item/commandExecution/requestApproval"
+    assert notification.params[SERVER_REQUEST_ID_KEY] == 41
+    assert notification.params["command"] == "do work"
 
 
 @pytest.mark.asyncio
@@ -2123,6 +2153,70 @@ async def test_app_server_exit_finishes_stream_with_error(linux_tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_app_server_command_approval_is_streamed_and_resolved(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = TurnStartAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+    await app_server.subscribers[-1].put(
+        AppServerNotification(
+            "item/commandExecution/requestApproval",
+            {
+                "threadId": "thread_1",
+                "turnId": "turn_1",
+                "itemId": "item_1",
+                "command": "npm test",
+                "cwd": str(project_dir),
+                "availableDecisions": ["accept", "decline", "cancel"],
+                SERVER_REQUEST_ID_KEY: 71,
+            },
+        )
+    )
+    await asyncio.sleep(0)
+
+    events = []
+    async for event in runs.stream_events(result["runId"]):
+        events.append(event)
+        if "event: approval" in event:
+            break
+
+    assert any('"requestId": "71"' in event and '"command": "npm test"' in event for event in events)
+    assert runs.list_run_diagnostics()[0]["pendingApprovals"] == [
+        {
+            "requestId": "71",
+            "method": "item/commandExecution/requestApproval",
+            "itemId": "item_1",
+        }
+    ]
+
+    resolved = await runs.resolve_approval(result["runId"], "71", "accept")
+
+    assert resolved["status"] == "running"
+    assert app_server.server_responses == [(71, {"decision": "accept"})]
+    assert runs.list_run_diagnostics()[0]["pendingApprovals"] == []
+    await app_server.subscribers[-1].put(
+        AppServerNotification(
+            "turn/completed",
+            {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "completed"}},
+        )
+    )
+    await asyncio.sleep(0)
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_idle_state_recovers_missing_completed_notification(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(app_services, "REASONING_PROGRESS_BATCH_SECONDS", 0.005)
     monkeypatch.setattr(app_services, "RUN_STATE_RECONCILE_SECONDS", 0.01)
@@ -3311,6 +3405,8 @@ class TurnStartAppServer:
     def __init__(self) -> None:
         self.requests: list[tuple[str, dict]] = []
         self.notifications: list[tuple[str, dict]] = []
+        self.server_responses: list[tuple[int | str, dict]] = []
+        self.server_rejections: list[tuple[int | str, str]] = []
         self.subscribers = []
 
     async def ensure_started(self) -> None:
@@ -3333,6 +3429,12 @@ class TurnStartAppServer:
 
     async def notify(self, method: str, params: dict) -> None:
         self.notifications.append((method, params))
+
+    async def respond_server_request(self, request_id: int | str, result: dict) -> None:
+        self.server_responses.append((request_id, result))
+
+    async def reject_server_request(self, request_id: int | str, message: str) -> None:
+        self.server_rejections.append((request_id, message))
 
 
 class IdleReadAppServer(TurnStartAppServer):

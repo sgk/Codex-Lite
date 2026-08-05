@@ -302,6 +302,12 @@ public partial class MainWindow : Window
                 _wslDistroName = wsl.DistroName;
                 _wslHomePath = wsl.HomePath;
                 await _client.EnsureDaemonAsync(_wslDistroName);
+                SetBusyMessage("実行設定を復元中...");
+                var runtimeSettings = await _client.GetSettingsAsync();
+                if (runtimeSettings is not null)
+                {
+                    ApplyRuntimeSettingsSelection(runtimeSettings);
+                }
                 SetBusyMessage("プロジェクトを読み込み中...");
                 await RefreshProjectsAsync();
                 SetBusyMessage("診断情報を読み込み中...");
@@ -1768,15 +1774,22 @@ public partial class MainWindow : Window
             var settings = await _client.GetChatSettingsAsync(projectId, chatId);
             if (settings is null)
             {
+                WritePerformanceLog("chat-settings-load-empty", $"projectId={LogText(projectId)} chatId={LogText(chatId)}");
                 return;
             }
             if (requestedGeneration is null || IsSelectionCurrent(requestedGeneration.Value, projectId, chatId))
             {
                 ApplyChatRuntimeSettingsSelection(settings);
+                WritePerformanceLog(
+                    "chat-settings-loaded",
+                    $"projectId={LogText(projectId)} chatId={LogText(chatId)} permission={LogText(settings.PermissionProfile)} approval={LogText(settings.ApprovalPolicy)} reviewer={LogText(settings.ApprovalsReviewer)} model={LogText(settings.Model)} effort={LogText(settings.ReasoningEffort)}");
             }
         }
         catch (Exception ex)
         {
+            WritePerformanceLog(
+                "chat-settings-load-error",
+                $"projectId={LogText(projectId)} chatId={LogText(chatId)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
             StatusText.Text = $"chat settings load error | {ShortError(ex)}";
         }
     }
@@ -5817,7 +5830,38 @@ public partial class MainWindow : Window
                 using var eventPhase = EnterUiPhase($"StreamRun/Event/{item.Event}");
                 lastEventAt = DateTimeOffset.Now;
                 lastEventName = item.Event;
-                if (item.Event == "output")
+                if (item.Event == "approval")
+                {
+                    FlushReasoningProgress(runId);
+                    var requestId = ExtractSseString(item.Data, "requestId");
+                    var method = ExtractSseString(item.Data, "method");
+                    var reason = ExtractSseString(item.Data, "reason");
+                    var command = ExtractSseString(item.Data, "command");
+                    var cwd = ExtractSseString(item.Data, "cwd");
+                    WritePerformanceLog(
+                        "approval-request",
+                        $"runId={LogText(runId)} requestId={LogText(requestId)} method={LogText(method)}");
+                    ShowRunProgressForChat(chatId, "承認待ち");
+                    var result = System.Windows.MessageBox.Show(
+                        this,
+                        ApprovalPromptText(method, reason, command, cwd),
+                        "Codexの承認要求",
+                        MessageBoxButton.YesNoCancel,
+                        MessageBoxImage.Question,
+                        MessageBoxResult.Cancel);
+                    var decision = result switch
+                    {
+                        MessageBoxResult.Yes => "accept",
+                        MessageBoxResult.No => "decline",
+                        _ => "cancel",
+                    };
+                    await _client.ResolveRunApprovalAsync(runId, requestId, decision, cancellationToken);
+                    WritePerformanceLog(
+                        "approval-response",
+                        $"runId={LogText(runId)} requestId={LogText(requestId)} decision={LogText(decision)}");
+                    ShowRunProgressForChat(chatId, decision == "accept" ? "承認済み" : "承認しませんでした");
+                }
+                else if (item.Event == "output")
                 {
                     reconnectingMessage = "";
                     var text = ExtractSseText(item.Data);
@@ -6599,6 +6643,29 @@ public partial class MainWindow : Window
         {
         }
         return "";
+    }
+
+    private static string ApprovalPromptText(string method, string reason, string command, string cwd)
+    {
+        var heading = method.Equals("item/fileChange/requestApproval", StringComparison.Ordinal)
+            ? "Codexがファイル変更の承認を求めています。"
+            : "Codexがコマンド実行の承認を求めています。";
+        var details = new List<string> { heading };
+        if (!string.IsNullOrWhiteSpace(reason))
+        {
+            details.Add($"理由: {reason}");
+        }
+        if (!string.IsNullOrWhiteSpace(command))
+        {
+            var commandText = command.Length <= 1200 ? command : command[..1200] + "…";
+            details.Add($"コマンド:\n{commandText}");
+        }
+        if (!string.IsNullOrWhiteSpace(cwd))
+        {
+            details.Add($"作業場所: {cwd}");
+        }
+        details.Add("「はい」で承認、「いいえ」で拒否、「キャンセル」で中止します。");
+        return string.Join("\n\n", details);
     }
 
     private async void Cancel_Click(object sender, RoutedEventArgs e)
