@@ -865,7 +865,7 @@ public partial class MainWindow : Window
                 _selectedProject = null;
                 _selectedChat = null;
                 _messages.Clear();
-                _automations.Clear();
+                ClearAutomationContext();
             }
             UpdateCommandButtonState();
             UpdateAutomationButtonState();
@@ -1773,7 +1773,7 @@ public partial class MainWindow : Window
                 _selectedChat = null;
                 _messages.Clear();
                 _files.Clear();
-                _automations.Clear();
+                ClearAutomationContext();
                 UpdateCommandButtonState();
                 UpdateAutomationButtonState();
                 UpdateRightPaneVisibility();
@@ -1797,8 +1797,7 @@ public partial class MainWindow : Window
         _selectedProject = project;
         _selectedChat = null;
         _messages.Clear();
-        _automations.Clear();
-        UpdateAutomationButtonState();
+        ClearAutomationContext();
         if (FindProjectItem(project.Id) is ProjectTreeItem projectItem)
         {
             await LoadProjectChatsAsync(projectItem);
@@ -1826,9 +1825,8 @@ public partial class MainWindow : Window
         _selectedProject = project;
         _selectedChat = null;
         _messages.Clear();
-        _automations.Clear();
+        ClearAutomationContext();
         RefreshSendTransportReadiness();
-        UpdateAutomationButtonState();
         UpdateRightPaneVisibility();
         StatusText.Text = $"project | {project.Name} | {project.Path}";
         NewChatMessageBox.Focus();
@@ -1847,9 +1845,8 @@ public partial class MainWindow : Window
                 _selectedProject = projectItem.Project;
                 _selectedChat = null;
                 _messages.Clear();
-                _automations.Clear();
+                ClearAutomationContext();
                 RefreshSendTransportReadiness();
-                UpdateAutomationButtonState();
                 UpdateRightPaneVisibility();
                 StatusText.Text = $"chat is no longer active | {item.Chat.Title}";
                 return;
@@ -1858,6 +1855,7 @@ public partial class MainWindow : Window
         }
         _selectedProject = item.Project;
         _selectedChat = item.Chat;
+        ClearAutomationContext();
         await LoadChatRuntimeSettingsAsync(item.Project.Id, item.Chat.Id, generation);
         if (!IsSelectionCurrent(generation, item.Project.Id, item.Chat.Id))
         {
@@ -3458,7 +3456,7 @@ public partial class MainWindow : Window
     {
         _isRefreshingAutomations = true;
         UpdateAutomationButtonState();
-        _automations.Clear();
+        ClearAutomationContext();
         if (_selectedProject is not ProjectDto project || _selectedChat is not ChatDto chat)
         {
             _isRefreshingAutomations = false;
@@ -3468,6 +3466,10 @@ public partial class MainWindow : Window
         try
         {
             var items = await _client.ListAutomationsAsync(project.Id, chat.Id) ?? [];
+            if (_selectedProject?.Id != project.Id || _selectedChat?.Id != chat.Id)
+            {
+                return;
+            }
             foreach (var item in items.OrderBy(item => item.CreatedAt, StringComparer.Ordinal))
             {
                 _automations.Add(item);
@@ -3585,7 +3587,40 @@ public partial class MainWindow : Window
                 _isLoadingAutomationSelection = false;
             }
         }
+        else
+        {
+            ClearAutomationEditor();
+        }
         UpdateAutomationButtonState();
+    }
+
+    private void ClearAutomationContext()
+    {
+        AutomationsGrid.SelectedItem = null;
+        _automations.Clear();
+        ClearAutomationEditor();
+        UpdateAutomationButtonState();
+    }
+
+    private void ClearAutomationEditor()
+    {
+        _isLoadingAutomationSelection = true;
+        try
+        {
+            AutomationNameBox.Text = "";
+            SelectAutomationScheduleKind("interval_minutes");
+            AutomationIntervalBox.Text = "60";
+            AutomationMinuteBox.SelectedItem = 0;
+            AutomationHourBox.SelectedItem = 9;
+            AutomationDailyMinuteBox.SelectedItem = 0;
+            AutomationEnabledBox.IsChecked = false;
+            AutomationPromptBox.Text = "";
+            UpdateAutomationScheduleEditor();
+        }
+        finally
+        {
+            _isLoadingAutomationSelection = false;
+        }
     }
 
     private void UpdateAutomationButtonState()
