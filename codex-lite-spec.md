@@ -133,7 +133,7 @@ Windowsアプリは定期的にhealth checkを行い、デーモンが応答し�
 
 app-serverの通知はデーモン内のRunへ対応付け、WindowsクライアントへSSEで配信する。Runは `queued`、`running`、`succeeded`、`failed`、`cancelled` の状態を持つ。
 
-assistantメッセージのライブ表示では、`item/started`、`item/agentMessage/delta`、`item/completed` の項目IDおよび `phase` を保持する。`item/started` ではphaseが未確定で `item/completed` で初めて確定する提供元については、その項目のテキストを確定までデーモン内で一時保持する。`commentary` は「作業内容」、`final_answer` は「結論」として別メッセージに分け、途中報告を最終回答へ連結しない。phaseを最後まで通知しない旧モデル・提供元では従来互換の表示を行う。既存JSONLの書き換えや過去表示の移行は行わない。
+assistantメッセージのライブ表示では、`item/started`、`item/agentMessage/delta`、`item/completed`、`rawResponseItem/completed` の項目IDおよび `phase` を保持する。通常のitem通知ではphaseが未確定で、元Responses項目の完了通知またはturn完了項目で初めて確定する提供元については、その項目のテキストを確定までデーモン内で一時保持する。`commentary` は「作業内容」、`final_answer` は「結論」として別メッセージに分け、途中報告を最終回答へ連結しない。phaseを最後まで通知しない旧モデル・提供元では従来互換の表示を行う。既存JSONLの書き換えや過去表示の移行は行わない。
 
 ### 5.3 オートメーション
 

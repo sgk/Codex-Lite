@@ -2344,7 +2344,7 @@ async def test_app_server_agent_message_output_keeps_item_phase_and_stores_final
 
 
 @pytest.mark.asyncio
-async def test_app_server_agent_message_phase_can_arrive_only_when_item_completes(linux_tmp_path: Path) -> None:
+async def test_app_server_agent_message_phase_can_arrive_only_with_raw_response_item(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
     cfg = make_test_config(linux_tmp_path)
@@ -2365,10 +2365,12 @@ async def test_app_server_agent_message_phase_can_arrive_only_when_item_complete
     common = {"threadId": "thread_1", "turnId": "turn_1"}
     await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "comment_1", "type": "agentMessage", "text": "", "phase": None}}))
     await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "comment_1", "delta": "調査します。"}))
-    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "comment_1", "type": "agentMessage", "text": "調査します。", "phase": "commentary"}}))
+    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "comment_1", "type": "agentMessage", "text": "調査します。", "phase": None}}))
+    await queue.put(AppServerNotification("rawResponseItem/completed", {**common, "item": {"id": "comment_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "調査します。"}], "phase": "commentary"}}))
     await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "", "phase": None}}))
     await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "final_1", "delta": "結論です。"}))
-    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "結論です。", "phase": "final_answer"}}))
+    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "結論です。", "phase": None}}))
+    await queue.put(AppServerNotification("rawResponseItem/completed", {**common, "item": {"id": "final_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "結論です。"}], "phase": "final_answer"}}))
     await queue.put(AppServerNotification("turn/completed", {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "completed"}}))
 
     events = []

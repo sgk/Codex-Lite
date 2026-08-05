@@ -901,6 +901,14 @@ class AppServerRunService:
                         await flush_reasoning_progress()
                     continue
                 await flush_reasoning_progress()
+                raw_item = _raw_agent_message_item(notification)
+                if raw_item is not None:
+                    item_id = _raw_agent_message_item_id(raw_item)
+                    phase = _raw_agent_message_phase(raw_item)
+                    if item_id and phase:
+                        agent_message_phases[item_id] = phase
+                        await flush_pending_agent_output(item_id, phase)
+                    continue
                 agent_item = _agent_message_item(notification)
                 if agent_item is not None:
                     item_id = _agent_message_item_id(agent_item)
@@ -908,8 +916,6 @@ class AppServerRunService:
                     if item_id and phase:
                         agent_message_phases[item_id] = phase
                         await flush_pending_agent_output(item_id, phase)
-                    elif item_id and notification.method == "item/completed":
-                        await flush_pending_agent_output(item_id, "")
                     if phase:
                         boundary = "completed" if notification.method == "item/completed" else "started"
                         await self.events.publish(
@@ -963,6 +969,9 @@ class AppServerRunService:
                         },
                     )
                 elif notification.method == "turn/completed":
+                    for item_id, phase in _turn_agent_message_phases(notification).items():
+                        agent_message_phases[item_id] = phase
+                        await flush_pending_agent_output(item_id, phase)
                     await flush_all_pending_agent_output()
                     turn = notification.params.get("turn") or {}
                     status = str(turn.get("status") or "succeeded")
@@ -1058,6 +1067,43 @@ def _agent_message_phase(item: dict[str, Any]) -> str:
 def _agent_message_delta_item_id(notification: AppServerNotification) -> str:
     value = notification.params.get("itemId")
     return value if isinstance(value, str) else ""
+
+
+def _raw_agent_message_item(notification: AppServerNotification) -> dict[str, Any] | None:
+    if notification.method != "rawResponseItem/completed":
+        return None
+    item = notification.params.get("item")
+    if not isinstance(item, dict) or item.get("type") != "message" or item.get("role") != "assistant":
+        return None
+    return item
+
+
+def _raw_agent_message_item_id(item: dict[str, Any]) -> str:
+    value = item.get("id")
+    return value if isinstance(value, str) else ""
+
+
+def _raw_agent_message_phase(item: dict[str, Any]) -> str:
+    value = item.get("phase")
+    return value if value in {"commentary", "final_answer"} else ""
+
+
+def _turn_agent_message_phases(notification: AppServerNotification) -> dict[str, str]:
+    if notification.method != "turn/completed":
+        return {}
+    turn = notification.params.get("turn")
+    items = turn.get("items") if isinstance(turn, dict) else None
+    if not isinstance(items, list):
+        return {}
+    phases: dict[str, str] = {}
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "agentMessage":
+            continue
+        item_id = _agent_message_item_id(item)
+        phase = _agent_message_phase(item)
+        if item_id and phase:
+            phases[item_id] = phase
+    return phases
 
 
 def _notification_matches(notification: AppServerNotification, run: AppServerActiveRun) -> bool:
