@@ -177,7 +177,9 @@ public sealed record MessageDto(
 
     public string DisplayCreatedAt => FormatLocalTime(CreatedAt);
 
-    private static string FormatLocalTime(string value)
+    public string DisplayCreatedTime => FormatLocalTime(CreatedAt, "HH:mm:ss");
+
+    private static string FormatLocalTime(string value, string format = "yyyy-MM-dd HH:mm:ss")
     {
         if (DateTimeOffset.TryParse(
                 value,
@@ -185,7 +187,7 @@ public sealed record MessageDto(
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
                 out var timestamp))
         {
-            return timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.CurrentCulture);
+            return timestamp.ToLocalTime().ToString(format, CultureInfo.CurrentCulture);
         }
         return value;
     }

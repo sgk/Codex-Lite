@@ -1018,11 +1018,23 @@
                                               FontSize="12"
                                               IsExpanded="False">
                                         <Expander.Header>
-                                            <TextBlock Text="{Binding Content}"
-                                                       Foreground="#6A737D"
-                                                       TextWrapping="NoWrap"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       VerticalAlignment="Center"/>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="{Binding Content}"
+                                                           Foreground="#6A737D"
+                                                           TextWrapping="NoWrap"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           VerticalAlignment="Center"/>
+                                                <TextBlock Grid.Column="1"
+                                                           Text="{Binding DisplayCreatedTime, Mode=OneWay}"
+                                                           Foreground="#8A929C"
+                                                           FontSize="11"
+                                                           Margin="10,0,2,0"
+                                                           VerticalAlignment="Center"/>
+                                            </Grid>
                                         </Expander.Header>
                                         <Border Background="#F6F8FA"
                                                 BorderBrush="#E1E4E8"
