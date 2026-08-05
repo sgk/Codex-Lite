@@ -6154,10 +6154,6 @@ public partial class MainWindow : Window
                     completed = item.Event == "done";
                     if (completed)
                     {
-                        if (string.IsNullOrWhiteSpace(currentAssistantMessagePhase))
-                        {
-                            MarkAssistantMessageAsConclusion(chatId, currentAssistantMessageId);
-                        }
                         MarkAssistantMessageCompleted(chatId, currentAssistantMessageId);
                         StatusText.Text = "応答完了";
                         ShowRunProgressForChat(chatId, "完了");
@@ -6774,28 +6770,6 @@ public partial class MainWindow : Window
                 _messages[i] = _messages[i] with { CreatedAt = DateTimeOffset.UtcNow.ToString("O") };
                 return;
             }
-        }
-    }
-
-    private void MarkAssistantMessageAsConclusion(string chatId, string messageId)
-    {
-        if (_selectedChat?.Id != chatId)
-        {
-            return;
-        }
-        for (var i = 0; i < _messages.Count; i++)
-        {
-            var message = _messages[i];
-            if (message.Id != messageId || !message.Id.StartsWith("local-assistant-progress-", StringComparison.Ordinal))
-            {
-                continue;
-            }
-            if (message.Kind == "waiting")
-            {
-                return;
-            }
-            _messages[i] = message with { Id = $"local-assistant-final-{Guid.NewGuid():N}", Kind = "conclusion" };
-            return;
         }
     }
 

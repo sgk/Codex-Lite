@@ -735,7 +735,7 @@ class AppServerRunService:
 
     async def _watch_run(self, run_id: str, notification_queue: asyncio.Queue[AppServerNotification], app_server: Any) -> None:
         run = self.runs[run_id]
-        final_answer_parts: list[str] = []
+        final_answer_parts_by_item: dict[str, list[str]] = {}
         agent_message_phases: dict[str, str] = {}
         pending_agent_message_parts: dict[str, list[str]] = {}
         reasoning_buffers: dict[tuple[str, str], list[str]] = {}
@@ -773,7 +773,7 @@ class AppServerRunService:
             if not delta:
                 return
             if phase == "final_answer":
-                final_answer_parts.append(delta)
+                final_answer_parts_by_item.setdefault(item_id, []).append(delta)
             await self.events.publish(
                 run_id,
                 "output",
@@ -794,17 +794,30 @@ class AppServerRunService:
             for item_id in list(pending_agent_message_parts):
                 await flush_pending_agent_output(item_id, agent_message_phases.get(item_id, ""))
 
-        def pending_item_id_for_raw_item(raw_item: dict[str, Any]) -> str:
+        async def publish_raw_agent_output(raw_item: dict[str, Any], phase: str) -> bool:
             raw_item_id = _raw_agent_message_item_id(raw_item)
-            if raw_item_id in pending_agent_message_parts:
-                return raw_item_id
             raw_text = _raw_agent_message_text(raw_item)
             if not raw_text:
+                return False
+            for pending_item_id, parts in list(pending_agent_message_parts.items()):
+                pending_text = "".join(parts)
+                if not pending_text.startswith(raw_text):
+                    continue
+                remaining = pending_text[len(raw_text):]
+                if remaining:
+                    pending_agent_message_parts[pending_item_id] = [remaining]
+                else:
+                    pending_agent_message_parts.pop(pending_item_id, None)
+                output_item_id = raw_item_id or f"{pending_item_id}-raw-{len(agent_message_phases) + 1}"
+                agent_message_phases[output_item_id] = phase
+                await publish_agent_output(output_item_id, raw_text, phase)
+                return True
+            return False
+
+        def final_answer_text() -> str:
+            if not final_answer_parts_by_item:
                 return ""
-            for pending_item_id, parts in pending_agent_message_parts.items():
-                if "".join(parts) == raw_text:
-                    return pending_item_id
-            return ""
+            return "".join(next(reversed(final_answer_parts_by_item.values())))
 
         try:
             while True:
@@ -829,8 +842,9 @@ class AppServerRunService:
                             run.status = "succeeded"
                             run.finished_at = utc_now()
                             self.chats.touch_provider_thread(run.chat_id, run.provider)
-                            if final_answer_parts:
-                                self.messages.insert_message(run.chat_id, "assistant", "".join(final_answer_parts), run_id=run_id, kind="conclusion")
+                            final_answer = final_answer_text()
+                            if final_answer:
+                                self.messages.insert_message(run.chat_id, "assistant", final_answer, run_id=run_id, kind="conclusion")
                             await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0})
                             return
                     continue
@@ -913,16 +927,24 @@ class AppServerRunService:
                 await flush_reasoning_progress()
                 raw_item = _raw_agent_message_item(notification)
                 if raw_item is not None:
-                    item_id = pending_item_id_for_raw_item(raw_item)
                     phase = _raw_agent_message_phase(raw_item)
-                    if item_id and phase:
-                        agent_message_phases[item_id] = phase
-                        await flush_pending_agent_output(item_id, phase)
+                    if phase:
+                        await publish_raw_agent_output(raw_item, phase)
                     continue
                 agent_item = _agent_message_item(notification)
                 if agent_item is not None:
                     item_id = _agent_message_item_id(agent_item)
                     phase = _agent_message_phase(agent_item)
+                    # Some OpenAI-compatible providers stream several raw
+                    # assistant messages through one aggregate agentMessage
+                    # item.  A phase first seen on item/completed therefore
+                    # must not classify and flush the whole aggregate buffer;
+                    # rawResponseItem/completed supplies the real boundaries.
+                    if (
+                        notification.method == "item/completed"
+                        and item_id in pending_agent_message_parts
+                    ):
+                        continue
                     if item_id and phase:
                         agent_message_phases[item_id] = phase
                         await flush_pending_agent_output(item_id, phase)
@@ -980,17 +1002,15 @@ class AppServerRunService:
                         },
                     )
                 elif notification.method == "turn/completed":
-                    for item_id, phase in _turn_agent_message_phases(notification).items():
-                        agent_message_phases[item_id] = phase
-                        await flush_pending_agent_output(item_id, phase)
                     await flush_all_pending_agent_output()
                     turn = notification.params.get("turn") or {}
                     status = str(turn.get("status") or "succeeded")
                     run.status = "succeeded" if status == "completed" else status
                     run.finished_at = utc_now()
                     self.chats.touch_provider_thread(run.chat_id, run.provider)
-                    if final_answer_parts:
-                        self.messages.insert_message(run.chat_id, "assistant", "".join(final_answer_parts), run_id=run_id, kind="conclusion")
+                    final_answer = final_answer_text()
+                    if final_answer:
+                        self.messages.insert_message(run.chat_id, "assistant", final_answer, run_id=run_id, kind="conclusion")
                     await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
                     return
                 elif notification.method == "error":
@@ -1110,24 +1130,6 @@ def _raw_agent_message_text(item: dict[str, Any]) -> str:
         if isinstance(text, str):
             parts.append(text)
     return "".join(parts)
-
-
-def _turn_agent_message_phases(notification: AppServerNotification) -> dict[str, str]:
-    if notification.method != "turn/completed":
-        return {}
-    turn = notification.params.get("turn")
-    items = turn.get("items") if isinstance(turn, dict) else None
-    if not isinstance(items, list):
-        return {}
-    phases: dict[str, str] = {}
-    for item in items:
-        if not isinstance(item, dict) or item.get("type") != "agentMessage":
-            continue
-        item_id = _agent_message_item_id(item)
-        phase = _agent_message_phase(item)
-        if item_id and phase:
-            phases[item_id] = phase
-    return phases
 
 
 def _notification_matches(notification: AppServerNotification, run: AppServerActiveRun) -> bool:

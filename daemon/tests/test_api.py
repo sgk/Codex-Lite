@@ -2363,13 +2363,11 @@ async def test_app_server_agent_message_phase_can_arrive_only_with_raw_response_
     result = await runs.start_message_run(project_id, chat_id, "hello")
     queue = app_server.subscribers[-1]
     common = {"threadId": "thread_1", "turnId": "turn_1"}
-    await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "comment_1", "type": "agentMessage", "text": "", "phase": None}}))
-    await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "comment_1", "delta": "調査します。"}))
-    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "comment_1", "type": "agentMessage", "text": "調査します。", "phase": None}}))
+    await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "aggregate_1", "type": "agentMessage", "text": "", "phase": None}}))
+    await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "aggregate_1", "delta": "調査します。"}))
+    await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "aggregate_1", "delta": "結論です。"}))
+    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "aggregate_1", "type": "agentMessage", "text": "調査します。結論です。", "phase": "final_answer"}}))
     await queue.put(AppServerNotification("rawResponseItem/completed", {**common, "item": {"id": "raw_comment_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "調査します。"}], "phase": "commentary"}}))
-    await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "", "phase": None}}))
-    await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "final_1", "delta": "結論です。"}))
-    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "結論です。", "phase": None}}))
     await queue.put(AppServerNotification("rawResponseItem/completed", {**common, "item": {"id": "raw_final_1", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "結論です。"}], "phase": "final_answer"}}))
     await queue.put(AppServerNotification("turn/completed", {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "completed"}}))
 
@@ -2379,8 +2377,9 @@ async def test_app_server_agent_message_phase_can_arrive_only_with_raw_response_
         if "event: done" in event:
             break
 
-    assert any('"messageId": "comment_1"' in event and '"phase": "commentary"' in event and "調査します。" in event for event in events)
-    assert any('"messageId": "final_1"' in event and '"phase": "final_answer"' in event and "結論です。" in event for event in events)
+    assert any('"messageId": "raw_comment_1"' in event and '"phase": "commentary"' in event and "調査します。" in event for event in events)
+    assert any('"messageId": "raw_final_1"' in event and '"phase": "final_answer"' in event and "結論です。" in event for event in events)
+    assert not any("調査します。結論です。" in event for event in events)
     stored_messages = messages.list_messages(project_id, chat_id)
     assert [(message["role"], message["content"], message["kind"]) for message in stored_messages] == [
         ("user", "hello", "instruction"),
