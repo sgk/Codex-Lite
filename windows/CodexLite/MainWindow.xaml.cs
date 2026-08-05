@@ -78,6 +78,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _messageRefreshTimer = new() { Interval = TimeSpan.FromSeconds(3) };
     private readonly DispatcherTimer _uiHeartbeatTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     private readonly DispatcherTimer _daemonHealthTimer = new() { Interval = DaemonHealthCheckInterval };
+    private readonly DispatcherTimer _sendReadinessTimer = new() { Interval = TimeSpan.FromSeconds(5) };
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly Stopwatch _performanceClock = Stopwatch.StartNew();
     private readonly object _performanceLogLock = new();
@@ -140,6 +141,10 @@ public partial class MainWindow : Window
     private bool _isRestoringMessageScrollOffset;
     private bool _pendingMessageScrollOffsetRestore;
     private bool _isCheckingDaemonHealth;
+    private bool _isDaemonHttpReady;
+    private bool _isSendTransportReady;
+    private bool _isPreparingSendTransport;
+    private string _preparedSendModel = "";
     private bool _isApplyingComposerHistory;
     private bool _isLoadingRuntimeSettings;
     private bool _isApplyingRuntimeSetting;
@@ -178,6 +183,7 @@ public partial class MainWindow : Window
         _reasoningProgressTimer.Tick += ReasoningProgressTimer_Tick;
         _messageRefreshTimer.Tick += MessageRefreshTimer_Tick;
         _daemonHealthTimer.Tick += DaemonHealthTimer_Tick;
+        _sendReadinessTimer.Tick += SendReadinessTimer_Tick;
         StartUiWatchdog();
         ProjectTree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(ProjectTreeItem_Expanded));
         ProjectTree.AddHandler(TreeViewItem.CollapsedEvent, new RoutedEventHandler(ProjectTreeItem_Collapsed));
@@ -240,9 +246,16 @@ public partial class MainWindow : Window
             if (await _client.ProbeHealthAsync(timeout.Token) is not null)
             {
                 _daemonHealthFailureCount = 0;
+                if (!_isDaemonHttpReady)
+                {
+                    _isDaemonHttpReady = true;
+                    RefreshSendTransportReadiness();
+                }
                 return;
             }
 
+            _isDaemonHttpReady = false;
+            InvalidateSendTransportReadiness();
             _daemonHealthFailureCount++;
             if (_daemonHealthFailureCount < 3)
             {
@@ -250,10 +263,12 @@ public partial class MainWindow : Window
             }
 
             var restarted = await _client.EnsureHealthyOrRestartAsync(_wslDistroName);
+            _isDaemonHttpReady = true;
             _daemonHealthFailureCount = 0;
             StatusText.Text = "daemon restarted";
             await RefreshProjectsAfterDaemonRestartAsync();
             await RefreshDiagnosticsAsync();
+            RefreshSendTransportReadiness();
         }
         catch (Exception ex)
         {
@@ -278,6 +293,7 @@ public partial class MainWindow : Window
         _uiWatchdogCts.Cancel();
         _uiHeartbeatTimer.Stop();
         _daemonHealthTimer.Stop();
+        _sendReadinessTimer.Stop();
         _reasoningProgressTimer.Stop();
         PersistExpandedStateFromTree();
         Hide();
@@ -302,6 +318,8 @@ public partial class MainWindow : Window
                 _wslDistroName = wsl.DistroName;
                 _wslHomePath = wsl.HomePath;
                 await _client.EnsureDaemonAsync(_wslDistroName);
+                _isDaemonHttpReady = true;
+                UpdateCommandButtonState();
                 SetBusyMessage("実行設定を復元中...");
                 var runtimeSettings = await _client.GetSettingsAsync();
                 if (runtimeSettings is not null)
@@ -315,13 +333,107 @@ public partial class MainWindow : Window
                 StatusText.Text = "待機中 | daemon ok";
                 _messageRefreshTimer.Start();
                 _daemonHealthTimer.Start();
+                RefreshSendTransportReadiness();
             });
         }
         catch (Exception ex)
         {
+            _isDaemonHttpReady = false;
+            InvalidateSendTransportReadiness();
             StatusText.Text = $"daemon error | {ex.Message}";
         }
     }
+
+    private async void SendReadinessTimer_Tick(object? sender, EventArgs e)
+    {
+        await EnsureSendTransportReadyAsync(forceProbe: true);
+    }
+
+    private void RefreshSendTransportReadiness()
+    {
+        if (!HasSendPreparationContext())
+        {
+            _sendReadinessTimer.Stop();
+            _isSendTransportReady = false;
+            _preparedSendModel = "";
+            UpdateCommandButtonState();
+            return;
+        }
+
+        var model = SelectedComposerModel();
+        if (!string.Equals(_preparedSendModel, model, StringComparison.Ordinal))
+        {
+            _isSendTransportReady = false;
+        }
+        _sendReadinessTimer.Start();
+        UpdateCommandButtonState();
+        _ = EnsureSendTransportReadyAsync(forceProbe: false);
+    }
+
+    private void InvalidateSendTransportReadiness()
+    {
+        _isSendTransportReady = false;
+        _preparedSendModel = "";
+        UpdateCommandButtonState();
+    }
+
+    private async Task EnsureSendTransportReadyAsync(bool forceProbe)
+    {
+        if (_isPreparingSendTransport || !_isDaemonHttpReady || !HasSendPreparationContext())
+        {
+            return;
+        }
+        var model = SelectedComposerModel();
+        if (!forceProbe && _isSendTransportReady && string.Equals(_preparedSendModel, model, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _isPreparingSendTransport = true;
+        if (!string.Equals(_preparedSendModel, model, StringComparison.Ordinal))
+        {
+            _isSendTransportReady = false;
+        }
+        UpdateCommandButtonState();
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var readiness = await _client.PrepareSendAsync(model, timeout.Token);
+            if (readiness is { Ready: true }
+                && HasSendPreparationContext()
+                && string.Equals(SelectedComposerModel(), model, StringComparison.Ordinal))
+            {
+                _preparedSendModel = model;
+                _isSendTransportReady = true;
+                WritePerformanceLog("send-ready", $"model={LogText(model)} provider={LogText(readiness.Provider)}");
+            }
+        }
+        catch (Exception ex)
+        {
+            _isSendTransportReady = false;
+            WritePerformanceLog("send-ready-error", $"model={LogText(model)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+        }
+        finally
+        {
+            _isPreparingSendTransport = false;
+            UpdateCommandButtonState();
+        }
+    }
+
+    private bool HasSendPreparationContext()
+    {
+        if (_selectedProject is null || _isPreparingSend)
+        {
+            return false;
+        }
+        return _selectedChat is null
+            ? HasNewChatComposerContent()
+            : _selectedChat.CanContinue && HasChatComposerContent();
+    }
+
+    private string SelectedComposerModel() => _selectedChat is null
+        ? SelectedModel(NewChatModelBox)
+        : SelectedModel(ChatModelBox);
 
     private void StartUiWatchdog()
     {
@@ -1645,6 +1757,8 @@ public partial class MainWindow : Window
         try
         {
             _isRestartingDaemon = true;
+            _isDaemonHttpReady = false;
+            InvalidateSendTransportReadiness();
             _messageRefreshTimer.Stop();
             await RunBusyAsync("CODEX_HOMEを切り替え中...", async () =>
             {
@@ -1688,7 +1802,7 @@ public partial class MainWindow : Window
         {
             return;
         }
-        UpdateCommandButtonState();
+        RefreshSendTransportReadiness();
         UpdateRightPaneVisibility();
         _ = RefreshUsageCapacityAsync();
         await RefreshFilesAsync("");
@@ -1708,7 +1822,7 @@ public partial class MainWindow : Window
         _selectedChat = null;
         _messages.Clear();
         _automations.Clear();
-        UpdateCommandButtonState();
+        RefreshSendTransportReadiness();
         UpdateAutomationButtonState();
         UpdateRightPaneVisibility();
         StatusText.Text = $"project | {project.Name} | {project.Path}";
@@ -1728,7 +1842,7 @@ public partial class MainWindow : Window
                 _selectedChat = null;
                 _messages.Clear();
                 _automations.Clear();
-                UpdateCommandButtonState();
+                RefreshSendTransportReadiness();
                 UpdateAutomationButtonState();
                 UpdateRightPaneVisibility();
                 StatusText.Text = $"chat is no longer active | {item.Chat.Title}";
@@ -2213,9 +2327,13 @@ public partial class MainWindow : Window
         var canSendOrSteer = canContinueChat
             && hasChatComposerContent
             && !isCancellingSelectedRun
-            && !externalProcessing;
+            && !externalProcessing
+            && _isDaemonHttpReady
+            && _isSendTransportReady;
         var canCreateAndSend = canStartNewChat
-            && hasNewChatComposerContent;
+            && hasNewChatComposerContent
+            && _isDaemonHttpReady
+            && _isSendTransportReady;
         OpenProjectExplorerButton.IsEnabled = hasProjectContext;
         OpenProjectCodeButton.IsEnabled = hasProjectContext;
         OpenFileInCodeButton.IsEnabled = hasProjectContext && _currentFilePath.Length > 0;
@@ -2227,6 +2345,10 @@ public partial class MainWindow : Window
         SendButton.IsEnabled = canSendOrSteer;
         SendButton.ToolTip = !canContinueChat
             ? "このチャットはCodex Liteから継続できません。"
+            : !_isDaemonHttpReady
+            ? "デーモンの起動・再接続が完了するまで送信できません。"
+            : !_isSendTransportReady && hasChatComposerContent
+            ? "Codexの送信準備が完了するまでお待ちください。"
             : externalProcessing
             ? "他のアプリで開始された処理中のため、Codex Liteからは送信できません。"
             : !hasChatComposerContent
@@ -2240,6 +2362,10 @@ public partial class MainWindow : Window
         NewChatSendButton.IsEnabled = canCreateAndSend;
         NewChatSendButton.ToolTip = !canStartNewChat
             ? "プロジェクトを選択してください。"
+            : !_isDaemonHttpReady
+            ? "デーモンの起動・再接続が完了するまで送信できません。"
+            : !_isSendTransportReady && hasNewChatComposerContent
+            ? "Codexの送信準備が完了するまでお待ちください。"
             : !hasNewChatComposerContent
             ? "メッセージを入力するか、ファイルを添付してください。"
             : "最初のメッセージで新しいチャットを作成して送信します。";
@@ -3900,12 +4026,14 @@ public partial class MainWindow : Window
         {
             _ = RefreshUsageCapacityAsync();
         }
+        RefreshSendTransportReadiness();
     }
 
     private void ApplyChatRuntimeSettingsSelection(AppSettingsDto settings)
     {
         UpdateModelChoices(settings.AvailableModels, settings.RecentModelReasoningChoices);
         ApplyRuntimeSettingsToControls(settings, ChatPermissionModeBox, ChatModelBox, ChatReasoningEffortBox);
+        RefreshSendTransportReadiness();
     }
 
     private void ApplyRuntimeSettingsToControls(AppSettingsDto settings, ComboBox permissionModeBox, ComboBox modelBox, ComboBox reasoningBox)
@@ -5145,7 +5273,7 @@ public partial class MainWindow : Window
             _composerHistoryIndex = null;
             _composerHistoryDraft = "";
         }
-        UpdateCommandButtonState();
+        RefreshSendTransportReadiness();
     }
 
     private bool HandleComposerHistoryKey(TextBox textBox, System.Windows.Input.KeyEventArgs e)
@@ -5451,7 +5579,7 @@ public partial class MainWindow : Window
         {
             _pendingAttachments.Remove(attachment);
             StatusText.Text = $"attachment removed | {attachment.Name}";
-            UpdateCommandButtonState();
+            RefreshSendTransportReadiness();
         }
     }
 
@@ -5491,7 +5619,7 @@ public partial class MainWindow : Window
             new Uri(windowsPath).AbsoluteUri));
         WritePerformanceLog("attachment-added", $"windowsPath={LogText(windowsPath)} wslPath={LogText(WindowsPathToWslPath(windowsPath))} kind={LogText(kind)}");
         StatusText.Text = $"attached | {Path.GetFileName(windowsPath)}";
-        UpdateCommandButtonState();
+        RefreshSendTransportReadiness();
     }
 
     private async Task SendCurrentMessageAsync()

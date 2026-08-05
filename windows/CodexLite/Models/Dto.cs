@@ -12,6 +12,8 @@ public sealed record HealthDto(
     string? CodexVersion,
     string CodexHome);
 
+public sealed record SendReadinessDto(bool Ready, string Provider);
+
 public sealed record ProjectDto(
     string Id,
     string Name,

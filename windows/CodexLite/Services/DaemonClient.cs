@@ -79,6 +79,9 @@ public sealed class DaemonClient
         }
     }
 
+    public Task<SendReadinessDto?> PrepareSendAsync(string model, CancellationToken cancellationToken = default) =>
+        PostAsync<SendReadinessDto>("/send/prepare", new { model }, cancellationToken);
+
     public async Task EnsureDaemonAsync(string distroName, CancellationToken cancellationToken = default)
     {
         if (_http.BaseAddress is not null && await TryHealthAsync(cancellationToken) is not null)

@@ -156,6 +156,14 @@ class AppServerClient:
             self._active_model_provider = self._desired_model_provider
             await self.notify("initialized")
 
+    async def prepare(self) -> None:
+        """Start and initialize app-server, then retain the normal idle lifecycle."""
+        self._cancel_idle_shutdown()
+        try:
+            await self.ensure_started()
+        finally:
+            self._schedule_idle_shutdown()
+
     def _prepare_codex_home(self) -> None:
         """Create the provider's Codex homes before launching app-server.
 

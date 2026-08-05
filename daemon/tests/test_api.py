@@ -114,6 +114,23 @@ def test_app_server_command_enables_auto_compaction(linux_tmp_path: Path) -> Non
     ]
 
 
+@pytest.mark.asyncio
+async def test_app_server_prepare_initializes_and_restores_idle_lifecycle(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AppServerClient(make_test_config(linux_tmp_path), CodexRunner(make_test_config(linux_tmp_path)))
+    calls: list[str] = []
+
+    async def ensure_started() -> None:
+        calls.append("started")
+
+    monkeypatch.setattr(client, "ensure_started", ensure_started)
+    monkeypatch.setattr(client, "_cancel_idle_shutdown", lambda: calls.append("cancel-idle"))
+    monkeypatch.setattr(client, "_schedule_idle_shutdown", lambda: calls.append("schedule-idle"))
+
+    await client.prepare()
+
+    assert calls == ["cancel-idle", "started", "schedule-idle"]
+
+
 def test_app_server_command_can_disable_auto_compaction(linux_tmp_path: Path) -> None:
     cfg = make_test_config(linux_tmp_path)
     cfg = Config(**{**cfg.__dict__, "auto_compact_token_limit": 0})
@@ -572,6 +589,10 @@ async def test_health_and_diagnostics(linux_tmp_path: Path) -> None:
         assert body["permissionProfile"] == ":danger-full-access"
         assert body["activeRunIds"] == []
         assert body["activeRuns"] == []
+
+        send_readiness = await client.post("/send/prepare", json={"model": "deepseek-v4-flash"})
+        assert send_readiness.status_code == 200
+        assert send_readiness.json() == {"ready": True, "provider": "deepseek"}
 
         shutdown = await client.post("/shutdown")
         assert shutdown.status_code == 200

@@ -171,6 +171,14 @@ def create_app(config: Config | None = None) -> Starlette:
             pass
         return _model_list_out(_static_model_options(app_settings.model), {}, app_settings.model, dynamic=False)
 
+    @post("/send/prepare")
+    async def prepare_send(body: dict | None = None) -> dict:
+        model = _optional_str(body, "model") if body else None
+        provider = model_provider_for_model(model or app_settings.model)
+        if use_app_server:
+            await app_servers.client_for_provider(provider).prepare()
+        return {"ready": True, "provider": provider}
+
     @get("/usage/capacity")
     async def usage_capacity() -> dict:
         if not use_app_server:
