@@ -736,6 +736,8 @@ class AppServerRunService:
     async def _watch_run(self, run_id: str, notification_queue: asyncio.Queue[AppServerNotification], app_server: Any) -> None:
         run = self.runs[run_id]
         assistant_parts: list[str] = []
+        final_answer_parts: list[str] = []
+        agent_message_phases: dict[str, str] = {}
         reasoning_buffers: dict[tuple[str, str], list[str]] = {}
         reasoning_buffered_chars = 0
         last_reasoning_flush = time.monotonic()
@@ -789,8 +791,9 @@ class AppServerRunService:
                             run.status = "succeeded"
                             run.finished_at = utc_now()
                             self.chats.touch_provider_thread(run.chat_id, run.provider)
-                            if assistant_parts:
-                                self.messages.insert_message(run.chat_id, "assistant", "".join(assistant_parts), run_id=run_id, kind="conclusion")
+                            stored_parts = final_answer_parts or assistant_parts
+                            if stored_parts:
+                                self.messages.insert_message(run.chat_id, "assistant", "".join(stored_parts), run_id=run_id, kind="conclusion")
                             await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0})
                             return
                     continue
@@ -870,10 +873,42 @@ class AppServerRunService:
                         await flush_reasoning_progress()
                     continue
                 await flush_reasoning_progress()
+                agent_item = _agent_message_item(notification)
+                if agent_item is not None:
+                    item_id = _agent_message_item_id(agent_item)
+                    phase = _agent_message_phase(agent_item)
+                    if item_id and phase:
+                        agent_message_phases[item_id] = phase
+                    if phase:
+                        boundary = "completed" if notification.method == "item/completed" else "started"
+                        await self.events.publish(
+                            run_id,
+                            "progress",
+                            {
+                                "method": f"item/agentMessage/{boundary}",
+                                "summary": "agentMessage",
+                                "messageId": item_id,
+                                "phase": phase,
+                            },
+                        )
+                        continue
                 if notification.method == "item/agentMessage/delta":
                     delta = str(notification.params.get("delta") or "")
+                    item_id = _agent_message_delta_item_id(notification)
+                    phase = agent_message_phases.get(item_id, "")
                     assistant_parts.append(delta)
-                    await self.events.publish(run_id, "output", {"stream": "stdout", "text": delta})
+                    if phase == "final_answer":
+                        final_answer_parts.append(delta)
+                    await self.events.publish(
+                        run_id,
+                        "output",
+                        {
+                            "stream": "stdout",
+                            "text": delta,
+                            "messageId": item_id,
+                            "phase": phase,
+                        },
+                    )
                 elif notification.method.startswith("item/agentMessage"):
                     await self.events.publish(
                         run_id,
@@ -910,8 +945,9 @@ class AppServerRunService:
                     run.status = "succeeded" if status == "completed" else status
                     run.finished_at = utc_now()
                     self.chats.touch_provider_thread(run.chat_id, run.provider)
-                    if assistant_parts:
-                        self.messages.insert_message(run.chat_id, "assistant", "".join(assistant_parts), run_id=run_id, kind="conclusion")
+                    stored_parts = final_answer_parts or assistant_parts
+                    if stored_parts:
+                        self.messages.insert_message(run.chat_id, "assistant", "".join(stored_parts), run_id=run_id, kind="conclusion")
                     await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
                     return
                 elif notification.method == "error":
@@ -972,6 +1008,30 @@ def _reasoning_item_id(notification: AppServerNotification) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _agent_message_item(notification: AppServerNotification) -> dict[str, Any] | None:
+    if notification.method not in {"item/started", "item/completed"}:
+        return None
+    item = notification.params.get("item")
+    if not isinstance(item, dict) or item.get("type") != "agentMessage":
+        return None
+    return item
+
+
+def _agent_message_item_id(item: dict[str, Any]) -> str:
+    value = item.get("id")
+    return value if isinstance(value, str) else ""
+
+
+def _agent_message_phase(item: dict[str, Any]) -> str:
+    value = item.get("phase")
+    return value if value in {"commentary", "final_answer"} else ""
+
+
+def _agent_message_delta_item_id(notification: AppServerNotification) -> str:
+    value = notification.params.get("itemId")
+    return value if isinstance(value, str) else ""
 
 
 def _notification_matches(notification: AppServerNotification, run: AppServerActiveRun) -> bool:

@@ -2279,6 +2279,50 @@ async def test_app_server_agent_message_boundary_is_published(linux_tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_app_server_agent_message_output_keeps_item_phase_and_stores_final_only(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = TurnStartAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+    queue = app_server.subscribers[-1]
+    common = {"threadId": "thread_1", "turnId": "turn_1"}
+    await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "comment_1", "type": "agentMessage", "text": "", "phase": "commentary"}}))
+    await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "comment_1", "delta": "調査します。"}))
+    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "comment_1", "type": "agentMessage", "text": "調査します。", "phase": "commentary"}}))
+    await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "", "phase": "final_answer"}}))
+    await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "final_1", "delta": "結論です。"}))
+    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "結論です。", "phase": "final_answer"}}))
+    await queue.put(AppServerNotification("turn/completed", {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "completed"}}))
+
+    events = []
+    async for event in runs.stream_events(result["runId"]):
+        events.append(event)
+        if "event: done" in event:
+            break
+
+    assert any('"messageId": "comment_1"' in event and '"phase": "commentary"' in event and "調査します。" in event for event in events)
+    assert any('"messageId": "final_1"' in event and '"phase": "final_answer"' in event and "結論です。" in event for event in events)
+    stored_messages = messages.list_messages(project_id, chat_id)
+    assert [(message["role"], message["content"], message["kind"]) for message in stored_messages] == [
+        ("user", "hello", "instruction"),
+        ("assistant", "結論です。", "conclusion"),
+    ]
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_run_steer_failure_does_not_store_message(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()

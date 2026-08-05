@@ -5799,6 +5799,8 @@ public partial class MainWindow : Window
         using var phase = EnterUiPhase("StreamRun");
         BeginRunActivity(chatId, "応答待ち...");
         var currentAssistantMessageId = assistantMessageId;
+        var currentAgentMessageItemId = "";
+        var currentAssistantMessagePhase = "";
         MarkAssistantMessageWaiting(chatId, currentAssistantMessageId, runId);
         var startedAt = DateTimeOffset.Now;
         var lastEventAt = startedAt;
@@ -5865,6 +5867,24 @@ public partial class MainWindow : Window
                 {
                     reconnectingMessage = "";
                     var text = ExtractSseText(item.Data);
+                    var agentMessageItemId = ExtractSseString(item.Data, "messageId");
+                    var assistantMessagePhase = ExtractSseString(item.Data, "phase");
+                    if (!string.IsNullOrWhiteSpace(assistantMessagePhase)
+                        && !string.IsNullOrWhiteSpace(agentMessageItemId)
+                        && !agentMessageItemId.Equals(currentAgentMessageItemId, StringComparison.Ordinal))
+                    {
+                        FlushAssistantMessageText(currentAssistantMessageId);
+                        if (HasRealAssistantContent(currentAssistantMessageId))
+                        {
+                            MarkAssistantMessageCompleted(chatId, currentAssistantMessageId);
+                            currentAssistantMessageId = NewAssistantMessageIdForPhase(assistantMessagePhase);
+                        }
+                        currentAgentMessageItemId = agentMessageItemId;
+                    }
+                    if (!string.IsNullOrWhiteSpace(assistantMessagePhase))
+                    {
+                        currentAssistantMessagePhase = assistantMessagePhase;
+                    }
                     if (!receivedOutput && !string.IsNullOrEmpty(text))
                     {
                         WritePerformanceLog(
@@ -5873,7 +5893,7 @@ public partial class MainWindow : Window
                     }
                     receivedOutput |= !string.IsNullOrEmpty(text);
                     receivedOutputChars += text.Length;
-                    AppendOrUpdateAssistantMessage(chatId, currentAssistantMessageId, runId, text);
+                    AppendOrUpdateAssistantMessage(chatId, currentAssistantMessageId, runId, text, MessageKindForPhase(currentAssistantMessagePhase));
                 }
                 else if (item.Event == "error")
                 {
@@ -5947,7 +5967,10 @@ public partial class MainWindow : Window
                     completed = item.Event == "done";
                     if (completed)
                     {
-                        MarkAssistantMessageAsConclusion(chatId, currentAssistantMessageId);
+                        if (string.IsNullOrWhiteSpace(currentAssistantMessagePhase))
+                        {
+                            MarkAssistantMessageAsConclusion(chatId, currentAssistantMessageId);
+                        }
                         MarkAssistantMessageCompleted(chatId, currentAssistantMessageId);
                         StatusText.Text = "応答完了";
                         ShowRunProgressForChat(chatId, "完了");
@@ -6393,21 +6416,41 @@ public partial class MainWindow : Window
             : "conclusion";
     }
 
-    private void AppendOrUpdateAssistantMessage(string chatId, string messageId, string runId, string delta)
+    private static string? MessageKindForPhase(string phase)
+    {
+        return phase switch
+        {
+            "commentary" => "work",
+            "final_answer" => "conclusion",
+            _ => null
+        };
+    }
+
+    private static string NewAssistantMessageIdForPhase(string phase)
+    {
+        var category = phase == "commentary" ? "progress" : "final";
+        return $"local-assistant-{category}-{Guid.NewGuid():N}";
+    }
+
+    private void AppendOrUpdateAssistantMessage(string chatId, string messageId, string runId, string delta, string? messageKind = null)
     {
         if (string.IsNullOrEmpty(delta))
         {
             return;
         }
-        QueueAssistantMessageDelta(chatId, messageId, runId, delta);
+        QueueAssistantMessageDelta(chatId, messageId, runId, delta, messageKind);
     }
 
-    private void QueueAssistantMessageDelta(string chatId, string messageId, string runId, string delta)
+    private void QueueAssistantMessageDelta(string chatId, string messageId, string runId, string delta, string? messageKind)
     {
         if (!_streamingText.TryGetValue(messageId, out var state))
         {
             state = new StreamingTextState(runId, chatId);
             _streamingText[messageId] = state;
+        }
+        if (!string.IsNullOrWhiteSpace(messageKind))
+        {
+            state.MessageKind = messageKind;
         }
         state.Pending.Append(delta);
         if (!_streamingTextTimer.IsEnabled)
@@ -6432,7 +6475,7 @@ public partial class MainWindow : Window
             var count = Math.Min(StreamingCharactersPerTick, state.Pending.Length);
             var next = state.Pending.ToString(0, count);
             state.Pending.Remove(0, count);
-            AppendAssistantMessageTextNow(state.ChatId, messageId, state.RunId, next);
+            AppendAssistantMessageTextNow(state.ChatId, messageId, state.RunId, next, state.MessageKind);
             if (state.Pending.Length == 0)
             {
                 _streamingText.Remove(messageId);
@@ -6455,7 +6498,7 @@ public partial class MainWindow : Window
         {
             var text = state.Pending.ToString();
             state.Pending.Clear();
-            AppendAssistantMessageTextNow(state.ChatId, messageId, state.RunId, text);
+            AppendAssistantMessageTextNow(state.ChatId, messageId, state.RunId, text, state.MessageKind);
         }
         _streamingText.Remove(messageId);
         if (_streamingText.Count == 0)
@@ -6464,7 +6507,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void AppendAssistantMessageTextNow(string chatId, string messageId, string runId, string text)
+    private void AppendAssistantMessageTextNow(string chatId, string messageId, string runId, string text, string? messageKind)
     {
         using var phase = EnterUiPhase("AppendAssistantMessageText");
         MarkChatUnreadIfConversationNotVisible(chatId);
@@ -6491,7 +6534,7 @@ public partial class MainWindow : Window
                 text,
                 runId,
                 DateTimeOffset.UtcNow.ToString("O"),
-                MessageKindForAssistantMessageId(messageId)),
+                messageKind ?? MessageKindForAssistantMessageId(messageId)),
                 scrollToEnd: shouldFollow);
             return;
         }
@@ -6501,7 +6544,7 @@ public partial class MainWindow : Window
         _messages[index] = current with
         {
             Content = content,
-            Kind = isPlaceholder ? MessageKindForAssistantMessageId(messageId) : current.Kind,
+            Kind = isPlaceholder ? messageKind ?? MessageKindForAssistantMessageId(messageId) : current.Kind,
             CreatedAt = isPlaceholder ? DateTimeOffset.UtcNow.ToString("O") : current.CreatedAt
         };
         if (shouldFollow)
@@ -7577,6 +7620,8 @@ public sealed class StreamingTextState(string runId, string chatId)
     public string ChatId { get; } = chatId;
 
     public StringBuilder Pending { get; } = new();
+
+    public string? MessageKind { get; set; }
 }
 
 public sealed class ReasoningProgressState(string runId, string chatId)
