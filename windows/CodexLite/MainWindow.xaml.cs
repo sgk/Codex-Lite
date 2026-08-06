@@ -1125,6 +1125,7 @@ public partial class MainWindow : Window
                 projectItem.Chats.RemoveAt(index);
             }
         }
+        projectItem.IsRunning = IsProjectRunning(projectItem.Project.Id);
     }
 
     private async Task LoadProjectChatsForTreeAsync(string? preferredChatId, string? skipProjectId = null, bool sync = false, bool markUpdatedChats = false)
@@ -4725,6 +4726,21 @@ public partial class MainWindow : Window
         if (FindChatItem(chatId) is { } item)
         {
             item.IsRunning = IsChatRunning(chatId);
+        }
+        UpdateProjectRunningIndicators();
+    }
+
+    private bool IsProjectRunning(string projectId)
+    {
+        return _activeRunsByChat.Values.Any(run => run.ProjectId == projectId)
+            || _runActivityDepthByChat.Keys.Any(chatId => ProjectIdForChat(chatId) == projectId);
+    }
+
+    private void UpdateProjectRunningIndicators()
+    {
+        foreach (var projectItem in _projectTree)
+        {
+            projectItem.IsRunning = IsProjectRunning(projectItem.Project.Id);
         }
     }
 

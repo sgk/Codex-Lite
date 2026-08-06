@@ -25,6 +25,7 @@ public sealed class ProjectTreeItem : INotifyPropertyChanged
     private bool _showDropBefore;
     private bool _showDropAfter;
     private bool _isPending;
+    private bool _isRunning;
 
     public bool IsEditing
     {
@@ -51,8 +52,26 @@ public sealed class ProjectTreeItem : INotifyPropertyChanged
             }
             _isExpanded = value;
             OnPropertyChanged();
+            OnPropertyChanged(nameof(ShowCollapsedRunningIndicator));
         }
     }
+
+    public bool IsRunning
+    {
+        get => _isRunning;
+        set
+        {
+            if (_isRunning == value)
+            {
+                return;
+            }
+            _isRunning = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(ShowCollapsedRunningIndicator));
+        }
+    }
+
+    public bool ShowCollapsedRunningIndicator => IsRunning && !IsExpanded;
 
     public bool ShowDropBefore
     {

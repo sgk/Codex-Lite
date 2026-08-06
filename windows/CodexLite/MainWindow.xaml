@@ -436,6 +436,7 @@
                             </Grid.ContextMenu>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" MinWidth="0"/>
+                                <ColumnDefinition Width="14"/>
                                 <ColumnDefinition Width="24"/>
                             </Grid.ColumnDefinitions>
                             <Border Height="2"
@@ -481,7 +482,52 @@
                                     </Style>
                                 </TextBox.Style>
                             </TextBox>
-                            <Button Grid.Column="1" Content="..." Style="{StaticResource TreeInlineIconButton}" Click="ProjectMenu_Click" Tag="{Binding}" IsEnabled="{Binding IsAvailable}">
+                            <Viewbox Grid.Column="1"
+                                     Width="12"
+                                     Height="12"
+                                     ToolTip="配下のチャットを処理中"
+                                     VerticalAlignment="Center"
+                                     HorizontalAlignment="Center"
+                                     RenderTransformOrigin="0.5,0.5"
+                                     Visibility="{Binding ShowCollapsedRunningIndicator, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <Viewbox.RenderTransform>
+                                    <RotateTransform/>
+                                </Viewbox.RenderTransform>
+                                <Canvas Width="12" Height="12">
+                                    <Path StrokeThickness="2"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          Data="M 6,1 A 5,5 0 1 1 2.46,9.54">
+                                        <Path.Style>
+                                            <Style TargetType="{x:Type Path}">
+                                                <Setter Property="Stroke" Value="#2F6FED"/>
+                                                <Style.Triggers>
+                                                    <MultiDataTrigger>
+                                                        <MultiDataTrigger.Conditions>
+                                                            <Condition Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType={x:Type TreeViewItem}}}" Value="True"/>
+                                                            <Condition Binding="{Binding IsKeyboardFocusWithin, RelativeSource={RelativeSource AncestorType={x:Type TreeView}}}" Value="True"/>
+                                                        </MultiDataTrigger.Conditions>
+                                                        <Setter Property="Stroke" Value="#FFFFFF"/>
+                                                    </MultiDataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Path.Style>
+                                    </Path>
+                                </Canvas>
+                                <Viewbox.Triggers>
+                                    <EventTrigger RoutedEvent="Loaded">
+                                        <BeginStoryboard>
+                                            <Storyboard RepeatBehavior="Forever">
+                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                                                 From="0"
+                                                                 To="360"
+                                                                 Duration="0:0:1"/>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </EventTrigger>
+                                </Viewbox.Triggers>
+                            </Viewbox>
+                            <Button Grid.Column="2" Content="..." Style="{StaticResource TreeInlineIconButton}" Click="ProjectMenu_Click" Tag="{Binding}" IsEnabled="{Binding IsAvailable}">
                                 <Button.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Header="プロジェクト名の変更" Click="RenameProjectMenu_Click"
