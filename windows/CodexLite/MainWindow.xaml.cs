@@ -7420,7 +7420,7 @@ public partial class MainWindow : Window
         }
 
         e.Handled = true;
-        scrollViewer.ScrollToVerticalOffset(scrollViewer.VerticalOffset - e.Delta / 3.0);
+        scrollViewer.ScrollToVerticalOffset(scrollViewer.VerticalOffset - e.Delta);
     }
 
     private void OpenFileInCode_Click(object sender, RoutedEventArgs e)
