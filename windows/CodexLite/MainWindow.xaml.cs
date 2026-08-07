@@ -163,6 +163,7 @@ public partial class MainWindow : Window
     private string? _persistedSelectedProjectId;
     private string? _persistedSelectedChatId;
     private string? _persistedSelectedTab;
+    private readonly Dictionary<string, string> _persistedSelectedTabsByChat = new(StringComparer.Ordinal);
     private AppSettingsDto? _runtimeSettings;
     private long _selectionGeneration;
 
@@ -1431,6 +1432,20 @@ public partial class MainWindow : Window
             _persistedSelectedProjectId = string.IsNullOrWhiteSpace(state?.SelectedProjectId) ? null : state.SelectedProjectId;
             _persistedSelectedChatId = string.IsNullOrWhiteSpace(state?.SelectedChatId) ? null : state.SelectedChatId;
             _persistedSelectedTab = NormalizeMainTabName(state?.SelectedTab);
+            _persistedSelectedTabsByChat.Clear();
+            foreach (var pair in state?.SelectedTabsByChat ?? [])
+            {
+                if (!string.IsNullOrWhiteSpace(pair.Key) && NormalizeMainTabName(pair.Value) is { } tab)
+                {
+                    _persistedSelectedTabsByChat[pair.Key] = tab;
+                }
+            }
+            if (_persistedSelectedChatId is { } legacySelectedChatId
+                && !_persistedSelectedTabsByChat.ContainsKey(legacySelectedChatId)
+                && _persistedSelectedTab is { } legacySelectedTab)
+            {
+                _persistedSelectedTabsByChat[legacySelectedChatId] = legacySelectedTab;
+            }
             ApplyFileTextWrapping();
             ApplyWindowPlacement(state?.Window);
             ApplyTreePaneWidth(state?.TreePaneWidth);
@@ -1447,6 +1462,7 @@ public partial class MainWindow : Window
             _persistedSelectedProjectId = null;
             _persistedSelectedChatId = null;
             _persistedSelectedTab = null;
+            _persistedSelectedTabsByChat.Clear();
             ApplyFileTextWrapping();
         }
         finally
@@ -1468,9 +1484,16 @@ public partial class MainWindow : Window
         {
             selectedTab = _persistedSelectedTab;
         }
+        else if (_selectedChat is { } selectedChat)
+        {
+            _persistedSelectedTabsByChat[selectedChat.Id] = selectedTab;
+        }
+        else if (_selectedProject is not null)
+        {
+            _persistedSelectedTab = selectedTab;
+        }
         _persistedSelectedProjectId = selectedProjectId;
         _persistedSelectedChatId = selectedChatId;
-        _persistedSelectedTab = selectedTab;
         Directory.CreateDirectory(Path.GetDirectoryName(_uiStatePath)!);
         if (_projectTree.Count > 0)
         {
@@ -1489,8 +1512,9 @@ public partial class MainWindow : Window
             _codexHomeMode,
             selectedProjectId,
             selectedChatId,
-            selectedTab,
-            chatOrderIdsByProject);
+            _persistedSelectedTab,
+            chatOrderIdsByProject,
+            _persistedSelectedTabsByChat.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
         File.WriteAllText(_uiStatePath, JsonSerializer.Serialize(state, _json));
     }
 
@@ -1574,7 +1598,11 @@ public partial class MainWindow : Window
 
     private void ApplySavedTabSelection()
     {
-        var tab = NormalizeMainTabName(_persistedSelectedTab) ?? "conversation";
+        var tab = _selectedChat is { } selectedChat
+            ? _persistedSelectedTabsByChat.TryGetValue(selectedChat.Id, out var selectedChatTab)
+                ? NormalizeMainTabName(selectedChatTab) ?? "conversation"
+                : "conversation"
+            : NormalizeMainTabName(_persistedSelectedTab) ?? "conversation";
         if (tab == "automation" && _selectedChat is null)
         {
             tab = "conversation";
@@ -1586,6 +1614,19 @@ public partial class MainWindow : Window
             "diagnostics" => DiagnosticsTab,
             _ => ConversationTab
         };
+    }
+
+    private void RememberCurrentTabSelection()
+    {
+        var tab = CurrentMainTabName();
+        if (_selectedChat is { } selectedChat)
+        {
+            _persistedSelectedTabsByChat[selectedChat.Id] = tab;
+        }
+        else if (_selectedProject is not null)
+        {
+            _persistedSelectedTab = tab;
+        }
     }
 
     private static bool IsReasonableScreenCoordinate(double left, double top)
@@ -1795,10 +1836,13 @@ public partial class MainWindow : Window
     private async Task SelectProjectAsync(ProjectDto project, long? requestedGeneration = null)
     {
         var generation = requestedGeneration ?? ++_selectionGeneration;
+        RememberCurrentTabSelection();
         _selectedProject = project;
         _selectedChat = null;
         _messages.Clear();
         ClearAutomationContext();
+        UpdateRightPaneVisibility();
+        ApplySavedTabSelection();
         if (FindProjectItem(project.Id) is ProjectTreeItem projectItem)
         {
             await LoadProjectChatsAsync(projectItem);
@@ -1823,12 +1867,14 @@ public partial class MainWindow : Window
     private void SelectProjectWithoutLoading(ProjectDto project)
     {
         _selectionGeneration++;
+        RememberCurrentTabSelection();
         _selectedProject = project;
         _selectedChat = null;
         _messages.Clear();
         ClearAutomationContext();
         RefreshSendTransportReadiness();
         UpdateRightPaneVisibility();
+        ApplySavedTabSelection();
         StatusText.Text = $"project | {project.Name} | {project.Path}";
         NewChatMessageBox.Focus();
         SaveUiState();
@@ -1837,6 +1883,7 @@ public partial class MainWindow : Window
     private async Task SelectChatAsync(ChatTreeItem item, long? requestedGeneration = null)
     {
         var generation = requestedGeneration ?? ++_selectionGeneration;
+        RememberCurrentTabSelection();
         SetChatRuntimeSettingsControlsEnabled(false);
         if (FindProjectItem(item.Project.Id) is ProjectTreeItem projectItem)
         {
@@ -1857,6 +1904,8 @@ public partial class MainWindow : Window
         _selectedProject = item.Project;
         _selectedChat = item.Chat;
         ClearAutomationContext();
+        UpdateRightPaneVisibility();
+        ApplySavedTabSelection();
         await LoadChatRuntimeSettingsAsync(item.Project.Id, item.Chat.Id, generation);
         if (!IsSelectionCurrent(generation, item.Project.Id, item.Chat.Id))
         {
@@ -7782,7 +7831,8 @@ public sealed record UiState(
     string? SelectedProjectId = null,
     string? SelectedChatId = null,
     string? SelectedTab = null,
-    Dictionary<string, List<string>>? ChatOrderIdsByProject = null);
+    Dictionary<string, List<string>>? ChatOrderIdsByProject = null,
+    Dictionary<string, string>? SelectedTabsByChat = null);
 
 public sealed record WindowPlacementState(
     double Left,
