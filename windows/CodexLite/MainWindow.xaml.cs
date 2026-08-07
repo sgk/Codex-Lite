@@ -7301,7 +7301,7 @@ public partial class MainWindow : Window
 
         FilesTab.IsSelected = true;
         await RefreshFilesAsync("");
-        FilesTree.UpdateLayout();
+        await UpdateFileTreeLayoutAsync(FilesTree);
 
         var parts = relativePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0)
@@ -7322,7 +7322,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            container.UpdateLayout();
+            await UpdateFileTreeLayoutAsync(container);
             if (container.ItemContainerGenerator.ContainerFromItem(currentItem) is not TreeViewItem treeItem)
             {
                 StatusText.Text = $"file link not visible | {relativePath}";
@@ -7345,10 +7345,15 @@ public partial class MainWindow : Window
 
             await EnsureFileTreeItemLoadedAsync(project, currentItem);
             treeItem.IsExpanded = true;
-            treeItem.UpdateLayout();
+            await UpdateFileTreeLayoutAsync(treeItem);
             container = treeItem;
             items = currentItem.Children;
         }
+    }
+
+    private async Task UpdateFileTreeLayoutAsync(ItemsControl container)
+    {
+        await Dispatcher.InvokeAsync(container.UpdateLayout, DispatcherPriority.Loaded);
     }
 
     private async Task EnsureFileTreeItemLoadedAsync(ProjectDto project, FileTreeItem item)
