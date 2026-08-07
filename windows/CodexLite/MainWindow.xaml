@@ -1403,7 +1403,11 @@
                                      VerticalScrollBarVisibility="Auto"
                                      IsReadOnlyCaretVisible="True"
                                      PreviewMouseWheel="FileContentBox_PreviewMouseWheel"/>
-                            <local:MarkdownViewer x:Name="FileMarkdownPreview" Style="{StaticResource FileMarkdownViewer}" Visibility="Collapsed" LinkClicked="MarkdownViewer_LinkClicked"/>
+                            <local:MarkdownViewer x:Name="FileMarkdownPreview"
+                                                  Style="{StaticResource FileMarkdownViewer}"
+                                                  Visibility="Collapsed"
+                                                  LinkClicked="MarkdownViewer_LinkClicked"
+                                                  PreviewMouseWheel="FileContentBox_PreviewMouseWheel"/>
                             <Border x:Name="FileImagePanel" Background="#FAFAFA" Visibility="Collapsed">
                                 <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
                                     <Image x:Name="FileImagePreview" Stretch="None"/>

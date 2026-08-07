@@ -7414,7 +7414,8 @@ public partial class MainWindow : Window
 
     private void FileContentBox_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (FindVisualChild<ScrollViewer>(FileContentBox, _ => true) is not ScrollViewer scrollViewer)
+        if (sender is not DependencyObject preview
+            || FindVisualChild<ScrollViewer>(preview, _ => true) is not ScrollViewer scrollViewer)
         {
             return;
         }
