@@ -7542,6 +7542,15 @@ public partial class MainWindow : Window
         {
         }
         localTarget = localTarget.Replace('\\', '/');
+        localTarget = Regex.Replace(
+            localTarget,
+            @":\d+(?::\d+)?$",
+            "",
+            RegexOptions.CultureInvariant);
+        if (localTarget.Length == 0)
+        {
+            return false;
+        }
 
         var projectFullPath = Path.GetFullPath(projectPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         string candidateFullPath;
