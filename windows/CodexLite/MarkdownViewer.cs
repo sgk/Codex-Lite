@@ -478,9 +478,10 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
         {
             var codeStart = text.IndexOf('`', index);
             var boldStart = text.IndexOf("**", index, StringComparison.Ordinal);
+            var strikethroughStart = text.IndexOf("~~", index, StringComparison.Ordinal);
             var linkMatch = MarkdownLinkRegex.Match(text, index);
             var linkStart = linkMatch.Success ? linkMatch.Index : -1;
-            var next = NextIndex(codeStart, boldStart, linkStart);
+            var next = NextIndex(codeStart, boldStart, strikethroughStart, linkStart);
             if (next < 0)
             {
                 paragraph.Inlines.Add(new Run(text[index..]));
@@ -506,6 +507,21 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             {
                 AddHyperlink(paragraph, linkMatch.Groups[1].Value, linkMatch.Groups[2].Value);
                 index = linkMatch.Index + linkMatch.Length;
+                continue;
+            }
+            if (next == strikethroughStart)
+            {
+                var strikethroughEnd = text.IndexOf("~~", next + 2, StringComparison.Ordinal);
+                if (strikethroughEnd < 0)
+                {
+                    paragraph.Inlines.Add(new Run(text[next..]));
+                    return;
+                }
+                paragraph.Inlines.Add(new Run(text[(next + 2)..strikethroughEnd])
+                {
+                    TextDecorations = TextDecorations.Strikethrough
+                });
+                index = strikethroughEnd + 2;
                 continue;
             }
             var boldEnd = text.IndexOf("**", next + 2, StringComparison.Ordinal);
