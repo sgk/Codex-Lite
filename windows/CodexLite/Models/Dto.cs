@@ -235,7 +235,8 @@ public sealed record RunDto(
     string? TerminalReason = null,
     long Revision = 0,
     long EventSequence = 0,
-    IReadOnlyList<PendingApprovalDto>? PendingApprovals = null);
+    IReadOnlyList<PendingApprovalDto>? PendingApprovals = null,
+    bool Adopted = false);
 
 public sealed record PendingApprovalDto(
     string RequestId,

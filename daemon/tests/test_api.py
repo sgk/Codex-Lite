@@ -131,6 +131,24 @@ async def test_app_server_prepare_initializes_and_restores_idle_lifecycle(linux_
     assert calls == ["cancel-idle", "started", "schedule-idle"]
 
 
+@pytest.mark.asyncio
+async def test_app_server_diagnostic_request_does_not_start_stopped_process(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AppServerClient(make_test_config(linux_tmp_path), CodexRunner(make_test_config(linux_tmp_path)))
+    started = False
+
+    async def ensure_started() -> None:
+        nonlocal started
+        started = True
+
+    monkeypatch.setattr(client, "ensure_started", ensure_started)
+
+    with pytest.raises(AppError) as exc:
+        await client.request_if_running("thread/read", {"threadId": "thread_1"})
+
+    assert exc.value.code == "app_server_not_running"
+    assert started is False
+
+
 def test_app_server_command_can_disable_auto_compaction(linux_tmp_path: Path) -> None:
     cfg = make_test_config(linux_tmp_path)
     cfg = Config(**{**cfg.__dict__, "auto_compact_token_limit": 0})
@@ -516,6 +534,42 @@ async def test_event_hub_late_subscriber_stops_after_terminal_history() -> None:
         events.append(item["event"])
 
     assert events == ["status", "done"]
+
+
+@pytest.mark.asyncio
+async def test_event_hub_replays_persisted_events_after_recreation(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    now = utc_now()
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    db.execute(
+        "INSERT INTO projects(id, name, path, created_at, updated_at) VALUES ('project_1', 'demo', ?, ?, ?)",
+        (str(project_dir), now, now),
+    )
+    db.execute(
+        "INSERT INTO chats(id, project_id, title, created_at, updated_at) VALUES ('chat_1', 'project_1', 'demo', ?, ?)",
+        (now, now),
+    )
+    db.execute("INSERT INTO runs(id, chat_id, status) VALUES ('run_1', 'chat_1', 'running')")
+    first_hub = EventHub(db)
+    first_hub.MAX_PERSISTED_EVENTS_PER_RUN = 2
+    await first_hub.publish("run_1", "status", {"status": "running"})
+    await first_hub.publish("run_1", "progress", {"summary": "working"})
+    await first_hub.publish("run_1", "done", {"status": "succeeded"})
+    assert db.fetchone("SELECT COUNT(*) AS count FROM run_events WHERE run_id = 'run_1'") == {"count": 2}
+
+    recreated_hub = EventHub(db)
+    events = []
+    async for item in recreated_hub.subscribe("run_1", after_sequence=1):
+        events.append((item["sequence"], item["event"], item["data"]))
+
+    assert events == [
+        (2, "progress", {"summary": "working"}),
+        (3, "done", {"status": "succeeded"}),
+    ]
+    db.close()
 
 
 @pytest.mark.asyncio
@@ -2351,6 +2405,56 @@ async def test_app_server_event_reconnect_starts_after_snapshot(linux_tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_app_server_adopts_untracked_active_turn(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = ActiveTurnInspectAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings(), db=db)  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    chats.upsert_provider_thread(project_id, chat_id, "openai", "thread_1", history_initialized=True)
+
+    await runs.reconcile_chat_runtime(project_id, chat_id)
+
+    active = runs.list_active_runs()
+    assert len(active) == 1
+    assert active[0]["chatId"] == chat_id
+    assert active[0]["threadId"] == "thread_1"
+    assert active[0]["turnId"] == "turn_active"
+    assert active[0]["adopted"] is True
+    assert runs.list_untracked_threads() == []
+    assert ("thread/turns/list", {"threadId": "thread_1", "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"}) in app_server.requests
+
+    await app_server.subscribers[-1].put(
+        AppServerNotification(
+            "turn/completed",
+            {"threadId": "thread_1", "turn": {"id": "turn_active", "status": "completed"}},
+        )
+    )
+    await asyncio.sleep(0)
+    assert runs.get_run(active[0]["id"])["status"] == "succeeded"
+    assert messages.list_messages(project_id, chat_id) == []
+
+    recreated_runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings(), db=db)  # type: ignore[arg-type]
+    assert recreated_runs.get_run(active[0]["id"])["status"] == "succeeded"
+    replayed = []
+    async for event in recreated_runs.stream_events(active[0]["id"], after_sequence=0):
+        replayed.append(event)
+    assert any("app_server/run_adopted" in event for event in replayed)
+    assert any("event: done" in event for event in replayed)
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_agent_message_boundary_is_published(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
@@ -3692,6 +3796,18 @@ class FlakyReadAppServer(TurnStartAppServer):
             if self.read_count == 1:
                 raise RuntimeError("temporary thread/read failure")
             return {"thread": {"id": params["threadId"], "status": {"type": "active"}}}
+        return {}
+
+
+class ActiveTurnInspectAppServer(TurnStartAppServer):
+    is_running = True
+
+    async def request(self, method: str, params: dict) -> dict:
+        self.requests.append((method, params))
+        if method == "thread/read":
+            return {"thread": {"id": params["threadId"], "status": {"type": "active", "activeFlags": []}}}
+        if method == "thread/turns/list":
+            return {"data": [{"id": "turn_active", "status": "inProgress", "items": []}]}
         return {}
 
 

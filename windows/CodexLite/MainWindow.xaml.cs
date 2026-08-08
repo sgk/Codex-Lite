@@ -297,8 +297,8 @@ public partial class MainWindow : Window
         _isReconcilingRuns = true;
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-            var daemonRuns = (await _client.ListActiveRunsAsync(timeout.Token))
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var daemonRuns = (await _client.ListActiveRunsAsync(_selectedProject?.Id, _selectedChat?.Id, timeout.Token))
                 .Where(run => run.Status.Equals("running", StringComparison.OrdinalIgnoreCase))
                 .ToArray();
             var daemonRunIds = daemonRuns.Select(run => run.Id).ToHashSet(StringComparer.Ordinal);
@@ -364,13 +364,15 @@ public partial class MainWindow : Window
                 UpdateCommandButtonState();
                 var afterSequence = _lastRunEventSequenceByRun.TryGetValue(daemonRun.Id, out var lastSequence)
                     ? lastSequence
+                    : daemonRun.Adopted
+                    ? 0
                     : daemonRun.EventSequence;
                 _ = TrackRecoveredRunAsync(daemonRun, afterSequence, runCts.Token);
             }
         }
         catch (OperationCanceledException)
         {
-            WritePerformanceLog("run-state-reconcile-timeout", "timeoutSeconds=3");
+            WritePerformanceLog("run-state-reconcile-timeout", "timeoutSeconds=8");
         }
         catch (Exception ex)
         {
@@ -6309,6 +6311,7 @@ public partial class MainWindow : Window
         var receivedOutputChars = 0;
         var completed = false;
         var reconnectAfterStreamLoss = false;
+        RunDto? terminalRunForReplay = null;
         heartbeat.Tick += (_, _) =>
         {
             var elapsed = DateTimeOffset.Now - startedAt;
@@ -6495,6 +6498,11 @@ public partial class MainWindow : Window
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                 var daemonRun = await _client.GetRunAsync(runId, timeout.Token);
                 reconnectAfterStreamLoss = daemonRun?.Status.Equals("running", StringComparison.OrdinalIgnoreCase) == true;
+                if (!reconnectAfterStreamLoss
+                    && daemonRun?.TerminalReason?.Equals("daemon_restarted", StringComparison.Ordinal) == true)
+                {
+                    terminalRunForReplay = daemonRun;
+                }
             }
             catch (Exception stateError)
             {
@@ -6510,6 +6518,15 @@ public partial class MainWindow : Window
                 ReplaceMessageContentIfWaiting(chatId, currentAssistantMessageId, "途中経過の配信が切れました。実行状態へ再接続しています...");
                 StatusText.Text = "途中経過の配信切断 | 実行は継続中";
                 ShowRunProgressForChat(chatId, "途中経過の配信へ再接続中");
+            }
+            else if (terminalRunForReplay is not null)
+            {
+                WritePerformanceLog(
+                    "stream-lost-daemon-restarted",
+                    $"runId={LogText(runId)} action=replay-persisted-events");
+                ReplaceMessageContentIfWaiting(chatId, currentAssistantMessageId, "daemon再起動前の途中経過を復元しています...");
+                StatusText.Text = "daemon再起動 | 保存済み途中経過を復元中";
+                ShowRunProgressForChat(chatId, "保存済み途中経過を復元中");
             }
             else
             {
@@ -6534,6 +6551,14 @@ public partial class MainWindow : Window
         if (reconnectAfterStreamLoss)
         {
             await ReconcileActiveRunsAsync();
+        }
+        else if (terminalRunForReplay is not null && ProjectIdForChat(chatId) is { } projectId)
+        {
+            var replayCts = new CancellationTokenSource();
+            _activeRunsByChat[chatId] = new ActiveUiRun(runId, projectId, chatId, replayCts);
+            UpdateChatRunningIndicator(chatId);
+            var afterSequence = _lastRunEventSequenceByRun.TryGetValue(runId, out var lastSequence) ? lastSequence : 0;
+            await TrackRecoveredRunAsync(terminalRunForReplay, afterSequence, replayCts.Token);
         }
     }
 

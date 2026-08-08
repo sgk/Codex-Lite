@@ -88,11 +88,22 @@ CREATE TABLE IF NOT EXISTS runs (
   turn_id TEXT,
   last_event_at TEXT,
   last_event_method TEXT,
+  last_reconcile_at TEXT,
   watcher_state TEXT,
   terminal_reason TEXT,
   last_thread_status TEXT,
   last_reconcile_error TEXT,
+  adopted INTEGER NOT NULL DEFAULT 0,
   revision INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS run_events (
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  sequence INTEGER NOT NULL,
+  event TEXT NOT NULL,
+  data_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(run_id, sequence)
 );
 
 CREATE TABLE IF NOT EXISTS automations (
@@ -117,6 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages(chat_id, create
 CREATE INDEX IF NOT EXISTS idx_chat_provider_threads_thread ON chat_provider_threads(provider, thread_id);
 CREATE INDEX IF NOT EXISTS idx_model_reasoning_history_used ON model_reasoning_history(used_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_chat_started ON runs(chat_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_run_events_run_sequence ON run_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_automations_chat ON automations(project_id, chat_id);
 CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(enabled, running, next_run_at);
 """
@@ -164,10 +176,12 @@ class Database:
                 "turn_id": "TEXT",
                 "last_event_at": "TEXT",
                 "last_event_method": "TEXT",
+                "last_reconcile_at": "TEXT",
                 "watcher_state": "TEXT",
                 "terminal_reason": "TEXT",
                 "last_thread_status": "TEXT",
                 "last_reconcile_error": "TEXT",
+                "adopted": "INTEGER NOT NULL DEFAULT 0",
                 "revision": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in run_columns:

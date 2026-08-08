@@ -65,6 +65,18 @@ class AppServerClient:
         finally:
             self._schedule_idle_shutdown()
 
+    async def request_if_running(self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> dict[str, Any]:
+        """Send a diagnostic request without starting or replacing app-server."""
+        self._cancel_idle_shutdown()
+        if not self.is_running:
+            raise AppError("app_server_not_running", "Codex app-server is not running.", 503)
+        try:
+            return await asyncio.wait_for(self._request_started(method, params), timeout=timeout or self.REQUEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            raise AppError("app_server_timeout", f"Codex app-server request timed out: {method}", 504) from exc
+        finally:
+            self._schedule_idle_shutdown()
+
     async def _request_started(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         assert self._process is not None
         assert self._process.stdin is not None

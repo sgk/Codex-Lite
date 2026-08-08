@@ -139,7 +139,9 @@ Windowsアプリは定期的にhealth checkを行い、デーモンが応答し�
 - ターン: `turn/start`、`turn/interrupt`、`turn/steer`
 - 使用容量の取得
 
-app-serverの通知はデーモン内のRunへ対応付け、WindowsクライアントへSSEで配信する。Runは `queued`、`running`、`succeeded`、`failed`、`cancelled` の状態を持つ。app-serverモードでもRunをWSL側DBへ記録し、provider、thread ID、turn ID、最終通知、監視状態、終了理由を診断できるようにする。SSEイベントにはRun単位の連番を付け、Windowsクライアントで追跡が失われた場合は、デーモンの実行中Run一覧を正本として最新連番以後のイベントへ再接続する。画面側のRun辞書はSSE接続とキャンセル処理の一時的な投影に限定し、送信可否やスピナーはデーモンとの定期照合で修正する。
+app-serverの通知はデーモン内のRunへ対応付け、WindowsクライアントへSSEで配信する。Runは `queued`、`running`、`succeeded`、`failed`、`cancelled` の状態を持つ。app-serverモードでもRunをWSL側DBへ記録し、provider、thread ID、turn ID、最終通知、監視状態、終了理由を診断できるようにする。SSEイベントにはRun単位の連番を付け、Windowsクライアントで追跡が失われた場合は、デーモンの実行中Run一覧を正本として最後に受信した連番以後のイベントへ再接続する。イベントは短い間隔でまとめてWSL側DBにも保存し、再接続時にメモリ内履歴と重複しない形で再生する。保存イベントの単体サイズとRunごとの件数には上限を設け、途中経過の記録によってdaemonの応答性やDB容量を損なわないようにする。画面側のRun辞書はSSE接続とキャンセル処理の一時的な投影に限定し、送信可否やスピナーはデーモンとの定期照合で修正する。
+
+Windowsクライアントが選択中チャットの実行状態を照合するとき、daemonは起動済みの対象provider app-serverに限って `thread/read` を行う。threadが `active` なのに対応するRunがない場合は、`thread/turns/list` を最新1件・item本文なしで取得し、`inProgress` のturnを回復Runとして登録して通知監視を再開する。停止中のapp-serverを状態確認だけのために起動せず、回復前に失われた出力断片からローカルの最終回答を合成せず、完了後に正規JSONL履歴を再読込する。
 
 assistantメッセージのライブ表示では、`item/started`、`item/agentMessage/delta`、`item/completed`、`rawResponseItem/completed` の項目IDおよび `phase` を保持する。通常のitem通知ではphaseが未確定で、元Responses項目の完了通知で初めて確定する提供元については、その項目のテキストを確定までデーモン内で一時保持する。raw Responses項目とagent message項目のID体系が異なる場合は、完成した本文と保留中のdelta本文を照合して対応付ける。複数のraw Responses項目が1つのagent message項目へ集約されている場合は、raw項目の完成本文を保留中のdelta本文の先頭から順に消費し、raw項目ごとのIDとphaseで配信する。集約itemまたはturnの完了phaseで保留本文全体を結論へ昇格させない。`commentary` はitemごとに独立した「作業内容」、`final_answer` は「結論」として表示し、途中報告を相互または最終回答へ連結しない。同一item内で分割配信されるdeltaだけを連結する。phaseを最後まで特定できない複数itemをまとめて結論として保存するフォールバックは行わない。複数の `final_answer` 項目を受信した場合、最後の項目だけをチャット履歴の結論として保存する。既存JSONLの書き換えや過去表示の移行は行わない。
 

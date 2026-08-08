@@ -385,6 +385,7 @@ class AppServerActiveRun:
     terminal_reason: str | None = None
     revision: int = 0
     last_persisted_at_monotonic: float = 0.0
+    adopted: bool = False
 
 
 def _app_server_for_provider(app_server: Any, provider: str) -> Any:
@@ -441,6 +442,15 @@ async def _release_run_lease(app_server: Any) -> None:
         await release_run()
 
 
+async def _request_running_app_server(app_server: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    if not bool(getattr(app_server, "is_running", False)):
+        raise AppError("app_server_not_running", "Codex app-server is not running.", 503)
+    request_if_running = getattr(app_server, "request_if_running", None)
+    if callable(request_if_running):
+        return await request_if_running(method, params)
+    return await app_server.request(method, params)
+
+
 class AppServerRunService:
     def __init__(self, projects: ProjectService, threads: AppServerThreadService, messages: MessageService, app_server: AppServerClient, max_concurrent_runs: int, settings: AppServerRuntimeSettings, db: Database | None = None) -> None:
         self.projects = projects
@@ -452,7 +462,9 @@ class AppServerRunService:
         self.settings = settings
         self.db = db
         self.runs: dict[str, AppServerActiveRun] = {}
-        self.events = EventHub()
+        self.events = EventHub(db)
+        self._runtime_reconcile_lock = asyncio.Lock()
+        self._untracked_threads: dict[str, dict[str, Any]] = {}
 
     async def start_message_run(self, project_id: str, chat_id: str, content: str, attachments: list[dict[str, Any]] | None = None) -> dict:
         active_count = sum(1 for run in self.runs.values() if run.status == "running")
@@ -582,7 +594,10 @@ class AppServerRunService:
     def get_run(self, run_id: str) -> dict:
         run = self.runs.get(run_id)
         if run is None:
-            raise AppError("run_not_found", "Run was not found.", 404)
+            row = self.db.fetchone("SELECT * FROM runs WHERE id = ?", (run_id,)) if self.db is not None else None
+            if row is None:
+                raise AppError("run_not_found", "Run was not found.", 404)
+            return _stored_run_out(row) | {"eventSequence": self.events.current_sequence(run_id)}
         return _run_out(run_id, run) | {"eventSequence": self.events.current_sequence(run_id)}
 
     def list_run_diagnostics(self) -> list[dict[str, Any]]:
@@ -608,6 +623,7 @@ class AppServerRunService:
                 "lastReconcileError": run.last_reconcile_error,
                 "terminalReason": run.terminal_reason,
                 "revision": run.revision,
+                "adopted": run.adopted,
                 "pendingApprovals": [
                     {
                         "requestId": request_id,
@@ -626,6 +642,112 @@ class AppServerRunService:
             for run_id, run in self.runs.items()
             if run.status == "running"
         ]
+
+    async def reconcile_chat_runtime(self, project_id: str, chat_id: str) -> None:
+        async with self._runtime_reconcile_lock:
+            self.projects.get_project_row(project_id)
+            self.chats.get_chat_row(project_id, chat_id)
+            for provider_thread in self.chats.list_provider_threads(project_id, chat_id):
+                provider = str(provider_thread["provider"])
+                thread_id = str(provider_thread["thread_id"])
+                if any(run.status == "running" and run.thread_id == thread_id and run.provider == provider for run in self.runs.values()):
+                    self._untracked_threads.pop(f"{provider}:{thread_id}", None)
+                    continue
+                if any(run.status == "running" and run.chat_id == chat_id for run in self.runs.values()):
+                    continue
+                app_server = _app_server_for_provider(self.app_server, provider)
+                if not bool(getattr(app_server, "is_running", False)):
+                    continue
+                notification_queue = app_server.subscribe_queue()
+                adopted_run_id: str | None = None
+                lease_acquired = False
+                try:
+                    response = await _request_running_app_server(app_server, "thread/read", {"threadId": thread_id})
+                    thread = response.get("thread") or {}
+                    status = thread.get("status") if isinstance(thread, dict) else None
+                    status_type = status.get("type") if isinstance(status, dict) else None
+                    if status_type != "active":
+                        self._untracked_threads.pop(f"{provider}:{thread_id}", None)
+                        continue
+                    turns_response = await _request_running_app_server(
+                        app_server,
+                        "thread/turns/list",
+                        {
+                            "threadId": thread_id,
+                            "limit": 1,
+                            "sortDirection": "desc",
+                            "itemsView": "notLoaded",
+                        },
+                    )
+                    turns = turns_response.get("data") or []
+                    turn = turns[0] if isinstance(turns, list) and turns and isinstance(turns[0], dict) else {}
+                    turn_id = str(turn.get("id") or "")
+                    turn_status = str(turn.get("status") or "")
+                    if not turn_id or turn_status != "inProgress":
+                        self._untracked_threads[f"{provider}:{thread_id}"] = {
+                            "chatId": chat_id,
+                            "provider": provider,
+                            "threadId": thread_id,
+                            "threadStatus": status_type,
+                            "turnStatus": turn_status or None,
+                            "detectedAt": utc_now(),
+                            "error": "active thread did not expose an in-progress turn",
+                        }
+                        continue
+                    run_id = new_id("run")
+                    adopted_run_id = run_id
+                    self._insert_run_row(run_id, chat_id)
+                    run = AppServerActiveRun(
+                        thread_id,
+                        turn_id,
+                        chat_id,
+                        provider=provider,
+                        started_at=utc_now(),
+                        adopted=True,
+                    )
+                    self._start_run_row(run_id, thread_id, turn_id, provider, adopted=True)
+                    _acquire_run_lease(app_server)
+                    lease_acquired = True
+                    self.runs[run_id] = run
+                    self._untracked_threads.pop(f"{provider}:{thread_id}", None)
+                    await self.events.publish(run_id, "status", {"status": "running", "recovered": True})
+                    await self.events.publish(
+                        run_id,
+                        "progress",
+                        {
+                            "method": "app_server/run_adopted",
+                            "summary": "app-serverで継続中の実行を再検出し、途中経過の追跡を再開しました。",
+                        },
+                    )
+                    asyncio.create_task(self._watch_run(run_id, notification_queue, app_server))
+                    notification_queue = None
+                except Exception as exc:
+                    if adopted_run_id is not None:
+                        failed_run = self.runs.pop(adopted_run_id, None)
+                        self._finish_run_row(adopted_run_id, "failed", str(exc), "run_adoption_failed")
+                        if lease_acquired:
+                            await _release_run_lease(app_server)
+                        if failed_run is not None:
+                            failed_run.lease_released = True
+                    self._untracked_threads[f"{provider}:{thread_id}"] = {
+                        "chatId": chat_id,
+                        "provider": provider,
+                        "threadId": thread_id,
+                        "detectedAt": utc_now(),
+                        "error": str(exc),
+                    }
+                finally:
+                    if notification_queue is not None:
+                        app_server.unsubscribe_queue(notification_queue)
+
+    def list_untracked_threads(self) -> list[dict[str, Any]]:
+        return list(self._untracked_threads.values())
+
+    async def flush_events(self) -> None:
+        await self.events.flush()
+
+    def event_diagnostics(self) -> dict[str, Any]:
+        return self.events.diagnostics()
 
     def list_recent_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         live = {item["id"]: item for item in self.list_run_diagnostics()}
@@ -655,10 +777,12 @@ class AppServerRunService:
                     "watcherAlive": row.get("watcher_state") == "watching",
                     "lastNotificationAt": row.get("last_event_at"),
                     "lastNotificationMethod": row.get("last_event_method"),
+                    "lastReconcileAt": row.get("last_reconcile_at"),
                     "lastThreadStatus": row.get("last_thread_status"),
                     "lastReconcileError": row.get("last_reconcile_error"),
                     "terminalReason": row.get("terminal_reason"),
                     "revision": row.get("revision") or 0,
+                    "adopted": bool(row.get("adopted")),
                 }
             )
         return result
@@ -671,12 +795,12 @@ class AppServerRunService:
             (run_id, chat_id),
         )
 
-    def _start_run_row(self, run_id: str, thread_id: str, turn_id: str, provider: str) -> None:
+    def _start_run_row(self, run_id: str, thread_id: str, turn_id: str, provider: str, adopted: bool = False) -> None:
         if self.db is None:
             return
         self.db.execute(
-            "UPDATE runs SET status = 'running', started_at = ?, provider = ?, thread_id = ?, turn_id = ?, watcher_state = 'starting', revision = revision + 1 WHERE id = ?",
-            (utc_now(), provider, thread_id, turn_id, run_id),
+            "UPDATE runs SET status = 'running', started_at = ?, provider = ?, thread_id = ?, turn_id = ?, watcher_state = 'starting', adopted = ?, revision = revision + 1 WHERE id = ?",
+            (utc_now(), provider, thread_id, turn_id, int(adopted), run_id),
         )
 
     def _record_run_activity(self, run_id: str, run: AppServerActiveRun, force: bool = False) -> None:
@@ -687,10 +811,11 @@ class AppServerRunService:
             return
         run.last_persisted_at_monotonic = now
         self.db.execute(
-            "UPDATE runs SET last_event_at = ?, last_event_method = ?, watcher_state = ?, terminal_reason = ?, last_thread_status = ?, last_reconcile_error = ?, revision = ? WHERE id = ?",
+            "UPDATE runs SET last_event_at = ?, last_event_method = ?, last_reconcile_at = ?, watcher_state = ?, terminal_reason = ?, last_thread_status = ?, last_reconcile_error = ?, revision = ? WHERE id = ?",
             (
                 run.last_notification_at or run.last_reconcile_at,
                 run.last_notification_method,
+                run.last_reconcile_at,
                 "watching" if run.watcher_alive else "stopped",
                 run.terminal_reason,
                 run.last_thread_status,
@@ -857,7 +982,21 @@ class AppServerRunService:
 
     async def stream_events(self, run_id: str, after_sequence: int | None = None) -> AsyncIterator[str]:
         if run_id not in self.runs:
-            raise AppError("run_not_found", "Run was not found.", 404)
+            row = self.db.fetchone("SELECT * FROM runs WHERE id = ?", (run_id,)) if self.db is not None else None
+            if row is None:
+                raise AppError("run_not_found", "Run was not found.", 404)
+            terminal_seen = False
+            sequence = after_sequence or 0
+            for item in self.events.replay_history(run_id, after_sequence=after_sequence):
+                sequence = max(sequence, int(item["sequence"]))
+                terminal_seen = terminal_seen or item["event"] in {"done", "error"}
+                yield f"id: {item['sequence']}\nevent: {item['event']}\ndata: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
+            if not terminal_seen:
+                status = str(row["status"])
+                event = "done" if status in {"succeeded", "cancelled"} else "error"
+                data = {"status": status, "message": row.get("error"), "recovered": True}
+                yield f"id: {sequence + 1}\nevent: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            return
         async for item in self.events.subscribe(run_id, after_sequence=after_sequence):
             yield f"id: {item['sequence']}\nevent: {item['event']}\ndata: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
 
@@ -995,7 +1134,7 @@ class AppServerRunService:
                             run.revision += 1
                             self.chats.touch_provider_thread(run.chat_id, run.provider)
                             final_answer = final_answer_text()
-                            if final_answer:
+                            if final_answer and not run.adopted:
                                 self.messages.insert_message(run.chat_id, "assistant", final_answer, run_id=run_id, kind="conclusion")
                             self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
                             await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0})
@@ -1177,7 +1316,7 @@ class AppServerRunService:
                     run.revision += 1
                     self.chats.touch_provider_thread(run.chat_id, run.provider)
                     final_answer = final_answer_text()
-                    if final_answer:
+                    if final_answer and not run.adopted:
                         self.messages.insert_message(run.chat_id, "assistant", final_answer, run_id=run_id, kind="conclusion")
                     self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
                     await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
@@ -1845,6 +1984,7 @@ def _run_out(run_id: str, run: AppServerActiveRun) -> dict:
         "lastReconcileError": run.last_reconcile_error,
         "terminalReason": run.terminal_reason,
         "revision": run.revision,
+        "adopted": run.adopted,
         "pendingApprovals": [
             {
                 "requestId": request_id,
@@ -1855,6 +1995,33 @@ def _run_out(run_id: str, run: AppServerActiveRun) -> dict:
             }
             for request_id, approval in run.pending_approvals.items()
         ],
+    }
+
+
+def _stored_run_out(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "chatId": row["chat_id"],
+        "threadId": row.get("thread_id"),
+        "turnId": row.get("turn_id"),
+        "provider": row.get("provider"),
+        "status": row["status"],
+        "pid": row.get("pid"),
+        "exitCode": row.get("exit_code"),
+        "startedAt": row.get("started_at"),
+        "finishedAt": row.get("finished_at"),
+        "logPath": row.get("log_path"),
+        "error": row.get("error"),
+        "watcherAlive": row.get("watcher_state") == "watching",
+        "lastNotificationAt": row.get("last_event_at"),
+        "lastNotificationMethod": row.get("last_event_method"),
+        "lastReconcileAt": row.get("last_reconcile_at"),
+        "lastThreadStatus": row.get("last_thread_status"),
+        "lastReconcileError": row.get("last_reconcile_error"),
+        "terminalReason": row.get("terminal_reason"),
+        "revision": row.get("revision") or 0,
+        "adopted": bool(row.get("adopted")),
+        "pendingApprovals": [],
     }
 
 

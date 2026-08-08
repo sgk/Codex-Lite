@@ -79,6 +79,8 @@ def create_app(config: Config | None = None) -> Starlette:
                 except asyncio.CancelledError:
                     pass
             await app_servers.close()
+            await app_runs.flush_events()
+            await runs.flush_events()
             db.close()
 
     app = Starlette(lifespan=lifespan)
@@ -134,6 +136,8 @@ def create_app(config: Config | None = None) -> Starlette:
             "activeRunIds": [run["id"] for run in active_runs],
             "activeRuns": active_runs,
             "recentRuns": app_runs.list_recent_runs() if use_app_server else run_diagnostics,
+            "untrackedAppServerThreads": app_runs.list_untracked_threads() if use_app_server else [],
+            "runEventPersistence": app_runs.event_diagnostics() if use_app_server else runs.event_diagnostics(),
             "effectivePath": process_env.get("PATH", ""),
             "sshAgentConfigured": bool(process_env.get("SSH_AUTH_SOCK")),
             "appDataDir": str(cfg.app_data_dir),
@@ -365,8 +369,12 @@ def create_app(config: Config | None = None) -> Starlette:
         return runs.get_run(run_id)
 
     @get("/runs")
-    async def list_active_runs() -> list[dict]:
+    async def list_active_runs(request: Request) -> list[dict]:
         if use_app_server:
+            project_id = request.query_params.get("project_id")
+            chat_id = request.query_params.get("chat_id")
+            if project_id and chat_id:
+                await app_runs.reconcile_chat_runtime(project_id, chat_id)
             return app_runs.list_active_runs()
         return runs.list_run_diagnostics()
 

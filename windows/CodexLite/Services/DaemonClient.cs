@@ -498,8 +498,15 @@ public sealed class DaemonClient
     public Task<RunDto?> GetRunAsync(string runId, CancellationToken cancellationToken = default) =>
         _http.GetFromJsonAsync<RunDto>($"/runs/{runId}", JsonOptions, cancellationToken);
 
-    public async Task<IReadOnlyList<RunDto>> ListActiveRunsAsync(CancellationToken cancellationToken = default) =>
-        await _http.GetFromJsonAsync<List<RunDto>>("/runs", JsonOptions, cancellationToken) ?? [];
+    public async Task<IReadOnlyList<RunDto>> ListActiveRunsAsync(string? projectId = null, string? chatId = null, CancellationToken cancellationToken = default)
+    {
+        var path = "/runs";
+        if (!string.IsNullOrWhiteSpace(projectId) && !string.IsNullOrWhiteSpace(chatId))
+        {
+            path += $"?project_id={Uri.EscapeDataString(projectId)}&chat_id={Uri.EscapeDataString(chatId)}";
+        }
+        return await _http.GetFromJsonAsync<List<RunDto>>(path, JsonOptions, cancellationToken) ?? [];
+    }
 
     public Task<RunDto?> SteerRunAsync(string runId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default) =>
         PostAsync<RunDto>($"/runs/{runId}/steer", new { content, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
