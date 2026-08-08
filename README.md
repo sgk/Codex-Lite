@@ -16,7 +16,7 @@ Codex Desktop を WSL と組み合わせた際に、PC 全体が重くなるこ�
 - 一定間隔でプロンプトを実行するオートメーション
 - アクセスポリシー、Codex の状態、実行状態を確認する診断画面
 
-詳しい動作とデータの扱いは [codex-lite-spec.md](codex-lite-spec.md) を参照してください。Slack 経由のリモート操作構想は [slack-remote-spec.md](slack-remote-spec.md) に分けています。
+詳しい動作とデータの扱いは [codex-lite-spec.md](codex-lite-spec.md) を参照してください。汎用のリモート操作構想は [remote-operation-spec.md](remote-operation-spec.md)、SlackをUIとして使う案は [slack-remote-spec.md](slack-remote-spec.md) に分けています。
 
 ## 必要な環境
 
