@@ -57,7 +57,7 @@ def create_app(config: Config | None = None) -> Starlette:
     app_settings = _load_app_settings(cfg)
     chats.seed_model_reasoning_history(app_settings.model, app_settings.reasoning_effort)
     app_threads = AppServerThreadService(projects, chats, messages, transcript_import, app_servers, app_settings)
-    app_runs = AppServerRunService(projects, app_threads, messages, app_servers, cfg.max_concurrent_runs, app_settings)
+    app_runs = AppServerRunService(projects, app_threads, messages, app_servers, cfg.max_concurrent_runs, app_settings, db=db)
     app_usage = AppServerUsageService(app_servers)
     automations = AutomationService(db, projects, chats)
     runs.recover_stale_runs()
@@ -112,7 +112,8 @@ def create_app(config: Config | None = None) -> Starlette:
     @get("/diagnostics")
     async def diagnostics() -> dict:
         codex_path, codex_version = await resolve_codex_info(codex_runner)
-        active_runs = app_runs.list_run_diagnostics() if use_app_server else runs.list_run_diagnostics()
+        run_diagnostics = app_runs.list_run_diagnostics() if use_app_server else runs.list_run_diagnostics()
+        active_runs = [run for run in run_diagnostics if run.get("status") in {"queued", "running"}]
         process_env = codex_process_env(cfg)
         return {
             "daemonPid": __import__("os").getpid(),
@@ -132,6 +133,7 @@ def create_app(config: Config | None = None) -> Starlette:
             "deepseekCodexSqliteHomeExists": bool(cfg.deepseek_codex_sqlite_home and cfg.deepseek_codex_sqlite_home.exists()),
             "activeRunIds": [run["id"] for run in active_runs],
             "activeRuns": active_runs,
+            "recentRuns": app_runs.list_recent_runs() if use_app_server else run_diagnostics,
             "effectivePath": process_env.get("PATH", ""),
             "sshAgentConfigured": bool(process_env.get("SSH_AUTH_SOCK")),
             "appDataDir": str(cfg.app_data_dir),
@@ -362,9 +364,17 @@ def create_app(config: Config | None = None) -> Starlette:
             return app_runs.get_run(run_id)
         return runs.get_run(run_id)
 
+    @get("/runs")
+    async def list_active_runs() -> list[dict]:
+        if use_app_server:
+            return app_runs.list_active_runs()
+        return runs.list_run_diagnostics()
+
     @get("/runs/{run_id}/events")
-    async def run_events(run_id: str) -> StreamingResponse:
-        stream = app_runs.stream_events(run_id) if use_app_server else runs.stream_events(run_id)
+    async def run_events(request: Request, run_id: str) -> StreamingResponse:
+        after_value = request.query_params.get("after")
+        after_sequence = int(after_value) if after_value and after_value.isdigit() else None
+        stream = app_runs.stream_events(run_id, after_sequence=after_sequence) if use_app_server else runs.stream_events(run_id)
         return StreamingResponse(stream, media_type="text/event-stream")
 
     @post("/runs/{run_id}/cancel")

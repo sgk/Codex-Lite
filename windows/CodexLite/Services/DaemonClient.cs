@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Json;
@@ -494,6 +495,12 @@ public sealed class DaemonClient
     public Task<RunDto?> CancelRunAsync(string runId, CancellationToken cancellationToken = default) =>
         PostAsync<RunDto>($"/runs/{runId}/cancel", new { }, cancellationToken);
 
+    public Task<RunDto?> GetRunAsync(string runId, CancellationToken cancellationToken = default) =>
+        _http.GetFromJsonAsync<RunDto>($"/runs/{runId}", JsonOptions, cancellationToken);
+
+    public async Task<IReadOnlyList<RunDto>> ListActiveRunsAsync(CancellationToken cancellationToken = default) =>
+        await _http.GetFromJsonAsync<List<RunDto>>("/runs", JsonOptions, cancellationToken) ?? [];
+
     public Task<RunDto?> SteerRunAsync(string runId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default) =>
         PostAsync<RunDto>($"/runs/{runId}/steer", new { content, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
 
@@ -551,14 +558,16 @@ public sealed class DaemonClient
     public Task<AppSettingsDto?> UpdateSettingsAsync(string permissionProfile, string approvalPolicy, string model, string reasoningEffort = "", string approvalsReviewer = "user", CancellationToken cancellationToken = default) =>
         PatchAsync<AppSettingsDto>("/settings", new { permissionProfile, approvalPolicy, approvalsReviewer, model, reasoningEffort }, cancellationToken);
 
-    public async IAsyncEnumerable<SseEvent> StreamRunEventsAsync(string runId, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    public async IAsyncEnumerable<SseEvent> StreamRunEventsAsync(string runId, long? afterSequence = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        using var response = await _http.GetAsync($"/runs/{runId}/events", HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        var path = afterSequence is null ? $"/runs/{runId}/events" : $"/runs/{runId}/events?after={afterSequence.Value}";
+        using var response = await _http.GetAsync(path, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var reader = new StreamReader(stream, Encoding.UTF8);
         string? eventName = null;
         string? data = null;
+        long eventSequence = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
             var line = await reader.ReadLineAsync(cancellationToken);
@@ -570,13 +579,18 @@ public sealed class DaemonClient
             {
                 if (eventName is not null && data is not null)
                 {
-                    yield return new SseEvent(eventName, data);
+                    yield return new SseEvent(eventName, data, eventSequence);
                 }
                 eventName = null;
                 data = null;
+                eventSequence = 0;
                 continue;
             }
-            if (line.StartsWith("event: ", StringComparison.Ordinal))
+            if (line.StartsWith("id: ", StringComparison.Ordinal))
+            {
+                long.TryParse(line[4..], NumberStyles.Integer, CultureInfo.InvariantCulture, out eventSequence);
+            }
+            else if (line.StartsWith("event: ", StringComparison.Ordinal))
             {
                 eventName = line[7..];
             }

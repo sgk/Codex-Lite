@@ -26,20 +26,30 @@ class EventHub:
     def __init__(self) -> None:
         self._subscribers: dict[str, list[asyncio.Queue[dict]]] = {}
         self._history: dict[str, list[dict]] = {}
+        self._sequences: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
     async def publish(self, run_id: str, event: str, data: dict) -> None:
-        payload = {"event": event, "data": data}
         async with self._lock:
+            sequence = self._sequences.get(run_id, 0) + 1
+            self._sequences[run_id] = sequence
+            payload = {"event": event, "data": data, "sequence": sequence}
             self._history.setdefault(run_id, []).append(payload)
             subscribers = list(self._subscribers.get(run_id, []))
         for queue in subscribers:
             await queue.put(payload)
 
-    async def subscribe(self, run_id: str) -> AsyncIterator[dict]:
+    def current_sequence(self, run_id: str) -> int:
+        return self._sequences.get(run_id, 0)
+
+    async def subscribe(self, run_id: str, after_sequence: int | None = None) -> AsyncIterator[dict]:
         queue: asyncio.Queue[dict] = asyncio.Queue()
         async with self._lock:
-            history = list(self._history.get(run_id, []))
+            history = [
+                item
+                for item in self._history.get(run_id, [])
+                if after_sequence is None or int(item.get("sequence") or 0) > after_sequence
+            ]
             self._subscribers.setdefault(run_id, []).append(queue)
         try:
             for item in history:
@@ -83,7 +93,7 @@ class RunService:
         rows = self.db.fetchall("SELECT id FROM runs WHERE status IN ('queued', 'running')")
         for row in rows:
             self.db.execute(
-                "UPDATE runs SET status = 'failed', finished_at = ?, error = ? WHERE id = ?",
+                "UPDATE runs SET status = 'failed', finished_at = ?, error = ?, watcher_state = 'stopped', terminal_reason = 'daemon_restarted', revision = revision + 1 WHERE id = ?",
                 (now, "daemon started while this run was not completed", row["id"]),
             )
 

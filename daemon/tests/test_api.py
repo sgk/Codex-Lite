@@ -2270,6 +2270,87 @@ async def test_app_server_idle_state_recovers_missing_completed_notification(lin
 
 
 @pytest.mark.asyncio
+async def test_app_server_reconcile_failure_keeps_watcher_alive(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_services, "REASONING_PROGRESS_BATCH_SECONDS", 0.005)
+    monkeypatch.setattr(app_services, "RUN_STATE_RECONCILE_SECONDS", 0.01)
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = FlakyReadAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings(), db=db)  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+    await asyncio.sleep(0.04)
+
+    active = runs.get_run(result["runId"])
+    assert active["status"] == "running"
+    assert active["watcherAlive"] is True
+    assert active["lastReconcileError"] == "temporary thread/read failure"
+    assert db.fetchone("SELECT status, watcher_state FROM runs WHERE id = ?", (result["runId"],)) == {
+        "status": "running",
+        "watcher_state": "watching",
+    }
+
+    await app_server.subscribers[-1].put(
+        AppServerNotification(
+            "turn/completed",
+            {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "completed"}},
+        )
+    )
+    await asyncio.sleep(0)
+
+    finished = db.fetchone("SELECT status, terminal_reason FROM runs WHERE id = ?", (result["runId"],))
+    assert finished == {"status": "succeeded", "terminal_reason": "turn_completed:completed"}
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_app_server_event_reconnect_starts_after_snapshot(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = TurnStartAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+    snapshot = runs.get_run(result["runId"])["eventSequence"]
+    await app_server.subscribers[-1].put(
+        AppServerNotification(
+            "item/started",
+            {"threadId": "thread_1", "turnId": "turn_1", "item": {"id": "item_1", "type": "commandExecution"}},
+        )
+    )
+
+    events = []
+    async for event in runs.stream_events(result["runId"], after_sequence=snapshot):
+        events.append(event)
+        break
+
+    assert len(events) == 1
+    assert "event: progress" in events[0]
+    assert "event: status" not in events[0]
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_agent_message_boundary_is_published(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
@@ -3594,6 +3675,23 @@ class IdleReadAppServer(TurnStartAppServer):
             return {"turn": {"id": "turn_1"}}
         if method == "thread/read":
             return {"thread": {"id": params["threadId"], "status": {"type": "idle"}}}
+        return {}
+
+
+class FlakyReadAppServer(TurnStartAppServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_count = 0
+
+    async def request(self, method: str, params: dict) -> dict:
+        self.requests.append((method, params))
+        if method == "turn/start":
+            return {"turn": {"id": "turn_1"}}
+        if method == "thread/read":
+            self.read_count += 1
+            if self.read_count == 1:
+                raise RuntimeError("temporary thread/read failure")
+            return {"thread": {"id": params["threadId"], "status": {"type": "active"}}}
         return {}
 
 

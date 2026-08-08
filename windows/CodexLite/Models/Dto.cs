@@ -222,7 +222,27 @@ public sealed record RunDto(
     string? StartedAt,
     string? FinishedAt,
     string? LogPath,
-    string? Error);
+    string? Error,
+    string? ThreadId = null,
+    string? TurnId = null,
+    string? Provider = null,
+    bool WatcherAlive = false,
+    string? LastNotificationAt = null,
+    string? LastNotificationMethod = null,
+    string? LastReconcileAt = null,
+    string? LastThreadStatus = null,
+    string? LastReconcileError = null,
+    string? TerminalReason = null,
+    long Revision = 0,
+    long EventSequence = 0,
+    IReadOnlyList<PendingApprovalDto>? PendingApprovals = null);
+
+public sealed record PendingApprovalDto(
+    string RequestId,
+    string Method,
+    string? Reason,
+    string? Command,
+    string? Cwd);
 
 public sealed record MessagePostResult(string MessageId, string RunId);
 
@@ -248,7 +268,7 @@ public sealed record ErrorEnvelope(ErrorBody Error);
 
 public sealed record ErrorBody(string Code, string Message, object? Details);
 
-public sealed record SseEvent(string Event, string Data);
+public sealed record SseEvent(string Event, string Data, long Sequence = 0);
 
 public sealed record AppSettingsDto(
     string PermissionProfile,

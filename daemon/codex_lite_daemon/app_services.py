@@ -13,6 +13,7 @@ from typing import Any
 
 from .app_server import SERVER_REQUEST_ID_KEY, AppServerClient, AppServerNotification
 from .deepseek import DEEPSEEK_PROVIDER, model_provider_for_model, read_deepseek_balance
+from .db import Database
 from .errors import AppError
 from .provider_context import PROVIDER_CONTEXT_PREFIX
 from .run_service import EventHub
@@ -375,6 +376,15 @@ class AppServerActiveRun:
     lease_released: bool = False
     replacing_idle_turn: bool = False
     pending_approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
+    watcher_alive: bool = False
+    last_notification_at: str | None = None
+    last_notification_method: str | None = None
+    last_reconcile_at: str | None = None
+    last_thread_status: str | None = None
+    last_reconcile_error: str | None = None
+    terminal_reason: str | None = None
+    revision: int = 0
+    last_persisted_at_monotonic: float = 0.0
 
 
 def _app_server_for_provider(app_server: Any, provider: str) -> Any:
@@ -432,7 +442,7 @@ async def _release_run_lease(app_server: Any) -> None:
 
 
 class AppServerRunService:
-    def __init__(self, projects: ProjectService, threads: AppServerThreadService, messages: MessageService, app_server: AppServerClient, max_concurrent_runs: int, settings: AppServerRuntimeSettings) -> None:
+    def __init__(self, projects: ProjectService, threads: AppServerThreadService, messages: MessageService, app_server: AppServerClient, max_concurrent_runs: int, settings: AppServerRuntimeSettings, db: Database | None = None) -> None:
         self.projects = projects
         self.threads = threads
         self.chats = threads.chats
@@ -440,6 +450,7 @@ class AppServerRunService:
         self.app_server = app_server
         self.max_concurrent_runs = max_concurrent_runs
         self.settings = settings
+        self.db = db
         self.runs: dict[str, AppServerActiveRun] = {}
         self.events = EventHub()
 
@@ -464,12 +475,18 @@ class AppServerRunService:
         prior_context = await self.threads.context_for_provider(project_id, chat_id, provider, exclude_content=content)
         provider_rows_before = self.chats.list_provider_threads(project_id, chat_id)
         last_provider = _latest_provider(provider_rows_before)
-        user_message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
+        self._insert_run_row(run_id, chat_id)
+        try:
+            user_message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
+        except Exception as exc:
+            self._finish_run_row(run_id, "failed", str(exc), "user_message_store_failed")
+            raise
         _acquire_run_lease(app_server)
         try:
             await app_server.ensure_started()
-        except Exception:
+        except Exception as exc:
             await _release_run_lease(app_server)
+            self._finish_run_row(run_id, "failed", str(exc), "app_server_start_failed")
             raise
         notification_queue = app_server.subscribe_queue()
         try:
@@ -502,16 +519,19 @@ class AppServerRunService:
             if thread_id != str(provider_thread["thread_id"]):
                 self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=bool(provider_thread.get("history_initialized")))
             self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=True)
-        except Exception:
+        except Exception as exc:
             app_server.unsubscribe_queue(notification_queue)
             await _release_run_lease(app_server)
+            self._finish_run_row(run_id, "failed", str(exc))
             raise
         turn_id = _turn_id_from_response(response)
         if not turn_id:
             app_server.unsubscribe_queue(notification_queue)
             await _release_run_lease(app_server)
+            self._finish_run_row(run_id, "failed", "turn/start did not return a turn id.")
             raise AppError("app_server_error", "turn/start did not return a turn id.", 502)
         self.runs[run_id] = AppServerActiveRun(thread_id, turn_id, chat_id, provider=provider, started_at=utc_now())
+        self._start_run_row(run_id, thread_id, turn_id, provider)
         await self.events.publish(run_id, "status", {"status": "running"})
         asyncio.create_task(self._watch_run(run_id, notification_queue, app_server))
         return {"messageId": user_message["id"], "runId": run_id}
@@ -563,7 +583,7 @@ class AppServerRunService:
         run = self.runs.get(run_id)
         if run is None:
             raise AppError("run_not_found", "Run was not found.", 404)
-        return _run_out(run_id, run)
+        return _run_out(run_id, run) | {"eventSequence": self.events.current_sequence(run_id)}
 
     def list_run_diagnostics(self) -> list[dict[str, Any]]:
         return [
@@ -580,6 +600,14 @@ class AppServerRunService:
                 "reconnectCount": run.reconnect_count,
                 "lastReconnectAt": run.last_reconnect_at,
                 "lastReconnectMessage": run.last_reconnect_message,
+                "watcherAlive": run.watcher_alive,
+                "lastNotificationAt": run.last_notification_at,
+                "lastNotificationMethod": run.last_notification_method,
+                "lastReconcileAt": run.last_reconcile_at,
+                "lastThreadStatus": run.last_thread_status,
+                "lastReconcileError": run.last_reconcile_error,
+                "terminalReason": run.terminal_reason,
+                "revision": run.revision,
                 "pendingApprovals": [
                     {
                         "requestId": request_id,
@@ -591,6 +619,94 @@ class AppServerRunService:
             }
             for run_id, run in self.runs.items()
         ]
+
+    def list_active_runs(self) -> list[dict[str, Any]]:
+        return [
+            _run_out(run_id, run) | {"eventSequence": self.events.current_sequence(run_id)}
+            for run_id, run in self.runs.items()
+            if run.status == "running"
+        ]
+
+    def list_recent_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        live = {item["id"]: item for item in self.list_run_diagnostics()}
+        if self.db is None:
+            return list(live.values())[-limit:]
+        rows = self.db.fetchall(
+            "SELECT * FROM runs ORDER BY COALESCE(started_at, finished_at, '') DESC LIMIT ?",
+            (limit,),
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            run_id = str(row["id"])
+            if run_id in live:
+                result.append(live[run_id])
+                continue
+            result.append(
+                {
+                    "id": run_id,
+                    "chatId": row["chat_id"],
+                    "threadId": row.get("thread_id"),
+                    "turnId": row.get("turn_id"),
+                    "provider": row.get("provider"),
+                    "status": row["status"],
+                    "startedAt": row["started_at"],
+                    "finishedAt": row["finished_at"],
+                    "error": row["error"],
+                    "watcherAlive": row.get("watcher_state") == "watching",
+                    "lastNotificationAt": row.get("last_event_at"),
+                    "lastNotificationMethod": row.get("last_event_method"),
+                    "lastThreadStatus": row.get("last_thread_status"),
+                    "lastReconcileError": row.get("last_reconcile_error"),
+                    "terminalReason": row.get("terminal_reason"),
+                    "revision": row.get("revision") or 0,
+                }
+            )
+        return result
+
+    def _insert_run_row(self, run_id: str, chat_id: str) -> None:
+        if self.db is None:
+            return
+        self.db.execute(
+            "INSERT INTO runs(id, chat_id, status, pid, exit_code, started_at, finished_at, log_path, error, provider, thread_id, turn_id, last_event_at, last_event_method, watcher_state, terminal_reason, revision) VALUES (?, ?, 'queued', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'starting', NULL, 0)",
+            (run_id, chat_id),
+        )
+
+    def _start_run_row(self, run_id: str, thread_id: str, turn_id: str, provider: str) -> None:
+        if self.db is None:
+            return
+        self.db.execute(
+            "UPDATE runs SET status = 'running', started_at = ?, provider = ?, thread_id = ?, turn_id = ?, watcher_state = 'starting', revision = revision + 1 WHERE id = ?",
+            (utc_now(), provider, thread_id, turn_id, run_id),
+        )
+
+    def _record_run_activity(self, run_id: str, run: AppServerActiveRun, force: bool = False) -> None:
+        if self.db is None:
+            return
+        now = time.monotonic()
+        if not force and now - run.last_persisted_at_monotonic < 1.0:
+            return
+        run.last_persisted_at_monotonic = now
+        self.db.execute(
+            "UPDATE runs SET last_event_at = ?, last_event_method = ?, watcher_state = ?, terminal_reason = ?, last_thread_status = ?, last_reconcile_error = ?, revision = ? WHERE id = ?",
+            (
+                run.last_notification_at or run.last_reconcile_at,
+                run.last_notification_method,
+                "watching" if run.watcher_alive else "stopped",
+                run.terminal_reason,
+                run.last_thread_status,
+                run.last_reconcile_error,
+                run.revision,
+                run_id,
+            ),
+        )
+
+    def _finish_run_row(self, run_id: str, status: str, error: str | None = None, reason: str | None = None) -> None:
+        if self.db is None:
+            return
+        self.db.execute(
+            "UPDATE runs SET status = ?, exit_code = ?, finished_at = ?, error = ?, watcher_state = 'stopped', terminal_reason = ?, revision = revision + 1 WHERE id = ?",
+            (status, 0 if status == "succeeded" else None, utc_now(), error, reason, run_id),
+        )
 
     async def cancel_run(self, run_id: str) -> dict:
         run = self.runs.get(run_id)
@@ -622,7 +738,10 @@ class AppServerRunService:
     async def _finish_cancelled_run(self, run_id: str, run: AppServerActiveRun) -> None:
         run.status = "cancelled"
         run.finished_at = utc_now()
+        run.terminal_reason = "cancelled"
+        run.revision += 1
         self.chats.touch_provider_thread(run.chat_id, run.provider)
+        self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
         await self._release_run_lease(run)
         await self.events.publish(run_id, "done", {"status": "cancelled", "exitCode": None})
 
@@ -679,10 +798,19 @@ class AppServerRunService:
                 if not turn_id:
                     raise AppError("app_server_error", "turn/start did not return a turn id.", 502)
                 run.turn_id = turn_id
+                run.revision += 1
+                if self.db is not None:
+                    self.db.execute(
+                        "UPDATE runs SET turn_id = ?, revision = ? WHERE id = ?",
+                        (turn_id, run.revision, run_id),
+                    )
             except Exception as start_exc:
                 run.status = "failed"
                 run.error = str(start_exc)
                 run.finished_at = utc_now()
+                run.terminal_reason = "replacement_turn_start_failed"
+                run.revision += 1
+                self._finish_run_row(run_id, run.status, run.error, run.terminal_reason)
                 await self.events.publish(run_id, "error", {"code": "app_server_error", "message": run.error})
                 raise
             finally:
@@ -727,14 +855,17 @@ class AppServerRunService:
         )
         return _run_out(run_id, run)
 
-    async def stream_events(self, run_id: str) -> AsyncIterator[str]:
+    async def stream_events(self, run_id: str, after_sequence: int | None = None) -> AsyncIterator[str]:
         if run_id not in self.runs:
             raise AppError("run_not_found", "Run was not found.", 404)
-        async for item in self.events.subscribe(run_id):
-            yield f"event: {item['event']}\ndata: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
+        async for item in self.events.subscribe(run_id, after_sequence=after_sequence):
+            yield f"id: {item['sequence']}\nevent: {item['event']}\ndata: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
 
     async def _watch_run(self, run_id: str, notification_queue: asyncio.Queue[AppServerNotification], app_server: Any) -> None:
         run = self.runs[run_id]
+        run.watcher_alive = True
+        run.revision += 1
+        self._record_run_activity(run_id, run, force=True)
         final_answer_parts_by_item: dict[str, list[str]] = {}
         agent_message_phases: dict[str, str] = {}
         pending_agent_message_parts: dict[str, list[str]] = {}
@@ -833,18 +964,40 @@ class AppServerRunService:
                     now = time.monotonic()
                     if now - last_state_reconcile >= RUN_STATE_RECONCILE_SECONDS:
                         last_state_reconcile = now
-                        response = await app_server.request("thread/read", {"threadId": run.thread_id})
-                        thread = response.get("thread") or {}
-                        status = thread.get("status") if isinstance(thread, dict) else None
-                        status_type = status.get("type") if isinstance(status, dict) else None
+                        run.last_reconcile_at = utc_now()
+                        run.revision += 1
+                        try:
+                            response = await app_server.request("thread/read", {"threadId": run.thread_id})
+                            thread = response.get("thread") or {}
+                            status = thread.get("status") if isinstance(thread, dict) else None
+                            status_type = status.get("type") if isinstance(status, dict) else None
+                            run.last_thread_status = str(status_type or "unknown")
+                        except Exception as exc:
+                            # A transient status probe failure must not detach the
+                            # watcher while app-server may still be processing.
+                            run.last_reconcile_error = str(exc)
+                            self._record_run_activity(run_id, run, force=True)
+                            await self.events.publish(
+                                run_id,
+                                "progress",
+                                {
+                                    "method": "app_server/state_reconcile_failed",
+                                    "summary": "app-serverの実行状態を再確認できません。監視を継続します。",
+                                },
+                            )
+                            continue
+                        self._record_run_activity(run_id, run, force=True)
                         if status_type == "idle" and not run.replacing_idle_turn:
                             await flush_all_pending_agent_output()
                             run.status = "succeeded"
                             run.finished_at = utc_now()
+                            run.terminal_reason = "thread_idle_reconciled"
+                            run.revision += 1
                             self.chats.touch_provider_thread(run.chat_id, run.provider)
                             final_answer = final_answer_text()
                             if final_answer:
                                 self.messages.insert_message(run.chat_id, "assistant", final_answer, run_id=run_id, kind="conclusion")
+                            self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
                             await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0})
                             return
                     continue
@@ -854,7 +1007,10 @@ class AppServerRunService:
                     run.status = "failed"
                     run.error = str(notification.params.get("message") or "Codex app-server exited.")
                     run.finished_at = utc_now()
+                    run.terminal_reason = "app_server_exited"
+                    run.revision += 1
                     self.chats.touch_provider_thread(run.chat_id, run.provider)
+                    self._finish_run_row(run_id, run.status, run.error, run.terminal_reason)
                     await self.events.publish(run_id, "error", {"code": "app_server_closed", "message": run.error})
                     return
                 if notification.method == "serverRequest/resolved" and notification.params.get("threadId") == run.thread_id:
@@ -872,6 +1028,10 @@ class AppServerRunService:
                     continue
                 if not _notification_matches(notification, run):
                     continue
+                run.last_notification_at = utc_now()
+                run.last_notification_method = notification.method
+                run.revision += 1
+                self._record_run_activity(run_id, run)
                 if run.status != "running":
                     return
                 if notification.method == "turn/completed" and run.replacing_idle_turn:
@@ -887,7 +1047,10 @@ class AppServerRunService:
                         run.status = "failed"
                         run.error = message
                         run.finished_at = utc_now()
+                        run.terminal_reason = "unsupported_server_request"
+                        run.revision += 1
                         self.chats.touch_provider_thread(run.chat_id, run.provider)
+                        self._finish_run_row(run_id, run.status, run.error, run.terminal_reason)
                         await self.events.publish(run_id, "error", {"code": "unsupported_server_request", "message": message})
                         return
                     approval = {
@@ -895,6 +1058,9 @@ class AppServerRunService:
                         "method": notification.method,
                         "itemId": notification.params.get("itemId"),
                         "availableDecisions": notification.params.get("availableDecisions"),
+                        "reason": notification.params.get("reason"),
+                        "command": _approval_command(notification.params.get("command")),
+                        "cwd": notification.params.get("cwd"),
                     }
                     run.pending_approvals[request_id] = approval
                     await self.events.publish(
@@ -1004,13 +1170,16 @@ class AppServerRunService:
                 elif notification.method == "turn/completed":
                     await flush_all_pending_agent_output()
                     turn = notification.params.get("turn") or {}
-                    status = str(turn.get("status") or "succeeded")
-                    run.status = "succeeded" if status == "completed" else status
+                    turn_status = str(turn.get("status") or "completed")
+                    run.status = "succeeded" if turn_status == "completed" else "cancelled" if turn_status in {"cancelled", "interrupted"} else "failed"
                     run.finished_at = utc_now()
+                    run.terminal_reason = f"turn_completed:{turn_status}"
+                    run.revision += 1
                     self.chats.touch_provider_thread(run.chat_id, run.provider)
                     final_answer = final_answer_text()
                     if final_answer:
                         self.messages.insert_message(run.chat_id, "assistant", final_answer, run_id=run_id, kind="conclusion")
+                    self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
                     await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
                     return
                 elif notification.method == "error":
@@ -1032,7 +1201,10 @@ class AppServerRunService:
                     await flush_all_pending_agent_output()
                     run.error = str(notification.params)
                     run.finished_at = utc_now()
+                    run.terminal_reason = "app_server_error"
+                    run.revision += 1
                     self.chats.touch_provider_thread(run.chat_id, run.provider)
+                    self._finish_run_row(run_id, run.status, run.error, run.terminal_reason)
                     await self.events.publish(run_id, "error", {"code": "app_server_error", "message": run.error})
                     return
         except Exception as exc:
@@ -1041,9 +1213,15 @@ class AppServerRunService:
             run.status = "failed"
             run.error = str(exc)
             run.finished_at = utc_now()
+            run.terminal_reason = "watcher_exception"
+            run.revision += 1
             self.chats.touch_provider_thread(run.chat_id, run.provider)
+            self._finish_run_row(run_id, run.status, run.error, run.terminal_reason)
             await self.events.publish(run_id, "error", {"code": "app_server_run_failed", "message": str(exc)})
         finally:
+            run.watcher_alive = False
+            run.revision += 1
+            self._record_run_activity(run_id, run, force=True)
             if run.status != "running":
                 run.pending_approvals.clear()
             app_server.unsubscribe_queue(notification_queue)
@@ -1659,6 +1837,24 @@ def _run_out(run_id: str, run: AppServerActiveRun) -> dict:
         "reconnectCount": run.reconnect_count,
         "lastReconnectAt": run.last_reconnect_at,
         "lastReconnectMessage": run.last_reconnect_message,
+        "watcherAlive": run.watcher_alive,
+        "lastNotificationAt": run.last_notification_at,
+        "lastNotificationMethod": run.last_notification_method,
+        "lastReconcileAt": run.last_reconcile_at,
+        "lastThreadStatus": run.last_thread_status,
+        "lastReconcileError": run.last_reconcile_error,
+        "terminalReason": run.terminal_reason,
+        "revision": run.revision,
+        "pendingApprovals": [
+            {
+                "requestId": request_id,
+                "method": approval.get("method"),
+                "reason": approval.get("reason"),
+                "command": approval.get("command"),
+                "cwd": approval.get("cwd"),
+            }
+            for request_id, approval in run.pending_approvals.items()
+        ],
     }
 
 

@@ -82,7 +82,17 @@ CREATE TABLE IF NOT EXISTS runs (
   started_at TEXT,
   finished_at TEXT,
   log_path TEXT,
-  error TEXT
+  error TEXT,
+  provider TEXT,
+  thread_id TEXT,
+  turn_id TEXT,
+  last_event_at TEXT,
+  last_event_method TEXT,
+  watcher_state TEXT,
+  terminal_reason TEXT,
+  last_thread_status TEXT,
+  last_reconcile_error TEXT,
+  revision INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS automations (
@@ -147,6 +157,21 @@ class Database:
             if "kind" not in message_columns:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'conclusion'")
                 self._conn.execute("UPDATE messages SET kind = 'instruction' WHERE role = 'user'")
+            run_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()}
+            for name, declaration in {
+                "provider": "TEXT",
+                "thread_id": "TEXT",
+                "turn_id": "TEXT",
+                "last_event_at": "TEXT",
+                "last_event_method": "TEXT",
+                "watcher_state": "TEXT",
+                "terminal_reason": "TEXT",
+                "last_thread_status": "TEXT",
+                "last_reconcile_error": "TEXT",
+                "revision": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if name not in run_columns:
+                    self._conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {declaration}")
             automation_sql_row = self._conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'automations'"
             ).fetchone()

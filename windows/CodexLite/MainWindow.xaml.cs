@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
@@ -100,6 +101,7 @@ public partial class MainWindow : Window
     private string _codexHomeMode = DefaultCodexHomeMode();
     private bool _wrapFileText;
     private readonly Dictionary<string, ActiveUiRun> _activeRunsByChat = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _lastRunEventSequenceByRun = new(StringComparer.Ordinal);
     private readonly HashSet<string> _cancellingRunChatIds = new(StringComparer.Ordinal);
     private CancellationTokenSource? _usageCapacityCts;
     private DateTimeOffset _nextBackgroundMessagePollAt = DateTimeOffset.MinValue;
@@ -141,6 +143,7 @@ public partial class MainWindow : Window
     private bool _isRestoringMessageScrollOffset;
     private bool _pendingMessageScrollOffsetRestore;
     private bool _isCheckingDaemonHealth;
+    private bool _isReconcilingRuns;
     private bool _isDaemonHttpReady;
     private bool _isSendTransportReady;
     private bool _isPreparingSendTransport;
@@ -252,6 +255,7 @@ public partial class MainWindow : Window
                     _isDaemonHttpReady = true;
                     RefreshSendTransportReadiness();
                 }
+                await ReconcileActiveRunsAsync();
                 return;
             }
 
@@ -269,6 +273,7 @@ public partial class MainWindow : Window
             StatusText.Text = "daemon restarted";
             await RefreshProjectsAfterDaemonRestartAsync();
             await RefreshDiagnosticsAsync();
+            await ReconcileActiveRunsAsync();
             RefreshSendTransportReadiness();
         }
         catch (Exception ex)
@@ -280,6 +285,220 @@ public partial class MainWindow : Window
         {
             _isCheckingDaemonHealth = false;
         }
+    }
+
+    private async Task ReconcileActiveRunsAsync()
+    {
+        if (_isClosing || _isReconcilingRuns || !_isDaemonHttpReady)
+        {
+            return;
+        }
+
+        _isReconcilingRuns = true;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            var daemonRuns = (await _client.ListActiveRunsAsync(timeout.Token))
+                .Where(run => run.Status.Equals("running", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            var daemonRunIds = daemonRuns.Select(run => run.Id).ToHashSet(StringComparer.Ordinal);
+
+            foreach (var localRun in _activeRunsByChat.Values.ToArray())
+            {
+                if (daemonRunIds.Contains(localRun.RunId))
+                {
+                    continue;
+                }
+                try
+                {
+                    using var stateTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                    var terminalRun = await _client.GetRunAsync(localRun.RunId, stateTimeout.Token);
+                    if (terminalRun is not null)
+                    {
+                        WritePerformanceLog(
+                            "run-state-terminal-event-pending",
+                            $"chatId={LogText(localRun.ChatId)} runId={LogText(localRun.RunId)} status={LogText(terminalRun.Status)} action=keep-stream");
+                        continue;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    WritePerformanceLog(
+                        "run-state-lookup-missing",
+                        $"chatId={LogText(localRun.ChatId)} runId={LogText(localRun.RunId)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+                }
+                WritePerformanceLog(
+                    "run-state-mismatch-ui-only",
+                    $"chatId={LogText(localRun.ChatId)} runId={LogText(localRun.RunId)} action=cancel-local-stream");
+                _lastRunEventSequenceByRun.Remove(localRun.RunId);
+                localRun.Cancellation.Cancel();
+                ShowRunProgressForChat(localRun.ChatId, "実行状態を再同期中 | daemonに実行なし");
+            }
+
+            foreach (var daemonRun in daemonRuns)
+            {
+                if (_activeRunsByChat.Values.Any(run => run.RunId == daemonRun.Id))
+                {
+                    continue;
+                }
+                if (_isPreparingSend && _selectedChat?.Id == daemonRun.ChatId)
+                {
+                    continue;
+                }
+                var projectId = ProjectIdForChat(daemonRun.ChatId);
+                if (string.IsNullOrWhiteSpace(projectId))
+                {
+                    WritePerformanceLog(
+                        "run-state-mismatch-daemon-only",
+                        $"chatId={LogText(daemonRun.ChatId)} runId={LogText(daemonRun.Id)} action=defer-project-unknown");
+                    continue;
+                }
+
+                WritePerformanceLog(
+                    "run-state-mismatch-daemon-only",
+                    $"chatId={LogText(daemonRun.ChatId)} runId={LogText(daemonRun.Id)} action=reconnect-stream");
+                var runCts = new CancellationTokenSource();
+                _activeRunsByChat[daemonRun.ChatId] = new ActiveUiRun(daemonRun.Id, projectId, daemonRun.ChatId, runCts);
+                ShowRunProgressForChat(daemonRun.ChatId, "途中経過の配信へ再接続中");
+                UpdateChatRunningIndicator(daemonRun.ChatId);
+                UpdateCommandButtonState();
+                var afterSequence = _lastRunEventSequenceByRun.TryGetValue(daemonRun.Id, out var lastSequence)
+                    ? lastSequence
+                    : daemonRun.EventSequence;
+                _ = TrackRecoveredRunAsync(daemonRun, afterSequence, runCts.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            WritePerformanceLog("run-state-reconcile-timeout", "timeoutSeconds=3");
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog(
+                "run-state-reconcile-error",
+                $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+        }
+        finally
+        {
+            _isReconcilingRuns = false;
+        }
+    }
+
+    private async Task TrackRecoveredRunAsync(RunDto run, long afterSequence, CancellationToken cancellationToken)
+    {
+        BeginRunActivity(run.ChatId, "途中経過の配信へ再接続中...");
+        var terminalReceived = false;
+        try
+        {
+            foreach (var approval in run.PendingApprovals ?? [])
+            {
+                var approvalData = JsonSerializer.Serialize(
+                    new
+                    {
+                        requestId = approval.RequestId,
+                        method = approval.Method,
+                        reason = approval.Reason,
+                        command = approval.Command,
+                        cwd = approval.Cwd,
+                    },
+                    _json);
+                await HandleApprovalEventAsync(run.ChatId, run.Id, approvalData, cancellationToken);
+            }
+            await foreach (var item in _client.StreamRunEventsAsync(run.Id, afterSequence, cancellationToken))
+            {
+                if (item.Sequence > 0)
+                {
+                    _lastRunEventSequenceByRun[run.Id] = item.Sequence;
+                }
+                if (item.Event == "progress")
+                {
+                    var progress = ExtractSseText(item.Data);
+                    var method = ExtractSseString(item.Data, "method");
+                    if (IsDisplayableProgress(progress) && !IsLowLevelDeltaProgress(method, progress))
+                    {
+                        ShowRunProgressForChat(run.ChatId, $"再接続済み | {progress}");
+                        if (_selectedChat?.Id == run.ChatId)
+                        {
+                            AddRunProgress(progress, ProgressCategory(method, progress));
+                        }
+                    }
+                }
+                else if (item.Event == "output")
+                {
+                    ShowRunProgressForChat(run.ChatId, "再接続済み | 応答を受信中");
+                }
+                else if (item.Event == "approval")
+                {
+                    await HandleApprovalEventAsync(run.ChatId, run.Id, item.Data, cancellationToken);
+                }
+                else if (item.Event is "done" or "error")
+                {
+                    terminalReceived = true;
+                    StatusText.Text = item.Event == "done" ? "応答完了 | 再接続済み" : "応答エラー | 再接続済み";
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog(
+                "recovered-run-stream-error",
+                $"chatId={LogText(run.ChatId)} runId={LogText(run.Id)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+            ShowRunProgressForChat(run.ChatId, $"途中経過の配信切断 | {ShortError(ex)}");
+        }
+        finally
+        {
+            if (_activeRunsByChat.TryGetValue(run.ChatId, out var activeRun) && activeRun.RunId == run.Id)
+            {
+                _activeRunsByChat.Remove(run.ChatId);
+                activeRun.Cancellation.Dispose();
+            }
+            EndRunActivity(run.ChatId);
+            UpdateChatRunningIndicator(run.ChatId);
+            UpdateCommandButtonState();
+            if (terminalReceived && _selectedChat?.Id == run.ChatId)
+            {
+                await RefreshMessagesAsync();
+            }
+            if (terminalReceived)
+            {
+                _lastRunEventSequenceByRun.Remove(run.Id);
+            }
+        }
+    }
+
+    private async Task HandleApprovalEventAsync(string chatId, string runId, string data, CancellationToken cancellationToken)
+    {
+        var requestId = ExtractSseString(data, "requestId");
+        var method = ExtractSseString(data, "method");
+        var reason = ExtractSseString(data, "reason");
+        var command = ExtractSseString(data, "command");
+        var cwd = ExtractSseString(data, "cwd");
+        WritePerformanceLog(
+            "approval-request",
+            $"runId={LogText(runId)} requestId={LogText(requestId)} method={LogText(method)}");
+        ShowRunProgressForChat(chatId, "承認待ち");
+        var result = System.Windows.MessageBox.Show(
+            this,
+            ApprovalPromptText(method, reason, command, cwd),
+            "Codexの承認要求",
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Question,
+            MessageBoxResult.Cancel);
+        var decision = result switch
+        {
+            MessageBoxResult.Yes => "accept",
+            MessageBoxResult.No => "decline",
+            _ => "cancel",
+        };
+        await _client.ResolveRunApprovalAsync(runId, requestId, decision, cancellationToken);
+        WritePerformanceLog(
+            "approval-response",
+            $"runId={LogText(runId)} requestId={LogText(requestId)} decision={LogText(decision)}");
+        ShowRunProgressForChat(chatId, decision == "accept" ? "承認済み" : "承認しませんでした");
     }
 
     private async void MainWindow_Closing(object? sender, CancelEventArgs e)
@@ -331,6 +550,7 @@ public partial class MainWindow : Window
                 await RefreshProjectsAsync();
                 SetBusyMessage("診断情報を読み込み中...");
                 await RefreshDiagnosticsAsync();
+                await ReconcileActiveRunsAsync();
                 StatusText.Text = "待機中 | daemon ok";
                 _messageRefreshTimer.Start();
                 _daemonHealthTimer.Start();
@@ -3478,6 +3698,7 @@ public partial class MainWindow : Window
     {
         await RunActivityAsync("診断情報を読み込み中...", async () =>
         {
+            await ReconcileActiveRunsAsync();
             var settings = await _client.GetSettingsAsync();
             if (settings is not null)
             {
@@ -3498,7 +3719,25 @@ public partial class MainWindow : Window
             var text = await _client.GetDiagnosticsJsonAsync();
             using var document = JsonDocument.Parse(text);
             UpdateDiagnosticsSummary(document.RootElement);
-            DiagnosticsBox.Text = JsonSerializer.Serialize(JsonSerializer.Deserialize<object>(text), _json);
+            var diagnostics = JsonNode.Parse(text)?.AsObject() ?? new JsonObject();
+            diagnostics["uiRunProjection"] = JsonSerializer.SerializeToNode(
+                new
+                {
+                    selectedProjectId = _selectedProject?.Id,
+                    selectedChatId = _selectedChat?.Id,
+                    trackedRuns = _activeRunsByChat.Values.Select(run => new
+                    {
+                        runId = run.RunId,
+                        projectId = run.ProjectId,
+                        chatId = run.ChatId,
+                    }),
+                    activityChats = _runActivityDepthByChat.ToDictionary(item => item.Key, item => item.Value),
+                    daemonHttpReady = _isDaemonHttpReady,
+                    sendTransportReady = _isSendTransportReady,
+                    statusText = StatusText.Text,
+                },
+                _json);
+            DiagnosticsBox.Text = diagnostics.ToJsonString(_json);
         });
     }
 
@@ -6069,6 +6308,7 @@ public partial class MainWindow : Window
         var receivedOutput = false;
         var receivedOutputChars = 0;
         var completed = false;
+        var reconnectAfterStreamLoss = false;
         heartbeat.Tick += (_, _) =>
         {
             var elapsed = DateTimeOffset.Now - startedAt;
@@ -6086,8 +6326,12 @@ public partial class MainWindow : Window
         heartbeat.Start();
         try
         {
-            await foreach (var item in _client.StreamRunEventsAsync(runId, cancellationToken))
+            await foreach (var item in _client.StreamRunEventsAsync(runId, cancellationToken: cancellationToken))
             {
+                if (item.Sequence > 0)
+                {
+                    _lastRunEventSequenceByRun[runId] = item.Sequence;
+                }
                 using var eventPhase = EnterUiPhase($"StreamRun/Event/{item.Event}");
                 lastEventAt = DateTimeOffset.Now;
                 lastEventName = item.Event;
@@ -6235,6 +6479,7 @@ public partial class MainWindow : Window
                         StatusText.Text = "応答エラー";
                         ShowRunProgressForChat(chatId, "エラー");
                     }
+                    _lastRunEventSequenceByRun.Remove(runId);
                     break;
                 }
             }
@@ -6245,9 +6490,33 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
-            ReplaceMessageContentIfWaiting(chatId, currentAssistantMessageId, $"stream error | {ShortError(ex)}");
-            ShowRunProgressForChat(chatId, $"ストリームエラー | {ShortError(ex)}");
-            throw;
+            try
+            {
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                var daemonRun = await _client.GetRunAsync(runId, timeout.Token);
+                reconnectAfterStreamLoss = daemonRun?.Status.Equals("running", StringComparison.OrdinalIgnoreCase) == true;
+            }
+            catch (Exception stateError)
+            {
+                WritePerformanceLog(
+                    "stream-state-check-error",
+                    $"runId={LogText(runId)} type={LogText(stateError.GetType().Name)} message={LogText(stateError.Message)}");
+            }
+            if (reconnectAfterStreamLoss)
+            {
+                WritePerformanceLog(
+                    "stream-lost-run-still-active",
+                    $"runId={LogText(runId)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+                ReplaceMessageContentIfWaiting(chatId, currentAssistantMessageId, "途中経過の配信が切れました。実行状態へ再接続しています...");
+                StatusText.Text = "途中経過の配信切断 | 実行は継続中";
+                ShowRunProgressForChat(chatId, "途中経過の配信へ再接続中");
+            }
+            else
+            {
+                ReplaceMessageContentIfWaiting(chatId, currentAssistantMessageId, $"stream error | {ShortError(ex)}");
+                ShowRunProgressForChat(chatId, $"ストリームエラー | {ShortError(ex)}");
+                throw;
+            }
         }
         finally
         {
@@ -6261,6 +6530,10 @@ public partial class MainWindow : Window
             UpdateCommandButtonState();
             EndRunActivity(chatId);
             HideRunProgressForChat(chatId);
+        }
+        if (reconnectAfterStreamLoss)
+        {
+            await ReconcileActiveRunsAsync();
         }
     }
 
