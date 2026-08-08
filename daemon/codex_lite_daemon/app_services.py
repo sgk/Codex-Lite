@@ -190,6 +190,14 @@ class AppServerThreadService:
                 for message in self._list_transcript_messages(project_id, project["path"], chat_id, session_id, chat.get("transcript_path"), "openai")
             ]
         all_local_messages = self.messages.list_messages(project_id, chat_id)
+        run_activity_messages, run_activity_windows = _persisted_run_activity_messages(self.messages.db, chat_id)
+        if run_activity_messages:
+            transcript_messages = [
+                message
+                for message in transcript_messages
+                if str(message.get("role") or "").lower() != "status"
+                or not _message_in_run_windows(message, run_activity_windows)
+            ]
         # Once Lite has executed a turn, its local user/assistant rows are the
         # provider-neutral visible history.  Do not expose a DeepSeek
         # synthetic context prompt or duplicate the alternate provider's
@@ -212,7 +220,7 @@ class AppServerThreadService:
                 for message in all_local_messages
                 if str(message.get("role") or "").lower() != "assistant"
             ]
-        return _merge_messages(transcript_messages, local_messages)
+        return _merge_messages(transcript_messages, [*local_messages, *run_activity_messages])
 
     def _list_transcript_messages(self, project_id: str, project_path: str, chat_id: str, session_id: str, transcript_path: Any, provider: str = "openai") -> list[dict]:
         saved_path = str(transcript_path) if transcript_path else None
@@ -1492,6 +1500,27 @@ def _turn_id_from_response(response: dict[str, Any]) -> str | None:
 def _notification_summary(notification: AppServerNotification) -> str:
     params = notification.params
     method = notification.method
+    item = params.get("item")
+    if isinstance(item, dict):
+        item_type = str(item.get("type") or "")
+        is_completed = method.endswith("/completed") or str(item.get("status") or "") == "completed"
+        if item_type == "commandExecution":
+            command = _command_text(item)
+            action = "コマンドを実行しました" if is_completed else "コマンドを実行中"
+            return f"{action}: {_short_text(command)}" if command else action
+        if item_type == "mcpToolCall":
+            server = str(item.get("server") or "").strip()
+            tool = str(item.get("tool") or "").strip()
+            name = ".".join(part for part in (server, tool) if part)
+            action = "ツールを実行しました" if is_completed else "ツールを実行中"
+            return f"{action}: {_short_text(name)}" if name else action
+        if item_type == "fileChange":
+            return "ファイルを編集しました" if is_completed else "ファイルを編集中"
+        if item_type == "imageView":
+            path = str(item.get("path") or "").strip()
+            return f"画像を確認しました: {_short_text(path)}" if path else "画像を確認しました"
+        if item_type == "autoApprovalReview":
+            return "自動承認の確認が完了しました" if is_completed else "自動承認を確認中"
     file_action = _file_action(method, params)
     if file_action is not None:
         active_text, completed_text, is_active = file_action
@@ -1523,7 +1552,6 @@ def _notification_summary(notification: AppServerNotification) -> str:
         value = params.get(key)
         if isinstance(value, str) and value:
             return value
-    item = params.get("item")
     if isinstance(item, dict):
         for key in ("title", "status", "name", "type"):
             value = item.get(key)
@@ -1535,6 +1563,22 @@ def _notification_summary(notification: AppServerNotification) -> str:
 def _notification_details(notification: AppServerNotification) -> str:
     params = notification.params
     method = notification.method
+    item = params.get("item")
+    if isinstance(item, dict) and item.get("type") == "commandExecution":
+        command = _command_text(item)
+        workdir = _first_string(item, ("workdir", "cwd"))
+        output = item.get("aggregatedOutput")
+        exit_code = item.get("exitCode")
+        lines: list[str] = []
+        if workdir:
+            lines.append(f"$ cd {workdir}")
+        if command:
+            lines.append(f"$ {command}")
+        if exit_code is not None:
+            lines.extend(["", f"exit: {exit_code}"])
+        if isinstance(output, str) and output:
+            lines.extend(["", _redact_sensitive(output.rstrip())])
+        return "\n".join(lines).strip()
     if method == "exec_command_begin":
         command = _command_text(params)
         workdir = _first_string(params, ("workdir", "cwd"))
@@ -1901,6 +1945,172 @@ def _chat_out(project_id: str, thread: dict[str, Any]) -> dict:
         "createdAt": _iso_from_epoch(thread.get("createdAt")),
         "updatedAt": _iso_from_epoch(thread.get("updatedAt") or thread.get("recencyAt") or thread.get("createdAt")),
     }
+
+
+def _persisted_run_activity_messages(db: Database, chat_id: str) -> tuple[list[dict], list[tuple[datetime, datetime]]]:
+    rows = db.fetchall(
+        """
+        SELECT re.run_id, re.sequence, re.data_json, re.created_at,
+               r.started_at, r.finished_at, r.status
+        FROM run_events re
+        JOIN runs r ON r.id = re.run_id
+        WHERE r.chat_id = ? AND re.event = 'progress'
+        ORDER BY re.created_at, re.run_id, re.sequence
+        """,
+        (chat_id,),
+    )
+    activities: dict[tuple[str, str], dict[str, Any]] = {}
+    windows_by_run: dict[str, tuple[datetime, datetime]] = {}
+    now = datetime.now(timezone.utc)
+
+    for row in rows:
+        run_id = str(row["run_id"])
+        created_at = str(row["created_at"] or "")
+        created = _parse_message_timestamp(created_at)
+        started = _parse_message_timestamp(str(row.get("started_at") or created_at))
+        finished_value = row.get("finished_at")
+        finished = _parse_message_timestamp(str(finished_value or created_at))
+        if str(row.get("status") or "") == "running":
+            finished = now
+        previous_window = windows_by_run.get(run_id)
+        if previous_window is None:
+            windows_by_run[run_id] = (started, max(finished, created))
+        else:
+            windows_by_run[run_id] = (min(previous_window[0], started), max(previous_window[1], finished, created))
+
+        try:
+            data = json.loads(str(row["data_json"]))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        method = str(data.get("method") or "")
+        summary = str(data.get("summary") or method).strip()
+        details_text = str(data.get("details") or "")
+        try:
+            details = json.loads(details_text) if details_text else {}
+        except json.JSONDecodeError:
+            details = {}
+        if not isinstance(details, dict):
+            details = {}
+
+        if _is_reasoning_delta_method(method):
+            item_id = str(details.get("itemId") or f"reasoning-{row['sequence']}")
+            delta = details.get("delta")
+            if not isinstance(delta, str) or not delta:
+                continue
+            key = (run_id, f"reasoning:{item_id}")
+            state = activities.setdefault(
+                key,
+                _activity_state(run_id, row, "推論", method),
+            )
+            state["detail_parts"].append(delta)
+            continue
+
+        item = details.get("item")
+        if isinstance(item, dict):
+            item_type = str(item.get("type") or "")
+            if item_type in {"agentMessage", "userMessage", "reasoning", "contextCompaction"}:
+                continue
+            item_id = str(item.get("id") or f"item-{row['sequence']}")
+            key = (run_id, f"item:{item_id}")
+            notification = AppServerNotification(method, details)
+            state = activities.setdefault(
+                key,
+                _activity_state(run_id, row, _notification_summary(notification), method),
+            )
+            state["summary"] = _notification_summary(notification)
+            state["method"] = method
+            rendered_details = _notification_details(notification)
+            if rendered_details:
+                state["base_details"] = rendered_details
+            continue
+
+        if method == "item/commandExecution/outputDelta":
+            item_id = str(details.get("itemId") or "command")
+            delta = details.get("delta")
+            if isinstance(delta, str) and delta:
+                key = (run_id, f"item:{item_id}")
+                state = activities.setdefault(
+                    key,
+                    _activity_state(run_id, row, "コマンド出力", method),
+                )
+                state["detail_parts"].append(delta)
+            continue
+
+        if not _is_history_activity_method(method, summary):
+            continue
+        key = (run_id, f"event:{row['sequence']}")
+        state = _activity_state(run_id, row, summary, method)
+        state["base_details"] = details_text
+        activities[key] = state
+
+    messages: list[dict] = []
+    for state in activities.values():
+        base_details = str(state.get("base_details") or "").rstrip()
+        streamed_details = "".join(state["detail_parts"]).rstrip()
+        if base_details and streamed_details and streamed_details not in base_details:
+            activity_details = f"{base_details}\n\n{streamed_details}"
+        else:
+            activity_details = base_details or streamed_details
+        messages.append(
+            {
+                "id": f"run-activity-{state['run_id']}-{state['first_sequence']}",
+                "chatId": chat_id,
+                "role": "status",
+                "content": state["summary"],
+                "runId": state["run_id"],
+                "createdAt": state["created_at"],
+                "kind": "status",
+                "activityDetails": activity_details,
+            }
+        )
+    messages.sort(key=_message_sort_key)
+    return messages, list(windows_by_run.values())
+
+
+def _activity_state(run_id: str, row: dict, summary: str, method: str) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "first_sequence": int(row["sequence"]),
+        "created_at": str(row["created_at"] or ""),
+        "summary": summary,
+        "method": method,
+        "base_details": "",
+        "detail_parts": [],
+    }
+
+
+def _is_reasoning_delta_method(method: str) -> bool:
+    return method.startswith("item/reasoning/",) and "delta" in method.lower()
+
+
+def _is_history_activity_method(method: str, summary: str) -> bool:
+    if not method or method.startswith("item/agentMessage"):
+        return False
+    if method in {"turn/steer", "app_server/reconnecting", "app_server/run_adopted"}:
+        return False
+    if summary in {"inProgress", "completed", "agentMessage", "userMessage", "assistantMessage", "systemMessage", "toolMessage"}:
+        return False
+    return method.startswith(("item/", "exec_command_", "mcp_tool_call_", "apply_patch_"))
+
+
+def _message_in_run_windows(message: dict, windows: list[tuple[datetime, datetime]]) -> bool:
+    timestamp = _message_timestamp(message)
+    return any(start <= timestamp <= finish for start, finish in windows)
+
+
+def _parse_message_timestamp(value: str) -> datetime:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _merge_messages(transcript_messages: list[dict], local_messages: list[dict]) -> list[dict]:

@@ -1471,6 +1471,114 @@ async def test_app_server_messages_include_reasoning_summary_and_tool_arguments(
 
 
 @pytest.mark.asyncio
+async def test_app_server_messages_include_custom_tool_calls(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    sessions = cfg.codex_home / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "thread.jsonl").write_text(
+        json_line({"timestamp": "2026-06-27T00:00:00Z", "type": "session_meta", "payload": {"id": "thr_custom_tool", "cwd": str(project_dir), "timestamp": "2026-06-27T00:00:00Z"}})
+        + json_line({"timestamp": "2026-06-27T00:00:01Z", "type": "response_item", "payload": {"type": "custom_tool_call", "name": "apply_patch", "input": "*** Begin Patch\napi_key=do-not-display\n*** End Patch", "call_id": "call_1"}})
+        + json_line({"timestamp": "2026-06-27T00:00:02Z", "type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "call_1", "output": "Done!"}}),
+        encoding="utf-8",
+    )
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    service = AppServerThreadService(projects, chats, messages, transcripts, RecordingAppServer(), make_runtime_settings())  # type: ignore[arg-type]
+
+    project = projects.create_project(str(project_dir))
+    chats.upsert_chat_index(project["id"], "thr_custom_tool", "custom tool", "thr_custom_tool", utc_now(), utc_now(), str(sessions / "thread.jsonl"))
+
+    loaded = await service.list_messages(project["id"], "thr_custom_tool")
+
+    assert len(loaded) == 1
+    assert loaded[0]["content"] == "ツールを実行しました: apply_patch"
+    assert "*** Begin Patch" in loaded[0]["activityDetails"]
+    assert "do-not-display" not in loaded[0]["activityDetails"]
+    assert "api_key=<redacted>" in loaded[0]["activityDetails"]
+    assert "Done!" in loaded[0]["activityDetails"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_app_server_messages_restore_persisted_run_reasoning_and_command_activity(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    service = AppServerThreadService(projects, chats, messages, transcripts, RecordingAppServer(), make_runtime_settings())  # type: ignore[arg-type]
+
+    project = projects.create_project(str(project_dir))
+    chat = chats.create_chat(project["id"], "persisted activity")
+    run_id = "run_persisted_activity"
+    db.execute(
+        "INSERT INTO runs(id, chat_id, status, started_at, finished_at) VALUES (?, ?, 'succeeded', ?, ?)",
+        (run_id, chat["id"], "2026-06-27T00:00:00Z", "2026-06-27T00:00:10Z"),
+    )
+
+    event_rows = [
+        (1, "item/reasoning/textDelta", "推論を"),
+        (2, "item/reasoning/textDelta", "続けます。"),
+    ]
+    for sequence, method, delta in event_rows:
+        db.execute(
+            "INSERT INTO run_events(run_id, sequence, event, data_json, created_at) VALUES (?, ?, 'progress', ?, ?)",
+            (
+                run_id,
+                sequence,
+                json.dumps({"method": method, "summary": method, "details": json.dumps({"itemId": "reasoning_1", "delta": delta}, ensure_ascii=False)}, ensure_ascii=False),
+                f"2026-06-27T00:00:0{sequence}Z",
+            ),
+        )
+    command_item = {
+        "id": "command_1",
+        "type": "commandExecution",
+        "command": "git status --short",
+        "cwd": "/repo",
+        "status": "inProgress",
+        "aggregatedOutput": None,
+        "exitCode": None,
+    }
+    db.execute(
+        "INSERT INTO run_events(run_id, sequence, event, data_json, created_at) VALUES (?, 3, 'progress', ?, '2026-06-27T00:00:03Z')",
+        (run_id, json.dumps({"method": "item/started", "summary": "commandExecution", "details": json.dumps({"item": command_item}, ensure_ascii=False)}, ensure_ascii=False)),
+    )
+    db.execute(
+        "INSERT INTO run_events(run_id, sequence, event, data_json, created_at) VALUES (?, 4, 'progress', ?, '2026-06-27T00:00:04Z')",
+        (run_id, json.dumps({"method": "item/commandExecution/outputDelta", "summary": "commandExecution", "details": json.dumps({"itemId": "command_1", "delta": " M file.txt\n"}, ensure_ascii=False)}, ensure_ascii=False)),
+    )
+    completed_item = command_item | {"status": "completed", "aggregatedOutput": " M file.txt\n", "exitCode": 0}
+    db.execute(
+        "INSERT INTO run_events(run_id, sequence, event, data_json, created_at) VALUES (?, 5, 'progress', ?, '2026-06-27T00:00:05Z')",
+        (run_id, json.dumps({"method": "item/completed", "summary": "commandExecution", "details": json.dumps({"item": completed_item}, ensure_ascii=False)}, ensure_ascii=False)),
+    )
+
+    loaded = await service.list_messages(project["id"], chat["id"])
+    statuses = [message for message in loaded if message["role"] == "status"]
+
+    assert len(statuses) == 2
+    assert statuses[0]["content"] == "推論"
+    assert statuses[0]["activityDetails"] == "推論を続けます。"
+    assert statuses[0]["id"] == f"run-activity-{run_id}-1"
+    assert statuses[1]["content"] == "コマンドを実行しました: git status --short"
+    assert "$ cd /repo" in statuses[1]["activityDetails"]
+    assert "$ git status --short" in statuses[1]["activityDetails"]
+    assert "exit: 0" in statuses[1]["activityDetails"]
+    assert statuses[1]["activityDetails"].count(" M file.txt") == 1
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_messages_use_saved_transcript_path_without_scanning(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()

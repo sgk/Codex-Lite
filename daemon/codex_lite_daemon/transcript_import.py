@@ -385,12 +385,12 @@ def _transcript_message(chat_id: str, item: dict[str, Any], index: int, pending_
     if item_type != "response_item" or not isinstance(payload, dict):
         return None
     payload_type = payload.get("type")
-    if payload_type == "function_call":
+    if payload_type in {"function_call", "custom_tool_call"}:
         call_id = payload.get("call_id")
         if pending_calls is not None and isinstance(call_id, str) and call_id:
             pending_calls[call_id] = payload
         return None
-    if payload_type == "function_call_output":
+    if payload_type in {"function_call_output", "custom_tool_call_output"}:
         return _transcript_function_call_message(chat_id, payload, index, created_at, pending_calls or {})
     if payload_type == "reasoning":
         reasoning = _reasoning_summary_text(payload)
@@ -439,9 +439,10 @@ def _transcript_function_call_message(
     call = pending_calls.pop(call_id, {})
     name = call.get("name")
     output = payload.get("output")
+    arguments = call.get("arguments") if "arguments" in call else call.get("input")
     summary, details = _function_call_summary_and_details(
         str(name or "tool"),
-        call.get("arguments") if isinstance(call, dict) else None,
+        arguments if isinstance(call, dict) else None,
         output if isinstance(output, str) else "",
     )
     if not summary:
@@ -468,7 +469,7 @@ def _function_call_summary_and_details(name: str, arguments: Any, output: str) -
             except json.JSONDecodeError:
                 parsed = {}
             if isinstance(parsed, dict):
-                command = str(parsed.get("cmd") or "")
+                command = _redact_sensitive(str(parsed.get("cmd") or ""))
                 workdir = str(parsed.get("workdir") or "")
         summary = f"コマンドを実行しました: {_short_text(command)}" if command else "コマンドを実行しました"
         detail_lines = []
@@ -477,7 +478,7 @@ def _function_call_summary_and_details(name: str, arguments: Any, output: str) -
         if command:
             detail_lines.append(f"$ {command}")
         if output:
-            detail_lines.extend(["", output.rstrip()])
+            detail_lines.extend(["", _redact_sensitive(output.rstrip())])
         return summary, "\n".join(detail_lines).strip()
     summary = f"ツールを実行しました: {_short_text(name)}" if name else "ツールを実行しました"
     detail_lines = []
@@ -487,7 +488,7 @@ def _function_call_summary_and_details(name: str, arguments: Any, output: str) -
     if output:
         if detail_lines:
             detail_lines.append("")
-        detail_lines.extend(["結果:", output.rstrip()])
+        detail_lines.extend(["結果:", _redact_sensitive(output.rstrip())])
     return summary, "\n".join(detail_lines).strip()
 
 
@@ -515,12 +516,26 @@ def _format_tool_value(value: Any) -> str:
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
-            return value.strip()
+            return _redact_sensitive(value.strip())
         value = parsed
     try:
-        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+        return _redact_sensitive(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
     except (TypeError, ValueError):
-        return str(value).strip()
+        return _redact_sensitive(str(value).strip())
+
+
+def _redact_sensitive(value: str) -> str:
+    authorization_redacted = re.sub(
+        r"(?i)\bauthorization\b\s*[:=]\s*(bearer\s+)?[A-Za-z0-9._~+/=-]{6,}",
+        "Authorization=<redacted>",
+        value,
+    )
+    bearer_redacted = re.sub(r"(?i)(bearer|token)\s+[A-Za-z0-9._~+/=-]{16,}", r"\1 <redacted>", authorization_redacted)
+    return re.sub(
+        r'''(?i)\b(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|cookie|password|secret)\b\s*[":=]+\s*"?([^\s,;'"}]+)''',
+        r"\1=<redacted>",
+        bearer_redacted,
+    )
 
 
 def _short_text(value: str, limit: int = 96) -> str:
