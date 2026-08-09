@@ -16,7 +16,9 @@ namespace CodexLite;
 public sealed class MarkdownViewer : FlowDocumentScrollViewer
 {
     private static readonly TimeSpan RenderInterval = TimeSpan.FromMilliseconds(150);
-    private static readonly Regex MarkdownLinkRegex = new(@"\[([^\]\n]+)\]\(([^)\s]+)\)", RegexOptions.Compiled);
+    private static readonly Regex MarkdownLinkRegex = new(
+        @"\[([^\]\r\n]+)\]\((?:<([^>\r\n]+)>|([^)\s]+))\)",
+        RegexOptions.Compiled);
     private readonly DispatcherTimer _renderTimer;
     private string _pendingMarkdown = "";
     private DateTimeOffset _lastRenderAt = DateTimeOffset.MinValue;
@@ -505,7 +507,10 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             }
             if (next == linkStart)
             {
-                AddHyperlink(paragraph, linkMatch.Groups[1].Value, linkMatch.Groups[2].Value);
+                var targetGroup = linkMatch.Groups[2].Success
+                    ? linkMatch.Groups[2]
+                    : linkMatch.Groups[3];
+                AddHyperlink(paragraph, linkMatch.Groups[1].Value, targetGroup.Value);
                 index = linkMatch.Index + linkMatch.Length;
                 continue;
             }
