@@ -100,7 +100,7 @@ OpenAIとDeepSeekの切り替えは、チャットごとのモデル選択に応
 
 自動圧縮は app-server 起動時の Codex config として有効化する。既定では
 `model_auto_compact_token_limit=100000` と
-`model_auto_compact_token_limit_scope="total"` を指定し、同じ app-server 上で継続・新規作成される全チャットセッションに適用する。`CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT=0` を指定した場合は Codex Lite から自動圧縮設定を渡さない。
+`model_auto_compact_token_limit_scope="body_after_prefix"` を指定し、圧縮時に引き継いだprefixを次回の自動圧縮閾値へ重ねて算入せず、圧縮後に増えた本文を基準とする。同じ app-server 上で継続・新規作成される全チャットセッションに適用する。`CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT=0` を指定した場合は Codex Lite から自動圧縮設定を渡さない。
 
 承認モードはCodexデスクトップアプリに合わせ、チャット入力欄から次の3つを選択する。
 

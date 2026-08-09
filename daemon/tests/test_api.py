@@ -107,7 +107,7 @@ def test_app_server_command_enables_auto_compaction(linux_tmp_path: Path) -> Non
         "-c",
         "model_auto_compact_token_limit=100000",
         "-c",
-        'model_auto_compact_token_limit_scope="total"',
+        'model_auto_compact_token_limit_scope="body_after_prefix"',
         "app-server",
         "--listen",
         "stdio://",

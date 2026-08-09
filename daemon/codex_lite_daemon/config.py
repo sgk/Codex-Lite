@@ -55,7 +55,7 @@ def default_config() -> Config:
         approval_policy=os.environ.get("CODEX_LITE_APPROVAL_POLICY", "never"),
         model=os.environ.get("CODEX_LITE_MODEL", ""),
         auto_compact_token_limit=int(os.environ.get("CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT", "100000")),
-        auto_compact_token_limit_scope=os.environ.get("CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT_SCOPE", "total"),
+        auto_compact_token_limit_scope=os.environ.get("CODEX_LITE_AUTO_COMPACT_TOKEN_LIMIT_SCOPE", "body_after_prefix"),
         deepseek_codex_home=deepseek_codex_home,
         deepseek_codex_sqlite_home=deepseek_codex_home / "sqlite",
     )
