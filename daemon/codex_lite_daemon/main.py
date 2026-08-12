@@ -415,6 +415,11 @@ def create_app(config: Config | None = None) -> Starlette:
     async def read_file(project_id: str, path: str) -> dict:
         return files.read_content(project_id, path)
 
+    @get("/projects/{project_id}/files/image")
+    async def read_image(project_id: str, path: str) -> Response:
+        content, media_type = files.read_image(project_id, path)
+        return Response(content=content, media_type=media_type)
+
     return app
 
 

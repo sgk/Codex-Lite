@@ -19,6 +19,9 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     private static readonly Regex MarkdownLinkRegex = new(
         @"\[([^\]\r\n]+)\]\((?:<([^>\r\n]+)>|([^)\s]+))\)",
         RegexOptions.Compiled);
+    private static readonly Regex MarkdownImageRegex = new(
+        @"!\[([^\]\r\n]*)\]\((?:<([^>\r\n]+)>|([^)\s]+))\)",
+        RegexOptions.Compiled);
     private readonly DispatcherTimer _renderTimer;
     private string _pendingMarkdown = "";
     private DateTimeOffset _lastRenderAt = DateTimeOffset.MinValue;
@@ -47,6 +50,8 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     }
 
     public event EventHandler<MarkdownLinkClickedEventArgs>? LinkClicked;
+
+    public event EventHandler<MarkdownImageRequestedEventArgs>? ImageRequested;
 
     public string Markdown
     {
@@ -481,9 +486,15 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             var codeStart = text.IndexOf('`', index);
             var boldStart = text.IndexOf("**", index, StringComparison.Ordinal);
             var strikethroughStart = text.IndexOf("~~", index, StringComparison.Ordinal);
+            var imageMatch = MarkdownImageRegex.Match(text, index);
+            var imageStart = imageMatch.Success ? imageMatch.Index : -1;
             var linkMatch = MarkdownLinkRegex.Match(text, index);
             var linkStart = linkMatch.Success ? linkMatch.Index : -1;
-            var next = NextIndex(codeStart, boldStart, strikethroughStart, linkStart);
+            if (imageStart >= 0 && linkStart == imageStart + 1)
+            {
+                linkStart = -1;
+            }
+            var next = NextIndex(codeStart, boldStart, strikethroughStart, imageStart, linkStart);
             if (next < 0)
             {
                 paragraph.Inlines.Add(new Run(text[index..]));
@@ -503,6 +514,15 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
                 }
                 paragraph.Inlines.Add(InlineCodeRun(text[(next + 1)..end]));
                 index = end + 1;
+                continue;
+            }
+            if (next == imageStart)
+            {
+                var targetGroup = imageMatch.Groups[2].Success
+                    ? imageMatch.Groups[2]
+                    : imageMatch.Groups[3];
+                AddImage(paragraph, imageMatch.Groups[1].Value, targetGroup.Value);
+                index = imageMatch.Index + imageMatch.Length;
                 continue;
             }
             if (next == linkStart)
@@ -540,6 +560,86 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
         }
     }
 
+    private void AddImage(Paragraph paragraph, string alternativeText, string target)
+    {
+        var request = new MarkdownImageRequestedEventArgs(target, alternativeText);
+        ImageRequested?.Invoke(this, request);
+        if (request.Source is null && request.SourceTask is null)
+        {
+            var fallbackText = string.IsNullOrWhiteSpace(alternativeText) ? "画像" : alternativeText;
+            AddHyperlink(paragraph, $"🖼 {fallbackText}", request.LinkTarget);
+            return;
+        }
+
+        paragraph.LineStackingStrategy = LineStackingStrategy.MaxHeight;
+        var image = new System.Windows.Controls.Image
+        {
+            Source = request.Source,
+            Stretch = Stretch.Uniform,
+            MaxWidth = 720,
+            MaxHeight = 600,
+            Margin = new Thickness(0, 4, 0, 4),
+            ToolTip = string.IsNullOrWhiteSpace(alternativeText) ? target : alternativeText,
+            Visibility = request.Source is null ? Visibility.Collapsed : Visibility.Visible
+        };
+        image.MouseLeftButtonUp += (_, _) => LinkClicked?.Invoke(this, new MarkdownLinkClickedEventArgs(request.LinkTarget));
+        image.Cursor = Cursors.Hand;
+        var fallback = CreateImageFallback(alternativeText, request.LinkTarget, request.SourceTask is null ? "画像を表示できません" : "画像を読み込み中…");
+        fallback.Visibility = request.Source is null ? Visibility.Visible : Visibility.Collapsed;
+        var panel = new StackPanel();
+        panel.Children.Add(image);
+        panel.Children.Add(fallback);
+        paragraph.Inlines.Add(new InlineUIContainer(panel)
+        {
+            BaselineAlignment = BaselineAlignment.Center
+        });
+        if (request.SourceTask is not null)
+        {
+            CompleteImageLoadAsync(image, fallback, request.SourceTask);
+        }
+    }
+
+    private TextBlock CreateImageFallback(string alternativeText, string target, string suffix)
+    {
+        var fallback = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        var label = string.IsNullOrWhiteSpace(alternativeText) ? "画像" : alternativeText;
+        var hyperlink = new Hyperlink(new Run($"🖼 {label}"))
+        {
+            Cursor = Cursors.Hand,
+            Foreground = new SolidColorBrush(Color.FromRgb(9, 105, 218)),
+            TextDecorations = TextDecorations.Underline,
+            ToolTip = target
+        };
+        hyperlink.Click += (_, _) => LinkClicked?.Invoke(this, new MarkdownLinkClickedEventArgs(target));
+        fallback.Inlines.Add(hyperlink);
+        fallback.Inlines.Add(new Run($" — {suffix}") { Foreground = Brushes.DimGray });
+        return fallback;
+    }
+
+    private static async void CompleteImageLoadAsync(System.Windows.Controls.Image image, TextBlock fallback, Task<ImageSource?> sourceTask)
+    {
+        try
+        {
+            var source = await sourceTask;
+            if (source is not null)
+            {
+                image.Source = source;
+                image.Visibility = Visibility.Visible;
+                fallback.Visibility = Visibility.Collapsed;
+                return;
+            }
+        }
+        catch
+        {
+        }
+        image.Visibility = Visibility.Collapsed;
+        fallback.Visibility = Visibility.Visible;
+        if (fallback.Inlines.LastInline is Run suffix)
+        {
+            suffix.Text = " — 画像を表示できません";
+        }
+    }
+
     private void AddHyperlink(Paragraph paragraph, string text, string target)
     {
         var hyperlink = new Hyperlink(new Run(text))
@@ -562,4 +662,17 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
 public sealed class MarkdownLinkClickedEventArgs(string target) : EventArgs
 {
     public string Target { get; } = target;
+}
+
+public sealed class MarkdownImageRequestedEventArgs(string target, string alternativeText) : EventArgs
+{
+    public string Target { get; } = target;
+
+    public string AlternativeText { get; } = alternativeText;
+
+    public ImageSource? Source { get; set; }
+
+    public Task<ImageSource?>? SourceTask { get; set; }
+
+    public string LinkTarget { get; set; } = target;
 }

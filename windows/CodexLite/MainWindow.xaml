@@ -1000,7 +1000,9 @@
                                                         Background="#D7A928"
                                                         Margin="-6,-6,0,-6"
                                                         Visibility="{Binding IsWorkProgressMessage, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                                <local:MarkdownViewer Markdown="{Binding Content}" LinkClicked="MarkdownViewer_LinkClicked">
+                                                <local:MarkdownViewer Markdown="{Binding Content}"
+                                                                      LinkClicked="MarkdownViewer_LinkClicked"
+                                                                      ImageRequested="MarkdownViewer_ImageRequested">
                                                     <local:MarkdownViewer.Style>
                                                         <Style TargetType="{x:Type local:MarkdownViewer}" BasedOn="{StaticResource MessageMarkdownViewer}">
                                                             <Style.Triggers>
@@ -1407,6 +1409,7 @@
                                                   Style="{StaticResource FileMarkdownViewer}"
                                                   Visibility="Collapsed"
                                                   LinkClicked="MarkdownViewer_LinkClicked"
+                                                  ImageRequested="MarkdownViewer_ImageRequested"
                                                   PreviewMouseWheel="FileContentBox_PreviewMouseWheel"/>
                             <Border x:Name="FileImagePanel" Background="#FAFAFA" Visibility="Collapsed">
                                 <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">

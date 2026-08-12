@@ -9,6 +9,7 @@ from .services import ProjectService
 from .util.time import utc_now
 
 MAX_READ_SIZE = 1024 * 1024
+MAX_IMAGE_READ_SIZE = 20 * 1024 * 1024
 IMAGE_KINDS = {"png", "jpeg", "image"}
 PREVIEW_TEXT_KINDS = {"text", "markdown"}
 
@@ -66,6 +67,20 @@ class FileService:
             "size": size,
             "content": content,
         }
+
+    def read_image(self, project_id: str, rel_path: str) -> tuple[bytes, str]:
+        _, target = self._resolve(project_id, rel_path)
+        if not target.exists():
+            raise AppError("file_not_found", "File path was not found.", 404)
+        if target.is_dir():
+            raise AppError("file_path_invalid", "Path is a directory.")
+        size = target.stat().st_size
+        if self._viewer_kind(target, size) not in IMAGE_KINDS:
+            raise AppError("file_not_image", "This file type is not an image.", 415)
+        if size > MAX_IMAGE_READ_SIZE:
+            raise AppError("file_too_large", "Image is too large to preview.", 413)
+        mime, _ = mimetypes.guess_type(target.name)
+        return target.read_bytes(), mime if mime and mime.startswith("image/") else "application/octet-stream"
 
     def _resolve(self, project_id: str, rel_path: str) -> tuple[Path, Path]:
         if "\x00" in rel_path:

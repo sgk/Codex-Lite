@@ -2956,6 +2956,19 @@ async def test_readonly_files_api(linux_tmp_path: Path) -> None:
         assert content.status_code == 200
         assert content.json()["content"] == "# Title\n"
 
+        image = await client.get(f"/projects/{project_id}/files/image", params={"path": "pixel.png"})
+        assert image.status_code == 200
+        assert image.headers["content-type"] == "image/png"
+        assert image.content == b"\x89PNG\r\n\x1a\n"
+
+        non_image = await client.get(f"/projects/{project_id}/files/image", params={"path": "README.md"})
+        assert non_image.status_code == 415
+        assert non_image.json()["error"]["code"] == "file_not_image"
+
+        image_escape = await client.get(f"/projects/{project_id}/files/image", params={"path": "../pixel.png"})
+        assert image_escape.status_code == 400
+        assert image_escape.json()["error"]["code"] == "file_path_invalid"
+
         escape = await client.get(f"/projects/{project_id}/files/content", params={"path": "../secret"})
         assert escape.status_code == 400
         assert escape.json()["error"]["code"] == "file_path_invalid"
@@ -2979,6 +2992,10 @@ async def test_files_api_rejects_symlink(linux_tmp_path: Path) -> None:
         response = await client.get(f"/projects/{project_id}/files/content", params={"path": "link.txt"})
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "file_path_invalid"
+
+        image_response = await client.get(f"/projects/{project_id}/files/image", params={"path": "link.txt"})
+        assert image_response.status_code == 400
+        assert image_response.json()["error"]["code"] == "file_path_invalid"
 
 
 @pytest.mark.asyncio

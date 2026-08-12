@@ -553,6 +553,9 @@ public sealed class DaemonClient
     public Task<FileContentDto?> ReadFileAsync(string projectId, string path, CancellationToken cancellationToken = default) =>
         _http.GetFromJsonAsync<FileContentDto>($"/projects/{projectId}/files/content?path={Uri.EscapeDataString(path)}", JsonOptions, cancellationToken);
 
+    public Task<byte[]> ReadImageAsync(string projectId, string path, CancellationToken cancellationToken = default) =>
+        _http.GetByteArrayAsync($"/projects/{projectId}/files/image?path={Uri.EscapeDataString(path)}", cancellationToken);
+
     public Task<string> GetDiagnosticsJsonAsync(CancellationToken cancellationToken = default) =>
         _http.GetStringAsync("/diagnostics", cancellationToken);
 

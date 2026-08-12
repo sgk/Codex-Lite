@@ -60,6 +60,7 @@ public partial class MainWindow : Window
     private static readonly TimeSpan DaemonHealthCheckInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan AttachmentRetention = TimeSpan.FromDays(7);
     private const int ComposerHistoryLimit = 100;
+    private const int MarkdownImageCacheLimit = 32;
     private readonly DaemonClient _client = new();
     private readonly ObservableCollection<ProjectTreeItem> _projectTree = new();
     private readonly ObservableCollection<MessageDto> _messages = new();
@@ -97,6 +98,8 @@ public partial class MainWindow : Window
     private readonly List<string> _persistedProjectOrderIds = new();
     private readonly Dictionary<string, List<string>> _persistedChatOrderIdsByProject = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<string>> _composerHistoryByChat = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Task<ImageSource?>> _markdownImageCache = new(StringComparer.Ordinal);
+    private readonly Queue<string> _markdownImageCacheOrder = new();
     private string _textSizeSetting = "small";
     private string _codexHomeMode = DefaultCodexHomeMode();
     private bool _wrapFileText;
@@ -7559,6 +7562,69 @@ public partial class MainWindow : Window
         await OpenMarkdownLinkAsync(e.Target);
     }
 
+    private void MarkdownViewer_ImageRequested(object sender, MarkdownImageRequestedEventArgs e)
+    {
+        if (_selectedProject is not ProjectDto project)
+        {
+            return;
+        }
+
+        var target = e.Target.Trim();
+        if (target.Length == 0 || HasUriScheme(target))
+        {
+            return;
+        }
+
+        var localTarget = target;
+        if (ReferenceEquals(sender, FileMarkdownPreview) && !IsAbsoluteLocalPath(localTarget))
+        {
+            var separatorIndex = _currentFilePath.LastIndexOf('/');
+            if (separatorIndex >= 0)
+            {
+                localTarget = $"{_currentFilePath[..separatorIndex]}/{localTarget}";
+            }
+        }
+
+        if (!TryNormalizeProjectRelativePath(project.Path, localTarget, out var relativePath) ||
+            !IsImagePath(relativePath))
+        {
+            return;
+        }
+
+        e.LinkTarget = relativePath;
+        e.SourceTask = CachedMarkdownImageAsync(project.Id, relativePath);
+    }
+
+    private Task<ImageSource?> CachedMarkdownImageAsync(string projectId, string relativePath)
+    {
+        var key = $"{projectId}\u001f{relativePath}";
+        if (_markdownImageCache.TryGetValue(key, out var cached))
+        {
+            return cached;
+        }
+        while (_markdownImageCache.Count >= MarkdownImageCacheLimit && _markdownImageCacheOrder.Count > 0)
+        {
+            _markdownImageCache.Remove(_markdownImageCacheOrder.Dequeue());
+        }
+        var task = LoadMarkdownImageAsync(projectId, relativePath);
+        _markdownImageCache[key] = task;
+        _markdownImageCacheOrder.Enqueue(key);
+        return task;
+    }
+
+    private async Task<ImageSource?> LoadMarkdownImageAsync(string projectId, string relativePath)
+    {
+        try
+        {
+            var bytes = await _client.ReadImageAsync(projectId, relativePath);
+            return LoadImageSource(bytes);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private async Task OpenMarkdownLinkAsync(string target)
     {
         var cleanTarget = target.Trim();
@@ -7824,6 +7890,13 @@ public partial class MainWindow : Window
         return Regex.IsMatch(target, @"^[A-Za-z][A-Za-z0-9+.-]*:", RegexOptions.CultureInvariant);
     }
 
+    private static bool IsAbsoluteLocalPath(string target)
+    {
+        return target.StartsWith("/", StringComparison.Ordinal) ||
+               Regex.IsMatch(target, @"^[A-Za-z]:[\\/]", RegexOptions.CultureInvariant) ||
+               target.StartsWith("\\\\", StringComparison.Ordinal);
+    }
+
     private static bool TryNormalizeProjectRelativePath(string projectPath, string target, out string relativePath)
     {
         relativePath = "";
@@ -7891,6 +7964,25 @@ public partial class MainWindow : Window
             image.BeginInit();
             image.CacheOption = BitmapCacheOption.OnLoad;
             image.UriSource = new Uri(path, UriKind.Absolute);
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static BitmapImage? LoadImageSource(byte[] content)
+    {
+        try
+        {
+            using var stream = new MemoryStream(content, writable: false);
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = stream;
             image.EndInit();
             image.Freeze();
             return image;
