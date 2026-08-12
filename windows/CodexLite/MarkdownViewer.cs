@@ -424,6 +424,52 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
 
     private static void AddCodeBlock(FlowDocument document, string text)
     {
+        var copyButton = new Button
+        {
+            Content = "コピー",
+            ToolTip = "コードをクリップボードへコピー",
+            Padding = new Thickness(8, 2, 8, 2),
+            Margin = new Thickness(0, 0, 0, 4),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            MinWidth = 58,
+            FontSize = 11,
+            IsTabStop = false
+        };
+        copyButton.Click += async (_, _) =>
+        {
+            try
+            {
+                System.Windows.Clipboard.SetText(text);
+                copyButton.Content = "コピー済み";
+                await Task.Delay(1200);
+                copyButton.Content = "コピー";
+            }
+            catch
+            {
+                copyButton.Content = "コピー失敗";
+                await Task.Delay(1200);
+                copyButton.Content = "コピー";
+            }
+        };
+
+        var content = new StackPanel();
+        content.Children.Add(copyButton);
+        content.Children.Add(new System.Windows.Controls.TextBox
+        {
+            Text = text,
+            TextWrapping = TextWrapping.Wrap,
+            FontFamily = new FontFamily("Consolas"),
+            Foreground = new SolidColorBrush(Color.FromRgb(9, 64, 116)),
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(0),
+            IsReadOnly = true,
+            AcceptsReturn = true,
+            IsTabStop = false,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        });
+
         var border = new Border
         {
             Background = new SolidColorBrush(Color.FromRgb(246, 248, 250)),
@@ -432,21 +478,7 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             CornerRadius = new CornerRadius(2),
             Margin = new Thickness(0, 4, 0, 4),
             Padding = new Thickness(6),
-            Child = new System.Windows.Controls.TextBox
-            {
-                Text = text,
-                TextWrapping = TextWrapping.Wrap,
-                FontFamily = new FontFamily("Consolas"),
-                Foreground = new SolidColorBrush(Color.FromRgb(9, 64, 116)),
-                Background = Brushes.Transparent,
-                BorderThickness = new Thickness(0),
-                Padding = new Thickness(0),
-                IsReadOnly = true,
-                AcceptsReturn = true,
-                IsTabStop = false,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
-            }
+            Child = content
         };
         document.Blocks.Add(new BlockUIContainer(border)
         {
