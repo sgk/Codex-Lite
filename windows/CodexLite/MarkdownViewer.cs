@@ -158,7 +158,7 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
 
             if (string.IsNullOrWhiteSpace(line))
             {
-                FlushParagraph(document, paragraph);
+                FlushParagraph(document, paragraph, addFollowingLineGap: true);
                 continue;
             }
 
@@ -333,13 +333,16 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
         return index > 0 && index + 1 < line.Length && line[index] == '.' && line[index + 1] == ' ' ? index + 2 : 0;
     }
 
-    private void FlushParagraph(FlowDocument document, StringBuilder paragraph)
+    private void FlushParagraph(FlowDocument document, StringBuilder paragraph, bool addFollowingLineGap = false)
     {
         if (paragraph.Length == 0)
         {
             return;
         }
-        AddParagraph(document, paragraph.ToString());
+        AddParagraph(
+            document,
+            paragraph.ToString(),
+            margin: addFollowingLineGap ? new Thickness(0, 1, 0, 21) : null);
         paragraph.Clear();
     }
 
