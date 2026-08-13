@@ -427,13 +427,13 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
 
     private static void AddCodeBlock(FlowDocument document, string text)
     {
-        var copyButton = new Button
+        var copyButton = new System.Windows.Controls.Button
         {
             Content = "コピー",
             ToolTip = "コードをクリップボードへコピー",
             Padding = new Thickness(8, 2, 8, 2),
             Margin = new Thickness(0, 0, 0, 4),
-            HorizontalAlignment = HorizontalAlignment.Right,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
             MinWidth = 58,
             FontSize = 11,
             IsTabStop = false
@@ -618,7 +618,7 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             Visibility = request.Source is null ? Visibility.Collapsed : Visibility.Visible
         };
         image.MouseLeftButtonUp += (_, _) => LinkClicked?.Invoke(this, new MarkdownLinkClickedEventArgs(request.LinkTarget));
-        image.Cursor = Cursors.Hand;
+        image.Cursor = System.Windows.Input.Cursors.Hand;
         var fallback = CreateImageFallback(alternativeText, request.LinkTarget, request.SourceTask is null ? "画像を表示できません" : "画像を読み込み中…");
         fallback.Visibility = request.Source is null ? Visibility.Visible : Visibility.Collapsed;
         var panel = new StackPanel();
@@ -640,7 +640,7 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
         var label = string.IsNullOrWhiteSpace(alternativeText) ? "画像" : alternativeText;
         var hyperlink = new Hyperlink(new Run($"🖼 {label}"))
         {
-            Cursor = Cursors.Hand,
+            Cursor = System.Windows.Input.Cursors.Hand,
             Foreground = new SolidColorBrush(Color.FromRgb(9, 105, 218)),
             TextDecorations = TextDecorations.Underline,
             ToolTip = target
