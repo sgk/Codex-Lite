@@ -12,7 +12,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from codex_lite_daemon.app_server import SERVER_REQUEST_ID_KEY, AppServerClient, AppServerClientPool, AppServerNotification
-from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _is_reasoning_delta_notification, _merge_messages, _notification_details, _notification_summary, _reasoning_delta, _reasoning_item_id, _recover_truncated_local_conclusions
+from codex_lite_daemon.app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService, _content_with_attachment_summary, _inline_activity_image, _is_reasoning_delta_notification, _merge_messages, _notification_details, _notification_summary, _reasoning_delta, _reasoning_item_id, _recover_truncated_local_conclusions
 from codex_lite_daemon.automation_service import AutomationService, _run_due_automations
 from codex_lite_daemon.codex_state import CodexStateService
 from codex_lite_daemon.config import Config, default_config
@@ -1320,6 +1320,16 @@ def test_remote_history_is_complete_and_redacted() -> None:
     ], "")
     assert len(many) == 100
     assert len(many[0]["activityDetails"]) == 13_000
+
+
+def test_inline_activity_image_is_project_scoped_and_data_url(linux_tmp_path: Path) -> None:
+    project = linux_tmp_path / "inline-image-project"
+    project.mkdir()
+    image = project / "preview.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    rendered = _inline_activity_image({"path": str(image)}, str(project))
+    assert rendered.startswith("![画像](data:image/png;base64,")
+    assert _inline_activity_image({"path": str(project.parent / "preview.png")}, str(project)) == ""
 
 
 def test_remote_attachments_accept_only_agent_temporary_directory(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

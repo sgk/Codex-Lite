@@ -154,6 +154,7 @@ function appendInline(parent: HTMLElement, nodes: MarkdownInline[]): void {
 }
 
 function safeHttpUrl(value: string): string | undefined {
+  if (/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/i.test(value)) return value;
   try {
     const url = new URL(value, document.baseURI);
     return url.protocol === "http:" || url.protocol === "https:" ? url.href : undefined;

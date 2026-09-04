@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
 import re
 import shlex
 import time
@@ -30,6 +32,7 @@ CANCEL_IDLE_POLL_SECONDS = 0.1
 RUN_STATE_RECONCILE_SECONDS = 5.0
 IDLE_RECONCILE_NOTIFICATION_GRACE_SECONDS = 0.5
 PROVIDER_CONTEXT_MAX_CHARS = 32000
+INLINE_ACTIVITY_IMAGE_MAX_BYTES = 1_500_000
 APPROVAL_REQUEST_METHODS = {
     "item/commandExecution/requestApproval",
     "item/fileChange/requestApproval",
@@ -1559,8 +1562,7 @@ def _notification_summary(notification: AppServerNotification) -> str:
         if item_type == "fileChange":
             return "ファイルを編集しました" if is_completed else "ファイルを編集中"
         if item_type == "imageView":
-            path = str(item.get("path") or "").strip()
-            return f"画像を確認しました: {_short_text(path)}" if path else "画像を確認しました"
+            return "画像を確認しました"
         if item_type == "autoApprovalReview":
             return "自動承認の確認が完了しました" if is_completed else "自動承認を確認中"
     file_action = _file_action(method, params)
@@ -1993,9 +1995,12 @@ def _persisted_run_activity_messages(db: Database, chat_id: str) -> tuple[list[d
     rows = db.fetchall(
         """
         SELECT re.run_id, re.sequence, re.data_json, re.created_at,
+               p.path AS project_path,
                r.started_at, r.finished_at, r.status
         FROM run_events re
         JOIN runs r ON r.id = re.run_id
+        JOIN chats c ON c.id = r.chat_id
+        JOIN projects p ON p.id = c.project_id
         WHERE r.chat_id = ? AND re.event = 'progress'
         ORDER BY re.created_at, re.run_id, re.sequence
         """,
@@ -2064,6 +2069,8 @@ def _persisted_run_activity_messages(db: Database, chat_id: str) -> tuple[list[d
             state["summary"] = _notification_summary(notification)
             state["method"] = method
             rendered_details = _notification_details(notification)
+            if item_type == "imageView":
+                rendered_details = _inline_activity_image(item, str(row.get("project_path") or ""))
             if rendered_details:
                 state["base_details"] = rendered_details
             continue
@@ -2110,6 +2117,28 @@ def _persisted_run_activity_messages(db: Database, chat_id: str) -> tuple[list[d
         )
     messages.sort(key=_message_sort_key)
     return messages, list(windows_by_run.values())
+
+
+def _inline_activity_image(item: dict[str, Any], project_path: str) -> str:
+    """Return a bounded data URL so both local and remote UIs can render it."""
+    raw_path = str(item.get("path") or "").strip()
+    if not raw_path or not project_path:
+        return ""
+    try:
+        root = Path(project_path).resolve()
+        image_path = Path(raw_path).resolve()
+        if not image_path.is_relative_to(root) or not image_path.is_file():
+            return ""
+        if image_path.stat().st_size > INLINE_ACTIVITY_IMAGE_MAX_BYTES:
+            return ""
+        mime_type, _ = mimetypes.guess_type(image_path.name)
+        if mime_type not in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
+            return ""
+        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    except (OSError, ValueError):
+        return ""
+    data_url = f"data:{mime_type};base64,{encoded}"
+    return f"![画像]({data_url})"
 
 
 def _activity_state(run_id: str, row: dict, summary: str, method: str) -> dict[str, Any]:

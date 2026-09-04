@@ -8918,12 +8918,28 @@ public partial class MainWindow : Window
 
     private void MarkdownViewer_ImageRequested(object sender, MarkdownImageRequestedEventArgs e)
     {
+        var target = e.Target.Trim();
+        if (target.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+        {
+            var separator = target.IndexOf(',');
+            if (separator > 0 && target[..separator].EndsWith(";base64", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    e.Source = LoadImageSource(Convert.FromBase64String(target[(separator + 1)..]));
+                }
+                catch (FormatException)
+                {
+                    // Invalid inline image data is rendered as the normal fallback.
+                }
+            }
+            return;
+        }
         if (_selectedProject is not ProjectDto project)
         {
             return;
         }
 
-        var target = e.Target.Trim();
         if (target.Length == 0 || HasUriScheme(target))
         {
             return;

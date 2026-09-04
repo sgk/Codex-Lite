@@ -1142,17 +1142,10 @@
                                                 Padding="8"
                                                 Margin="22,2,0,4"
                                                 CornerRadius="2">
-                                            <TextBox Text="{Binding ActivityDetailText, Mode=OneWay}"
-                                                     IsReadOnly="True"
-                                                     BorderThickness="0"
-                                                     Background="Transparent"
-                                                     Foreground="#4B5563"
-                                                     FontFamily="Consolas"
-                                                     FontSize="11"
-                                                     TextWrapping="Wrap"
-                                                     AcceptsReturn="True"
-                                                     VerticalScrollBarVisibility="Auto"
-                                                     MaxHeight="180"/>
+                                            <local:MarkdownViewer Markdown="{Binding ActivityDetailText, Mode=OneWay}"
+                                                                  Style="{StaticResource MessageMarkdownViewer}"
+                                                                  ImageRequested="MarkdownViewer_ImageRequested"
+                                                                  MaxHeight="600"/>
                                         </Border>
                                     </Expander>
                                     <Border Visibility="{Binding ActivityIndicatorVisibility}"
