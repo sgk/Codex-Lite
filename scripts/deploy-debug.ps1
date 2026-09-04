@@ -118,20 +118,25 @@ function Stop-RemainingLocalDaemon {
     }
 
     $shutdownUri = "http://127.0.0.1:$($endpoint.port)/shutdown"
+    $shutdownError = $null
     try {
         Invoke-RestMethod -Method Post -Uri $shutdownUri -ContentType "application/json" -Body "{}" -TimeoutSec 5 | Out-Null
         Write-Host "requested shutdown of the remaining local daemon"
     }
     catch {
-        throw "The remaining Codex Lite daemon could not be stopped: $($_.Exception.Message)"
+        $shutdownError = $_.Exception.Message
     }
 
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     while ([DateTime]::UtcNow -lt $deadline) {
         if (-not (Test-Path -LiteralPath $EndpointPath -PathType Leaf)) {
+            Write-Host "remaining local daemon exited"
             return
         }
         Start-Sleep -Milliseconds 250
+    }
+    if (-not [string]::IsNullOrWhiteSpace($shutdownError)) {
+        throw "The remaining Codex Lite daemon could not be stopped: $shutdownError"
     }
     throw "The remaining Codex Lite daemon did not exit within 15 seconds."
 }
