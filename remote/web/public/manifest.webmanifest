@@ -1,0 +1,11 @@
+{
+  "name": "Codex Lite Remote",
+  "short_name": "Codex Remote",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f2f4f7",
+  "theme_color": "#101828",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

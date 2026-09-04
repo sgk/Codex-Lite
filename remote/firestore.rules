@@ -1,0 +1,90 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function allowedUser() {
+      let email = request.auth.token.email.lower();
+      let emailParts = email.split('@');
+      let access = get(/databases/$(database)/documents/system/access).data;
+      let entries = access.get('entries', []);
+      return request.auth != null
+        && request.auth.token.email is string
+        && request.auth.token.email_verified == true
+        && emailParts.size() == 2
+        && (
+          email in entries
+          || emailParts[1] in entries
+        );
+    }
+
+    function signedInAs(uid) {
+      return request.auth != null && request.auth.uid == uid && allowedUser();
+    }
+
+    function validTaskCreate() {
+      return request.resource.data.keys().hasOnly([
+          'operation', 'status', 'payload', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.operation in [
+          'send_message', 'create_chat', 'steer_run', 'cancel_run', 'resolve_approval',
+          'get_runtime', 'update_runtime'
+        ]
+        && request.resource.data.status == 'queued'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.keys().hasAll(['payload'])
+        && validPlainPayload();
+    }
+
+    function validPlainPayload() {
+      let payload = request.resource.data.payload;
+      return payload is map
+        && payload.keys().hasOnly(['projectId', 'chatId', 'content', 'title', 'runId', 'requestId', 'decision', 'model', 'reasoningEffort', 'permissionProfile', 'approvalPolicy', 'approvalsReviewer', 'attachments'])
+        && (!payload.keys().hasAll(['content']) || (payload.content is string && payload.content.size() <= 100000))
+        && (!payload.keys().hasAll(['title']) || (payload.title is string && payload.title.size() <= 200))
+        && (!payload.keys().hasAll(['model']) || (payload.model is string && payload.model.size() <= 200))
+        && (!payload.keys().hasAll(['reasoningEffort']) || (payload.reasoningEffort is string && payload.reasoningEffort.size() <= 50))
+        && (!payload.keys().hasAll(['permissionProfile']) || payload.permissionProfile in [':workspace', ':danger-full-access'])
+        && (!payload.keys().hasAll(['approvalPolicy']) || payload.approvalPolicy in ['on-request', 'never'])
+        && (!payload.keys().hasAll(['approvalsReviewer']) || payload.approvalsReviewer in ['user', 'auto_review'])
+        && (!payload.keys().hasAll(['attachments']) || (payload.attachments is list && payload.attachments.size() <= 4));
+    }
+
+    match /system/{document} {
+      allow read, write: if false;
+    }
+
+    match /users/{uid} {
+      allow read, write: if signedInAs(uid);
+
+      match /devices/{deviceId} {
+        allow read, write: if signedInAs(uid);
+
+        match /projects/{projectId} {
+          allow read, write: if signedInAs(uid);
+        }
+
+        match /chats/{chatId} {
+          allow read, write: if signedInAs(uid);
+        }
+
+        match /historyChunks/{chunkId} {
+          allow read, write: if signedInAs(uid);
+        }
+
+        match /tasks/{taskId} {
+          allow read: if signedInAs(uid);
+          allow create: if signedInAs(uid) && validTaskCreate();
+          allow update: if signedInAs(uid)
+            && request.resource.data.operation == resource.data.operation
+            && request.resource.data.createdAt == resource.data.createdAt;
+          allow delete: if signedInAs(uid);
+
+          match /events/{eventId} {
+            allow read, create: if signedInAs(uid);
+            allow update, delete: if false;
+          }
+        }
+      }
+    }
+  }
+}

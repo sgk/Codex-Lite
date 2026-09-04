@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>CodexLite</RootNamespace>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RemoteSyncEnabled Condition="'$(RemoteSyncEnabled)' == ''">false</RemoteSyncEnabled>
+    <DefineConstants Condition="'$(RemoteSyncEnabled)' == 'true'">$(DefineConstants);CODEX_LITE_REMOTE_SYNC</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="$(RemoteOAuthConfigPath)"
+             Condition="'$(RemoteSyncEnabled)' == 'true' and Exists('$(RemoteOAuthConfigPath)')"
+             Link="remote-oauth.json"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\remote\agent-dist\**\*"
+             Condition="'$(RemoteSyncEnabled)' == 'true'"
+             Link="remote-agent\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\scripts\run-daemon.sh"
+             Link="run-daemon.sh"
+             CopyToOutputDirectory="PreserveNewest"/>
+    <Content Include="..\..\daemon\**\*"
+             Exclude="..\..\daemon\.venv\**;..\..\daemon\.pytest_cache\**;..\..\daemon\tests\**;..\..\daemon\codex_lite_daemon.egg-info\**;..\..\daemon\**\__pycache__\**"
+             Link="daemon\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"/>
+  </ItemGroup>
+  <Target Name="EnsureRemoteAgentBundle" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true' and '$(RemoteSyncEnabled)' == 'true'">
+    <Error Condition="!Exists('..\..\remote\agent-dist\index.js')"
+           Text="Remote Agent bundle is missing. Run npm --prefix remote run build:agent before building Codex Lite." />
+    <Error Condition="!Exists('$(RemoteOAuthConfigPath)')"
+           Text="Generated Remote OAuth configuration is missing." />
+  </Target>
+  <Target Name="RemoveDisabledRemoteArtifacts" AfterTargets="Build" Condition="'$(RemoteSyncEnabled)' != 'true'">
+    <Delete Files="$(OutDir)remote-oauth.json;$(OutDir)remote-oauth.local.json" />
+    <RemoveDir Directories="$(OutDir)remote-agent" />
+  </Target>
+</Project>

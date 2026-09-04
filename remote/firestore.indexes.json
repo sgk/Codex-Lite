@@ -1,0 +1,20 @@
+{
+  "indexes": [],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "tasks",
+      "fieldPath": "progressItems",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "chats",
+      "fieldPath": "activeRun.progressItems",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "historyChunks",
+      "fieldPath": "payload",
+      "indexes": []
+    }
+  ]
+}

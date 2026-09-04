@@ -1,0 +1,1058 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import os
+import platform
+import socket
+import sys
+import threading
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+
+import uvicorn
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response, StreamingResponse
+
+from . import __version__
+from .automation_service import AutomationService, run_automation_scheduler
+from .app_server import AppServerClientPool
+from .app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService
+from .config import Config, load_config
+from .codex_state import CodexStateService
+from .deepseek import deepseek_model_ids, deepseek_reasoning_efforts, model_provider_for_model
+from .db import Database
+from .errors import AppError
+from .file_service import FileService
+from .process_env import codex_process_env
+from .remote_gateway import RemoteGateway
+from .run_service import RunService
+from .runner.codex_runner import CodexRunner
+from .runner.fake_runner import FakeRunner
+from .services import ChatService, MessageService, ProjectService
+from .transcript_import import TranscriptImportService
+
+
+_STATIC_OPENAI_MODELS = ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5", "gpt-5-codex"]
+
+
+def create_app(config: Config | None = None) -> Starlette:
+    cfg = config or load_config()
+    cfg.app_data_dir.mkdir(parents=True, exist_ok=True)
+    cfg.run_log_dir.mkdir(parents=True, exist_ok=True)
+    db = Database(cfg.database_path)
+    db.migrate()
+
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    codex_runner = CodexRunner(cfg)
+    runner = FakeRunner() if cfg.runner_mode == "fake" else codex_runner
+    app_servers = AppServerClientPool(cfg, codex_runner)
+    codex_state = CodexStateService(cfg)
+    runs = RunService(db, cfg, projects, chats, messages, runner)
+    files = FileService(db, projects)
+    transcript_import = TranscriptImportService(cfg, projects, chats, codex_state)
+    app_settings = _load_app_settings(cfg)
+    chats.seed_model_reasoning_history(app_settings.model, app_settings.reasoning_effort)
+    app_threads = AppServerThreadService(projects, chats, messages, transcript_import, app_servers, app_settings)
+    app_runs = AppServerRunService(projects, app_threads, messages, app_servers, cfg.max_concurrent_runs, app_settings, db=db)
+    app_usage = AppServerUsageService(app_servers)
+    automations = AutomationService(db, projects, chats)
+    runs.recover_stale_runs()
+    use_app_server = cfg.runner_mode == "app-server"
+    remote_gateway = RemoteGateway(db, projects, chats, app_threads, runs, app_runs, app_settings, transcript_import, use_app_server)
+    messages.set_insert_listener(remote_gateway.mark_catalog_changed)
+    runs.events.set_lifecycle_listener(remote_gateway.mark_catalog_changed)
+    app_runs.events.set_lifecycle_listener(remote_gateway.mark_catalog_changed)
+
+    @asynccontextmanager
+    async def lifespan(_: Starlette):
+        scheduler_stop = asyncio.Event()
+        scheduler_task: asyncio.Task | None = None
+        try:
+            scheduler_task = asyncio.create_task(run_automation_scheduler(automations, app_runs if use_app_server else runs, scheduler_stop))
+            yield
+        finally:
+            scheduler_stop.set()
+            if scheduler_task is not None:
+                scheduler_task.cancel()
+                try:
+                    await scheduler_task
+                except asyncio.CancelledError:
+                    pass
+            await app_servers.close()
+            await app_runs.flush_events()
+            await runs.flush_events()
+            db.close()
+
+    app = Starlette(lifespan=lifespan)
+    app.state.config = cfg
+    app.state.db = db
+    app.state.codex_runner = codex_runner
+    app.state.runs = runs
+    app.state.app_server = app_servers
+    app.state.remote_gateway = remote_gateway
+
+    async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
+        )
+
+    app.add_exception_handler(AppError, app_error_handler)
+
+    get, post, patch, delete = _route_helpers(app)
+
+    @get("/health")
+    async def health() -> dict:
+        return {
+            "ok": True,
+            "version": __version__,
+            "databasePath": str(cfg.database_path),
+            "codexPath": codex_runner.resolved_path_sync(),
+            "codexVersion": codex_runner.codex_version,
+            "codexHome": str(cfg.codex_home),
+        }
+
+    @get("/diagnostics")
+    async def diagnostics() -> dict:
+        codex_path, codex_version = await resolve_codex_info(codex_runner)
+        run_diagnostics = app_runs.list_run_diagnostics() if use_app_server else runs.list_run_diagnostics()
+        active_runs = [run for run in run_diagnostics if run.get("status") in {"queued", "running"}]
+        process_env = codex_process_env(cfg)
+        return {
+            "daemonPid": __import__("os").getpid(),
+            "pythonVersion": sys.version,
+            "platform": platform.platform(),
+            "databasePath": str(cfg.database_path),
+            "databaseFileExists": cfg.database_path.exists(),
+            "codexPath": codex_path,
+            "codexVersion": codex_version,
+            "codexHome": str(cfg.codex_home),
+            "codexHomeExists": cfg.codex_home.exists(),
+            "codexSqliteHome": str(cfg.codex_sqlite_home),
+            "codexSqliteHomeExists": cfg.codex_sqlite_home.exists(),
+            "deepseekCodexHome": str(cfg.deepseek_codex_home) if cfg.deepseek_codex_home is not None else None,
+            "deepseekCodexHomeExists": bool(cfg.deepseek_codex_home and cfg.deepseek_codex_home.exists()),
+            "deepseekCodexSqliteHome": str(cfg.deepseek_codex_sqlite_home) if cfg.deepseek_codex_sqlite_home is not None else None,
+            "deepseekCodexSqliteHomeExists": bool(cfg.deepseek_codex_sqlite_home and cfg.deepseek_codex_sqlite_home.exists()),
+            "activeRunIds": [run["id"] for run in active_runs],
+            "activeRuns": active_runs,
+            "recentRuns": app_runs.list_recent_runs() if use_app_server else run_diagnostics,
+            "untrackedAppServerThreads": app_runs.list_untracked_threads() if use_app_server else [],
+            "runEventPersistence": app_runs.event_diagnostics() if use_app_server else runs.event_diagnostics(),
+            "effectivePath": process_env.get("PATH", ""),
+            "sshAgentConfigured": bool(process_env.get("SSH_AUTH_SOCK")),
+            "appDataDir": str(cfg.app_data_dir),
+            "runLogDir": str(cfg.run_log_dir),
+            "runnerMode": cfg.runner_mode,
+            "permissionProfile": app_settings.permission_profile,
+            "approvalPolicy": app_settings.approval_policy,
+            "approvalsReviewer": app_settings.approvals_reviewer,
+            "model": app_settings.model,
+            "reasoningEffort": app_settings.reasoning_effort,
+            "autoCompactTokenLimit": cfg.auto_compact_token_limit,
+            "autoCompactTokenLimitScope": cfg.auto_compact_token_limit_scope,
+            "appServerRunning": any(item["running"] for item in app_servers.diagnostics().values()),
+            "appServerEnvironment": app_servers.diagnostics(),
+            "appServerStderrTail": {
+                provider: app_servers.client_for_provider(provider).stderr_tail
+                for provider in ("openai", "deepseek")
+            },
+            "codexStateSync": codex_state.diagnostics(),
+        }
+
+    @get("/settings")
+    async def get_settings() -> dict:
+        return _settings_out(app_settings, _static_model_options(app_settings.model), chats.list_model_reasoning_history())
+
+    @get("/models")
+    async def list_models() -> dict:
+        if not use_app_server:
+            return _model_list_out(_static_model_options(app_settings.model), {}, app_settings.model, dynamic=False)
+        try:
+            provider = model_provider_for_model(app_settings.model)
+            response = await app_servers.client_for_provider(provider).request("model/list", {})
+            models, efforts_by_model = _model_catalog_from_response(response)
+            if models:
+                return _model_list_out(models, efforts_by_model, app_settings.model, dynamic=True)
+        except AppError:
+            pass
+        return _model_list_out(_static_model_options(app_settings.model), {}, app_settings.model, dynamic=False)
+
+    @post("/send/prepare")
+    async def prepare_send(body: dict | None = None) -> dict:
+        model = _optional_str(body, "model") if body else None
+        provider = model_provider_for_model(model or app_settings.model)
+        if use_app_server:
+            await app_servers.client_for_provider(provider).prepare()
+        return {"ready": True, "provider": provider}
+
+    @get("/usage/capacity")
+    async def usage_capacity() -> dict:
+        if not use_app_server:
+            raise AppError("usage_unavailable", "Codex usage capacity requires app-server mode.", 503)
+        capacity = await app_usage.read_capacity(model_provider_for_model(app_settings.model))
+        capacity["provider"] = model_provider_for_model(app_settings.model)
+        return capacity
+
+    @patch("/settings")
+    async def update_settings(body: dict) -> dict:
+        requested_model: str | None = None
+        if "model" in body:
+            requested_model = _normalized_model(str(body.get("model") or ""))
+        if "permissionProfile" in body:
+            app_settings.permission_profile = _normalized_permission_profile(str(body.get("permissionProfile") or ""))
+        if "approvalPolicy" in body:
+            app_settings.approval_policy = _normalized_approval_policy(str(body.get("approvalPolicy") or ""))
+        if "approvalsReviewer" in body:
+            app_settings.approvals_reviewer = _normalized_approvals_reviewer(str(body.get("approvalsReviewer") or ""))
+        if requested_model is not None:
+            app_settings.model = requested_model
+        if "reasoningEffort" in body:
+            app_settings.reasoning_effort = _normalized_reasoning_effort(str(body.get("reasoningEffort") or ""))
+        _save_app_settings(cfg, app_settings)
+        chats.record_model_reasoning_choice(app_settings.model, app_settings.reasoning_effort)
+        return _settings_out(app_settings, _static_model_options(app_settings.model), chats.list_model_reasoning_history())
+
+    @post("/shutdown")
+    async def shutdown() -> dict:
+        server = getattr(app.state, "server", None)
+        if server is not None:
+            server.should_exit = True
+        return {"ok": True}
+
+    @get("/projects")
+    async def list_projects() -> list[dict]:
+        return projects.list_projects()
+
+    @post("/projects")
+    async def create_project(body: dict) -> dict:
+        project = projects.create_project(_required_str(body, "path"), _optional_str(body, "name"))
+        if use_app_server:
+            transcript_import.index_project(project)
+        remote_gateway.mark_catalog_changed()
+        return project
+
+    @get("/projects/{project_id}")
+    async def get_project(project_id: str) -> dict:
+        return projects.get_project(project_id)
+
+    @patch("/projects/{project_id}")
+    async def update_project(project_id: str, body: dict) -> dict:
+        project = projects.update_project(project_id, _optional_str(body, "name"))
+        remote_gateway.mark_catalog_changed()
+        return project
+
+    @post("/projects/{project_id}/relocate")
+    async def relocate_project(project_id: str, body: dict) -> dict:
+        project = projects.relocate_project(
+            project_id,
+            _required_str(body, "parentPath"),
+            _required_str(body, "directoryName"),
+        )
+        remote_gateway.mark_catalog_changed()
+        return project
+
+    @delete("/projects/{project_id}", status_code=204)
+    async def delete_project(project_id: str) -> None:
+        projects.delete_project(project_id)
+        remote_gateway.mark_catalog_changed()
+
+    @get("/project-candidates")
+    async def list_project_candidates() -> list[dict]:
+        return transcript_import.list_project_candidates()
+
+    @post("/project-candidates/import")
+    async def import_project_candidates(body: dict | None = None) -> list[dict]:
+        projects_created = transcript_import.import_project_candidates(_optional_str_list(body, "paths") if body else None)
+        if projects_created:
+            remote_gateway.mark_catalog_changed()
+        return projects_created
+
+    @get("/projects/{project_id}/chats")
+    async def list_chats(project_id: str, sync: bool = False) -> list[dict]:
+        if use_app_server:
+            result = await app_threads.list_chats(project_id, sync)
+            if sync:
+                remote_gateway.mark_catalog_changed()
+            return result
+        return chats.list_chats(project_id)
+
+    @post("/projects/{project_id}/chats")
+    async def create_chat(project_id: str, body: dict) -> dict:
+        requested_settings = _runtime_settings_from_body(app_settings, body)
+        chats.record_model_reasoning_choice(requested_settings.model, requested_settings.reasoning_effort)
+        if use_app_server:
+            chat = await app_threads.create_chat(project_id, _optional_str(body, "title"), requested_settings)
+        else:
+            chat = chats.create_chat(project_id, _optional_str(body, "title"), _runtime_settings_values(requested_settings))
+        remote_gateway.mark_catalog_changed()
+        return chat
+
+    @get("/projects/{project_id}/chats/{chat_id}")
+    async def get_chat(project_id: str, chat_id: str) -> dict:
+        if use_app_server:
+            return await app_threads.get_chat(project_id, chat_id)
+        return chats.get_chat(project_id, chat_id)
+
+    @patch("/projects/{project_id}/chats/{chat_id}")
+    async def update_chat(project_id: str, chat_id: str, body: dict) -> dict:
+        if use_app_server:
+            chat = await app_threads.update_chat(project_id, chat_id, _optional_str(body, "title"))
+        else:
+            chat = chats.update_chat(project_id, chat_id, _optional_str(body, "title"))
+        remote_gateway.mark_catalog_changed()
+        return chat
+
+    @post("/projects/{project_id}/chats/{chat_id}/archive")
+    async def archive_chat(project_id: str, chat_id: str) -> dict:
+        if use_app_server:
+            chat = await app_threads.archive_chat(project_id, chat_id)
+        else:
+            chat = chats.archive_chat(project_id, chat_id)
+        remote_gateway.mark_catalog_changed()
+        return chat
+
+    @get("/projects/{project_id}/chats/{chat_id}/settings")
+    async def get_chat_settings(project_id: str, chat_id: str) -> dict:
+        stored = chats.get_chat_settings_row(project_id, chat_id)
+        settings = _runtime_settings_for_chat(app_settings, stored)
+        if any(value is None for value in stored.values()):
+            chats.update_chat_settings(project_id, chat_id, _runtime_settings_values(settings))
+        return _settings_out(settings, _static_model_options(settings.model), chats.list_model_reasoning_history())
+
+    @patch("/projects/{project_id}/chats/{chat_id}/settings")
+    async def update_chat_settings(project_id: str, chat_id: str, body: dict) -> dict:
+        current = _runtime_settings_for_chat(app_settings, chats.get_chat_settings_row(project_id, chat_id))
+        settings = _runtime_settings_from_body(current, body)
+        chats.update_chat_settings(project_id, chat_id, _runtime_settings_values(settings))
+        chats.record_model_reasoning_choice(settings.model, settings.reasoning_effort)
+        return _settings_out(settings, _static_model_options(settings.model), chats.list_model_reasoning_history())
+
+    @get("/projects/{project_id}/chats/{chat_id}/automations")
+    async def list_automations(project_id: str, chat_id: str) -> list[dict]:
+        return automations.list_automations(project_id, chat_id)
+
+    @post("/projects/{project_id}/chats/{chat_id}/automations")
+    async def create_automation(project_id: str, chat_id: str, body: dict) -> dict:
+        return automations.create_automation(
+            project_id,
+            chat_id,
+            _required_str(body, "name"),
+            _required_str(body, "prompt", min_length=1),
+            _required_int(body, "interval_minutes", minimum=0),
+            _optional_bool(body, "enabled", True),
+            _optional_str(body, "schedule_kind") or "interval_minutes",
+        )
+
+    @patch("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}")
+    async def update_automation(project_id: str, chat_id: str, automation_id: str, body: dict) -> dict:
+        return automations.update_automation(
+            project_id,
+            chat_id,
+            automation_id,
+            _optional_str(body, "name"),
+            _optional_str(body, "prompt"),
+            _optional_int(body, "interval_minutes", minimum=0),
+            _optional_bool(body, "enabled", None),
+            _optional_str(body, "schedule_kind"),
+        )
+
+    @post("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}/run")
+    async def run_automation_now(project_id: str, chat_id: str, automation_id: str) -> dict:
+        return await automations.run_now(project_id, chat_id, automation_id, app_runs if use_app_server else runs)
+
+    @delete("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}", status_code=204)
+    async def delete_automation(project_id: str, chat_id: str, automation_id: str) -> None:
+        automations.delete_automation(project_id, chat_id, automation_id)
+
+    @delete("/projects/{project_id}/chats/{chat_id}", status_code=204)
+    async def delete_chat(project_id: str, chat_id: str) -> None:
+        if use_app_server:
+            await app_threads.delete_chat(project_id, chat_id)
+        else:
+            chats.delete_chat(project_id, chat_id)
+        remote_gateway.mark_catalog_changed()
+
+    @get("/projects/{project_id}/chats/{chat_id}/messages")
+    async def list_messages(project_id: str, chat_id: str) -> list[dict]:
+        if use_app_server:
+            return await app_threads.list_messages(project_id, chat_id)
+        return messages.list_messages(project_id, chat_id)
+
+    @get("/projects/{project_id}/chats/{chat_id}/input-history")
+    async def list_input_history(project_id: str, chat_id: str) -> list[str]:
+        return messages.list_input_history(project_id, chat_id, 100)
+
+    @get("/projects/{project_id}/chats/{chat_id}/messages/page")
+    async def list_message_page(project_id: str, chat_id: str, limit: int = 200, before_created_at: str | None = None, before_id: str | None = None) -> dict:
+        if use_app_server:
+            all_messages = await app_threads.list_messages(project_id, chat_id)
+        else:
+            all_messages = messages.list_messages(project_id, chat_id)
+        return message_page(all_messages, limit, before_created_at, before_id)
+
+    @post("/projects/{project_id}/chats/{chat_id}/messages")
+    async def create_message(project_id: str, chat_id: str, body: dict) -> dict:
+        if use_app_server:
+            result = await app_runs.start_message_run(project_id, chat_id, _required_str(body, "content", min_length=1), _attachments(body))
+        else:
+            result = runs.start_message_run(project_id, chat_id, _required_str(body, "content", min_length=1))
+        return result
+
+    @get("/runs/{run_id}")
+    async def get_run(run_id: str) -> dict:
+        if use_app_server:
+            return app_runs.get_run(run_id)
+        return runs.get_run(run_id)
+
+    @get("/runs/{run_id}/conclusion")
+    async def get_run_conclusion(run_id: str) -> dict | None:
+        return messages.get_run_conclusion(run_id)
+
+    @get("/runs")
+    async def list_active_runs(request: Request) -> list[dict]:
+        if use_app_server:
+            project_id = request.query_params.get("project_id")
+            chat_id = request.query_params.get("chat_id")
+            if project_id and chat_id:
+                await app_runs.reconcile_chat_runtime(project_id, chat_id)
+            return app_runs.list_active_runs()
+        return runs.list_run_diagnostics()
+
+    @get("/runs/{run_id}/events")
+    async def run_events(request: Request, run_id: str) -> StreamingResponse:
+        after_value = request.query_params.get("after")
+        after_sequence = int(after_value) if after_value and after_value.isdigit() else None
+        stream = app_runs.stream_events(run_id, after_sequence=after_sequence) if use_app_server else runs.stream_events(run_id)
+        return StreamingResponse(stream, media_type="text/event-stream")
+
+    @post("/runs/{run_id}/cancel")
+    async def cancel_run(run_id: str) -> dict:
+        if use_app_server:
+            result = await app_runs.cancel_run(run_id)
+        else:
+            result = await runs.cancel_run(run_id)
+        return result
+
+    @post("/runs/prepare-app-restart")
+    async def prepare_runs_for_app_restart() -> dict:
+        active_runs = app_runs.list_active_runs() if use_app_server else runs.list_run_diagnostics()
+        chat_ids = [
+            str(run.get("chatId") or "")
+            for run in active_runs
+            if str(run.get("status") or "") in {"queued", "running"} and str(run.get("chatId") or "")
+        ]
+        return {"markedCount": chats.mark_resume_on_start(chat_ids)}
+
+    @post("/runs/resume-after-app-restart")
+    async def resume_runs_after_app_restart() -> dict:
+        resumed: list[dict] = []
+        failed: list[dict] = []
+        for pending in chats.list_resume_on_start():
+            project_id = str(pending["project_id"])
+            chat_id = str(pending["chat_id"])
+            try:
+                result = (
+                    await app_runs.start_message_run(project_id, chat_id, "つづけて")
+                    if use_app_server
+                    else runs.start_message_run(project_id, chat_id, "つづけて")
+                )
+            except AppError as exc:
+                failed.append({"projectId": project_id, "chatId": chat_id, "code": exc.code})
+                continue
+            chats.clear_resume_on_start(chat_id)
+            resumed.append({"projectId": project_id, "chatId": chat_id, **result})
+        return {"resumed": resumed, "failed": failed, "pendingCount": len(chats.list_resume_on_start())}
+
+    @post("/runs/{run_id}/steer")
+    async def steer_run(run_id: str, body: dict) -> dict:
+        if not use_app_server:
+            raise AppError("steer_not_supported", "Steering is only supported with Codex app-server.", 409)
+        return await app_runs.steer_run(run_id, _required_str(body, "content", min_length=1), _attachments(body))
+
+    @post("/runs/{run_id}/approval")
+    async def resolve_run_approval(run_id: str, body: dict) -> dict:
+        if not use_app_server:
+            raise AppError("approval_not_supported", "Approvals are only supported with Codex app-server.", 409)
+        return await app_runs.resolve_approval(
+            run_id,
+            _required_str(body, "requestId", min_length=1),
+            _required_str(body, "decision", min_length=1),
+        )
+
+    @get("/remote/v1/catalog")
+    async def remote_catalog(includeHistory: bool = True) -> dict:
+        return await remote_gateway.catalog(include_history=includeHistory)
+
+    @get("/remote/v1/projects/{project_id}/chats/{chat_id}/history")
+    async def remote_chat_history(project_id: str, chat_id: str) -> dict:
+        return await remote_gateway.catalog_chat_history(project_id, chat_id)
+
+    @post("/remote/v1/sync-priority")
+    async def remote_sync_priority(body: dict | None = None) -> dict:
+        body = body or {}
+        return await remote_gateway.set_sync_priority(
+            _optional_str(body, "selectedProjectId"),
+            _optional_str(body, "selectedChatId"),
+            _optional_str_list(body, "projectOrder") or [],
+            _optional_str_list_map(body, "chatOrder") or {},
+        )
+
+    @get("/remote/v1/catalog-revision")
+    async def remote_catalog_revision() -> dict:
+        return {"revision": remote_gateway.catalog_revision()}
+
+    @get("/remote/v1/catalog-revision/wait")
+    async def wait_remote_catalog_revision(after: int) -> dict:
+        return {"revision": await remote_gateway.wait_catalog_revision(after)}
+
+    @post("/remote/v1/tasks/{task_id}/execute")
+    async def remote_execute(task_id: str, body: dict) -> dict:
+        return await remote_gateway.execute(
+            task_id,
+            _required_str(body, "operation", min_length=1),
+            body.get("payload") if isinstance(body.get("payload"), dict) else {},
+        )
+
+    @get("/remote/v1/runs/{run_id}/events")
+    async def remote_run_events(request: Request, run_id: str) -> StreamingResponse:
+        after_value = request.query_params.get("after")
+        after_sequence = int(after_value) if after_value and after_value.isdigit() else None
+        return StreamingResponse(remote_gateway.stream_events(run_id, after_sequence), media_type="text/event-stream")
+
+    @get("/projects/{project_id}/files")
+    async def list_files(project_id: str, path: str = "") -> dict:
+        return files.list_files(project_id, path)
+
+    @get("/projects/{project_id}/files/content")
+    async def read_file(project_id: str, path: str) -> dict:
+        return files.read_content(project_id, path)
+
+    @get("/projects/{project_id}/files/image")
+    async def read_image(project_id: str, path: str) -> Response:
+        content, media_type = files.read_image(project_id, path)
+        return Response(content=content, media_type=media_type)
+
+    return app
+
+
+def _route_helpers(app: Starlette):
+    def route(method: str, path: str, status_code: int = 200):
+        def decorator(func):
+            signature = inspect.signature(func)
+
+            async def endpoint(request: Request) -> Response:
+                kwargs = {}
+                for name, parameter in signature.parameters.items():
+                    if name == "request":
+                        kwargs[name] = request
+                    elif name == "body":
+                        kwargs[name] = await _json_body(request, required=parameter.default is inspect.Signature.empty)
+                    elif name in request.path_params:
+                        kwargs[name] = request.path_params[name]
+                    else:
+                        kwargs[name] = _query_param(request, name, parameter)
+                result = await func(**kwargs)
+                if isinstance(result, Response):
+                    return result
+                if status_code == 204:
+                    return Response(status_code=204)
+                return JSONResponse(result, status_code=status_code)
+
+            app.add_route(path, endpoint, methods=[method])
+            return func
+
+        return decorator
+
+    return (
+        lambda path, status_code=200: route("GET", path, status_code),
+        lambda path, status_code=200: route("POST", path, status_code),
+        lambda path, status_code=200: route("PATCH", path, status_code),
+        lambda path, status_code=200: route("DELETE", path, status_code),
+    )
+
+
+async def _json_body(request: Request, *, required: bool) -> dict | None:
+    try:
+        body = await request.body()
+        if not body:
+            if required:
+                raise _validation_error("Request body is required.")
+            return None
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise _validation_error("Request body must be valid JSON.", {"error": str(exc)}) from exc
+    if not isinstance(data, dict):
+        raise _validation_error("Request body must be a JSON object.")
+    return data
+
+
+def _query_param(request: Request, name: str, parameter: inspect.Parameter):
+    if name in request.query_params:
+        value = request.query_params[name]
+    elif parameter.default is not inspect.Signature.empty:
+        return parameter.default
+    else:
+        raise _validation_error(f"Query parameter is required: {name}", {"field": name})
+    if isinstance(parameter.default, bool):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise _validation_error(f"Query parameter must be a boolean: {name}", {"field": name})
+    if isinstance(parameter.default, int):
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise _validation_error(f"Query parameter must be an integer: {name}", {"field": name}) from exc
+    return value
+
+
+def _required_str(body: dict, name: str, *, min_length: int = 0) -> str:
+    if name not in body:
+        raise _validation_error(f"Field is required: {name}", {"field": name})
+    value = body[name]
+    if not isinstance(value, str):
+        raise _validation_error(f"Field must be a string: {name}", {"field": name})
+    if len(value) < min_length:
+        raise _validation_error(f"Field is too short: {name}", {"field": name, "minLength": min_length})
+    return value
+
+
+def _optional_str(body: dict, name: str) -> str | None:
+    if name not in body or body[name] is None:
+        return None
+    return _required_str(body, name)
+
+
+def _required_int(body: dict, name: str, *, minimum: int | None = None) -> int:
+    if name not in body:
+        raise _validation_error(f"Field is required: {name}", {"field": name})
+    value = body[name]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise _validation_error(f"Field must be an integer: {name}", {"field": name})
+    if minimum is not None and value < minimum:
+        raise _validation_error(f"Field must be greater than or equal to {minimum}: {name}", {"field": name, "minimum": minimum})
+    return value
+
+
+def _optional_int(body: dict, name: str, *, minimum: int | None = None) -> int | None:
+    if name not in body or body[name] is None:
+        return None
+    return _required_int(body, name, minimum=minimum)
+
+
+def _optional_bool(body: dict, name: str, default: bool | None) -> bool | None:
+    if name not in body or body[name] is None:
+        return default
+    value = body[name]
+    if not isinstance(value, bool):
+        raise _validation_error(f"Field must be a boolean: {name}", {"field": name})
+    return value
+
+
+def _optional_str_list(body: dict, name: str) -> list[str] | None:
+    if name not in body or body[name] is None:
+        return None
+    value = body[name]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise _validation_error(f"Field must be a string array: {name}", {"field": name})
+    return value
+
+
+def _optional_str_list_map(body: dict, name: str) -> dict[str, list[str]] | None:
+    if name not in body or body[name] is None:
+        return None
+    value = body[name]
+    if not isinstance(value, dict):
+        raise _validation_error(f"Field must be a string-array map: {name}", {"field": name})
+    result: dict[str, list[str]] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, list) or not all(isinstance(entry, str) for entry in item):
+            raise _validation_error(f"Field must be a string-array map: {name}", {"field": name})
+        result[key] = item
+    return result
+
+
+def _attachments(body: dict) -> list[dict]:
+    if "attachments" not in body or body["attachments"] is None:
+        return []
+    value = body["attachments"]
+    if not isinstance(value, list):
+        raise _validation_error("Field must be an array: attachments", {"field": "attachments"})
+    attachments: list[dict] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise _validation_error("Attachment must be an object.", {"field": "attachments", "index": index})
+        attachments.append(
+            {
+                "path": _attachment_path_to_wsl(_required_str(item, "path", min_length=1)),
+                "name": _optional_str(item, "name"),
+                "kind": _optional_str(item, "kind") or "file",
+            }
+        )
+    return attachments
+
+
+def _attachment_path_to_wsl(value: str) -> str:
+    normalized = value.replace("\\", "/")
+    for prefix in ("//wsl.localhost/", "//wsl$/"):
+        if normalized.lower().startswith(prefix):
+            distro_and_path = normalized[len(prefix):]
+            slash_index = distro_and_path.find("/")
+            return "/" if slash_index < 0 else "/" + distro_and_path[slash_index + 1:]
+    if len(normalized) >= 3 and normalized[0].isalpha() and normalized[1:3] == ":/":
+        return f"/mnt/{normalized[0].lower()}/{normalized[3:]}"
+    return normalized
+
+
+def _validation_error(message: str, details: dict | None = None) -> AppError:
+    return AppError("validation_error", message, 422, details)
+
+
+async def resolve_codex_info(codex_runner: CodexRunner) -> tuple[str | None, str | None]:
+    try:
+        path = await codex_runner.resolve()
+        return path, codex_runner.codex_version
+    except AppError:
+        return codex_runner.resolved_path_sync(), codex_runner.codex_version
+
+
+def _normalized_permission_profile(value: str) -> str:
+    aliases = {
+        "read-only": ":read-only",
+        "workspace": ":workspace",
+        "workspace-write": ":workspace",
+        "danger-full-access": ":danger-full-access",
+        "full-access": ":danger-full-access",
+    }
+    normalized = aliases.get(value, value)
+    if normalized not in {":read-only", ":workspace", ":danger-full-access"}:
+        raise AppError("validation_error", "Permission profile is invalid.", 400)
+    return normalized
+
+
+def _normalized_approval_policy(value: str) -> str:
+    aliases = {
+        "ask": "on-request",
+        "on_request": "on-request",
+        "on-failure": "on-failure",
+        "on_failure": "on-failure",
+        "never": "never",
+        "untrusted": "on-request",
+    }
+    normalized = aliases.get(value, value)
+    if normalized not in {"on-failure", "on-request", "never"}:
+        raise AppError("validation_error", "Approval policy is invalid.", 400)
+    return normalized
+
+
+def _normalized_approvals_reviewer(value: str) -> str:
+    aliases = {
+        "auto-review": "auto_review",
+        "autoReview": "auto_review",
+        "guardian_subagent": "auto_review",
+    }
+    normalized = aliases.get(value, value)
+    if normalized not in {"user", "auto_review"}:
+        raise AppError("validation_error", "Approvals reviewer is invalid.", 400)
+    return normalized
+
+
+def _normalized_model(value: str) -> str:
+    normalized = value.strip()
+    if "\x00" in normalized or len(normalized) > 120:
+        raise AppError("validation_error", "Model is invalid.", 400)
+    return normalized
+
+
+def _normalized_reasoning_effort(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    aliases = {"default": "", "none": ""}
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+        raise AppError("validation_error", "Reasoning effort is invalid.", 400)
+    return normalized
+
+
+def _static_model_options(selected: str = "") -> list[str]:
+    models = ["", *_STATIC_OPENAI_MODELS]
+    models.extend(deepseek_model_ids())
+    return _with_selected_model(models, selected)
+
+
+def _with_selected_model(models: list[str], selected: str) -> list[str]:
+    result: list[str] = []
+    for model in ["", *models, selected]:
+        if isinstance(model, str) and model not in result:
+            result.append(model)
+    return result
+
+
+def _model_catalog_from_response(response: object) -> tuple[list[str], dict[str, list[str]]]:
+    if not isinstance(response, dict):
+        return [], {}
+    candidates = response.get("models")
+    if not isinstance(candidates, list):
+        candidates = response.get("data")
+    if not isinstance(candidates, list):
+        return [], {}
+    result: list[str] = []
+    efforts_by_model: dict[str, list[str]] = {}
+    for item in candidates:
+        if isinstance(item, str):
+            model_id = item.strip()
+            efforts: object = None
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or item.get("model") or "").strip()
+            efforts = item.get("supportedReasoningEfforts") or item.get("reasoningEfforts")
+        else:
+            model_id = ""
+            efforts = None
+        if model_id and "\x00" not in model_id and len(model_id) <= 120 and model_id not in result:
+            result.append(model_id)
+            if isinstance(efforts, list):
+                normalized_efforts = []
+                for effort in efforts:
+                    if isinstance(effort, dict):
+                        effort = effort.get("reasoningEffort") or effort.get("id") or ""
+                    try:
+                        normalized = _normalized_reasoning_effort(str(effort))
+                    except AppError:
+                        continue
+                    if normalized and normalized not in normalized_efforts:
+                        normalized_efforts.append(normalized)
+                if normalized_efforts:
+                    efforts_by_model[model_id] = normalized_efforts
+    return result, efforts_by_model
+
+
+def _model_ids_from_response(response: object) -> list[str]:
+    return _model_catalog_from_response(response)[0]
+
+
+def _static_reasoning_efforts(model: str = "") -> list[str]:
+    if model.strip().lower().startswith("deepseek-"):
+        return ["", *deepseek_reasoning_efforts()]
+    if model.endswith("luna"):
+        return ["", "low", "medium", "high", "xhigh", "max"]
+    return ["", "low", "medium", "high", "xhigh", "max", "ultra"]
+
+
+def _model_list_out(models: list[str], efforts_by_model: dict[str, list[str]], selected: str, dynamic: bool) -> dict:
+    configured_deepseek_models = deepseek_model_ids()
+    merged_models = [*models, *_STATIC_OPENAI_MODELS, *configured_deepseek_models]
+    merged_efforts = dict(efforts_by_model)
+    for model in configured_deepseek_models:
+        merged_efforts.setdefault(model, deepseek_reasoning_efforts())
+    return {
+        "availableModels": _with_selected_model(merged_models, selected),
+        "reasoningEffortsByModel": merged_efforts,
+        "dynamic": dynamic,
+    }
+
+
+def _settings_out(settings: AppServerRuntimeSettings, models: list[str], recent_choices: list[dict] | None = None) -> dict:
+    return {
+        "permissionProfile": settings.permission_profile,
+        "approvalPolicy": settings.approval_policy,
+        "approvalsReviewer": settings.approvals_reviewer,
+        "model": settings.model,
+        "reasoningEffort": settings.reasoning_effort,
+        "availablePermissionProfiles": [":read-only", ":workspace", ":danger-full-access"],
+        "availableApprovalPolicies": ["on-failure", "on-request", "never"],
+        "availableApprovalReviewers": ["user", "auto_review"],
+        "availableModels": models,
+        "availableReasoningEfforts": _static_reasoning_efforts(settings.model),
+        "recentModelReasoningChoices": [
+            {
+                "model": str(choice.get("model") or ""),
+                "reasoningEffort": str(choice.get("reasoning_effort") or ""),
+            }
+            for choice in (recent_choices or [])
+        ],
+    }
+
+
+def _runtime_settings_values(settings: AppServerRuntimeSettings) -> dict[str, str]:
+    return {
+        "permission_profile": settings.permission_profile,
+        "approval_policy": settings.approval_policy,
+        "approvals_reviewer": settings.approvals_reviewer,
+        "model": settings.model,
+        "reasoning_effort": settings.reasoning_effort,
+    }
+
+
+def _runtime_settings_for_chat(defaults: AppServerRuntimeSettings, row: dict) -> AppServerRuntimeSettings:
+    def stored(name: str, fallback: str) -> str:
+        value = row.get(name)
+        return value if isinstance(value, str) and value != "" else fallback
+
+    return AppServerRuntimeSettings(
+        permission_profile=_normalized_permission_profile(stored("permission_profile", defaults.permission_profile)),
+        approval_policy=_normalized_approval_policy(stored("approval_policy", defaults.approval_policy)),
+        model=_normalized_model(stored("model", defaults.model)),
+        reasoning_effort=_normalized_reasoning_effort(stored("reasoning_effort", defaults.reasoning_effort)),
+        approvals_reviewer=_normalized_approvals_reviewer(stored("approvals_reviewer", defaults.approvals_reviewer)),
+    )
+
+
+def _runtime_settings_from_body(defaults: AppServerRuntimeSettings, body: dict) -> AppServerRuntimeSettings:
+    permission_profile = defaults.permission_profile
+    approval_policy = defaults.approval_policy
+    approvals_reviewer = defaults.approvals_reviewer
+    model = defaults.model
+    reasoning_effort = defaults.reasoning_effort
+    if "permissionProfile" in body:
+        permission_profile = _normalized_permission_profile(str(body.get("permissionProfile") or ""))
+    if "approvalPolicy" in body:
+        approval_policy = _normalized_approval_policy(str(body.get("approvalPolicy") or ""))
+    if "approvalsReviewer" in body:
+        approvals_reviewer = _normalized_approvals_reviewer(str(body.get("approvalsReviewer") or ""))
+    if "model" in body:
+        model = _normalized_model(str(body.get("model") or ""))
+    if "reasoningEffort" in body:
+        reasoning_effort = _normalized_reasoning_effort(str(body.get("reasoningEffort") or ""))
+    return AppServerRuntimeSettings(
+        permission_profile=permission_profile,
+        approval_policy=approval_policy,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        approvals_reviewer=approvals_reviewer,
+    )
+
+
+def _settings_path(config: Config) -> Path:
+    return config.app_data_dir / "settings.json"
+
+
+def _load_app_settings(config: Config) -> AppServerRuntimeSettings:
+    permission_profile = config.permission_profile
+    approval_policy = config.approval_policy
+    model = config.model
+    reasoning_effort = ""
+    approvals_reviewer = "user"
+    path = _settings_path(config)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            permission_value = data.get("permissionProfile")
+            approval_value = data.get("approvalPolicy")
+            model_value = data.get("model")
+            reasoning_value = data.get("reasoningEffort")
+            reviewer_value = data.get("approvalsReviewer")
+            if isinstance(permission_value, str):
+                permission_profile = permission_value
+            if isinstance(approval_value, str):
+                approval_policy = approval_value
+            if isinstance(model_value, str):
+                model = model_value
+            if isinstance(reasoning_value, str):
+                reasoning_effort = reasoning_value
+            if isinstance(reviewer_value, str):
+                approvals_reviewer = reviewer_value
+    except (OSError, json.JSONDecodeError, AppError):
+        pass
+    return AppServerRuntimeSettings(
+        permission_profile=_normalized_permission_profile(permission_profile),
+        approval_policy=_normalized_approval_policy(approval_policy),
+        model=_normalized_model(model),
+        reasoning_effort=_normalized_reasoning_effort(reasoning_effort),
+        approvals_reviewer=_normalized_approvals_reviewer(approvals_reviewer),
+    )
+
+
+def _save_app_settings(config: Config, settings: AppServerRuntimeSettings) -> None:
+    path = _settings_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "permissionProfile": settings.permission_profile,
+                "approvalPolicy": settings.approval_policy,
+                "model": settings.model,
+                "reasoningEffort": settings.reasoning_effort,
+                "approvalsReviewer": settings.approvals_reviewer,
+            },
+            handle,
+            ensure_ascii=False,
+            indent=2,
+        )
+        handle.write("\n")
+
+
+def message_page(messages: list[dict], limit: int, before_created_at: str | None, before_id: str | None) -> dict:
+    ordered = sorted(messages, key=message_sort_key)
+    total_count = len(ordered)
+    bounded_limit = max(1, min(limit, 500))
+    if before_created_at:
+        cursor = (_message_timestamp(before_created_at), before_id or "")
+        ordered = [message for message in ordered if message_sort_key(message) < cursor]
+    page_messages = ordered[-bounded_limit:]
+    return {
+        "messages": page_messages,
+        "totalCount": total_count,
+        "hasMoreBefore": len(ordered) > len(page_messages),
+    }
+
+
+def message_sort_key(message: dict) -> tuple[datetime, str]:
+    return (_message_timestamp(str(message.get("createdAt") or "")), str(message.get("id") or ""))
+
+
+def _message_timestamp(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def main() -> None:
+    cfg = load_config()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((cfg.host, cfg.port))
+    sock.listen(2048)
+    sock.set_inheritable(True)
+    host, port = sock.getsockname()[:2]
+
+    app = create_app(cfg)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, reload=False))
+    app.state.server = server
+    endpoint_path = cfg.app_data_dir / "daemon-endpoint.json"
+    endpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    endpoint_path.write_text(
+        json.dumps({"host": host, "port": port, "pid": os.getpid()}),
+        encoding="utf-8",
+    )
+    endpoint_path.chmod(0o600)
+    threading.Thread(target=_request_shutdown_on_stdin_eof, args=(server,), daemon=True).start()
+    print(json.dumps({"event": "ready", "host": host, "port": port}), flush=True)
+    try:
+        server.run(sockets=[sock])
+    finally:
+        try:
+            current = json.loads(endpoint_path.read_text(encoding="utf-8"))
+            if current.get("pid") == os.getpid():
+                endpoint_path.unlink(missing_ok=True)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+
+def _request_shutdown_on_stdin_eof(server: uvicorn.Server) -> None:
+    for _ in sys.stdin.buffer:
+        pass
+    server.should_exit = True
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#101828" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <title>Codex Lite Remote</title>
+  </head>
+  <body>
+    <header><div><p class="eyebrow">REMOTE WORKSPACE</p><h1>Codex Lite</h1></div><button id="logout" hidden>ログアウト</button></header>
+    <main>
+      <section id="login" class="card">
+        <h2>ログイン</h2>
+        <button id="google-login" type="button">Google でログイン</button>
+      </section>
+      <section id="app" hidden>
+        <div class="workspace">
+          <aside class="sidebar">
+            <div class="sidebar-heading"><div><p class="eyebrow">WORKSPACE</p><h2>プロジェクト</h2></div></div>
+            <div id="project-tree" class="tree" aria-label="PC、プロジェクト、チャットの一覧"></div>
+            <p id="tree-empty" class="empty muted">接続先PCがありません。</p>
+          </aside>
+          <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="プロジェクト一覧を閉じる" hidden></button>
+          <main class="conversation">
+            <div class="conversation-header"><div class="conversation-heading"><button id="tree-menu" class="tree-menu" type="button" aria-label="プロジェクト一覧を開く" aria-expanded="false">☰</button><div><p id="breadcrumb" class="eyebrow">プロジェクトを選択してください</p><h2 id="conversation-title">会話</h2></div></div><span id="conversation-status" class="pill">待機中</span></div>
+            <section id="conversation-body" class="conversation-body">
+              <section id="usage-panel" class="usage-panel" hidden>
+                <div class="usage-heading"><div><h3>使用状況</h3><p id="usage-provider" class="muted">提供元: 未取得</p></div><button id="usage-refresh" type="button" class="secondary">再読み込み</button></div>
+                <div class="usage-grid">
+                  <article class="usage-balance"><strong>残りチャージ額</strong><span id="usage-credits">未取得</span></article>
+                  <article class="usage-capacity"><div class="usage-card-heading"><strong>5時間容量</strong><span id="usage-five-text">未取得</span></div><div class="usage-track"><span id="usage-five-bar" hidden></span><small id="usage-five-start" class="usage-start"></small><small id="usage-five-end" class="usage-end"></small></div></article>
+                  <article class="usage-capacity"><div class="usage-card-heading"><strong>1週間容量</strong><span id="usage-week-text">未取得</span></div><div class="usage-track"><span id="usage-week-bar" hidden></span><small id="usage-week-start" class="usage-start"></small><small id="usage-week-end" class="usage-end"></small></div></article>
+                </div>
+              </section>
+              <div id="history" class="history"><p class="empty muted">左のツリーからチャットを選択してください。</p></div>
+            </section>
+            <section id="composer" class="composer">
+              <div class="composer-fields">
+                <div id="run-progress" class="run-progress" hidden>
+                  <div class="run-progress-main"><span id="run-progress-text"></span><button id="cancel-run" class="secondary" type="button" hidden>停止</button></div>
+                  <div id="approval-actions" class="approval-actions" hidden><span id="approval-summary">この操作の承認が必要です。</span><button id="approve" type="button">承認</button><button id="decline" type="button" class="danger">拒否</button></div>
+                </div>
+                <div id="attachments" class="attachments"></div>
+                <textarea id="content" rows="3" maxlength="100000" placeholder="指示を入力…"></textarea>
+              </div>
+              <div class="composer-actions"><div class="runtime-controls"><label><span>承認レベル</span><select id="approval-level" aria-label="承認レベル"><option value="ask-for-approval">承認を求める</option><option value="approve-for-me">自動で承認</option><option value="full-access">フルアクセス</option></select></label><label><span>モデル</span><select id="model" aria-label="モデル"></select></label><label><span>思考</span><select id="reasoning" aria-label="思考レベル"></select></label></div><div class="send-actions"><button id="attach-file" type="button" class="secondary">ファイル</button><button id="send">送信</button></div></div>
+              <input id="file-input" type="file" multiple hidden />
+            </section>
+            <input id="new-chat" type="checkbox" hidden />
+          </main>
+        </div>
+        <select id="device" hidden></select><select id="project" hidden></select><select id="chat" hidden></select>
+      </section>
+      <p id="error" role="alert"></p>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

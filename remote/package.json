@@ -1,0 +1,25 @@
+{
+  "name": "codex-lite-remote",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build --config web/vite.config.ts && npm run build:agent",
+    "build:agent": "vite build --config agent/vite.config.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "start:agent": "npm run build:agent && node agent-dist/index.js",
+    "generate-key": "tsx agent/src/keygen.ts",
+    "test": "tsx --test shared/src/*.test.ts web/src/*.test.ts agent/src/*.test.ts",
+    "test:rules": "npx --yes firebase-tools@15.27.0 emulators:exec --project demo-codex-lite --only firestore \"npm run test:rules:inner\"",
+    "test:rules:inner": "tsx --test tests/firestore-rules.test.ts"
+  },
+  "dependencies": {
+    "firebase": "12.17.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "@firebase/rules-unit-testing": "5.0.1",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2",
+    "vite": "8.2.1"
+  }
+}
