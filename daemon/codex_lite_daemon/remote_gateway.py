@@ -20,6 +20,14 @@ _BEARER_RE = re.compile(r"(?i)(bearer|token)\s+[A-Za-z0-9._~+/=-]{16,}")
 _NAMED_SECRET_RE = re.compile(
     r'''(?i)\b(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|cookie|password|secret)\b\s*[:=]\s*"?([^\s,;'"}]+)'''
 )
+_INLINE_IMAGE_MARKDOWN_RE = re.compile(
+    r"!\[[^\]\r\n]*\]\(data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+\)",
+    re.IGNORECASE,
+)
+_INLINE_IMAGE_DATA_RE = re.compile(
+    r"data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+",
+    re.IGNORECASE,
+)
 
 
 class RemoteGateway:
@@ -375,8 +383,12 @@ def _remote_history(messages: list[dict[str, Any]], project_path: str) -> list[d
         kind = str(message.get("kind") or "")
         if role == "assistant" and kind not in {"work", "conclusion"}:
             continue
-        content = _redact_remote_text(str(message.get("content") or ""), project_path).strip()
-        activity_details = _redact_remote_text(str(message.get("activityDetails") or ""), project_path).strip()
+        content = _without_inline_images(
+            _redact_remote_text(str(message.get("content") or ""), project_path)
+        ).strip()
+        activity_details = _without_inline_images(
+            _redact_remote_text(str(message.get("activityDetails") or ""), project_path)
+        ).strip()
         if not content and not activity_details:
             continue
         candidate = {
@@ -403,3 +415,9 @@ def _redact_remote_text(value: str, project_path: str) -> str:
     result = _NAMED_SECRET_RE.sub(r"\1=<redacted>", result)
     result = _POSIX_PATH_RE.sub("<local-path>", result)
     return _WINDOWS_PATH_RE.sub("<local-path>", result)
+
+
+def _without_inline_images(value: str) -> str:
+    """Keep locally rendered image data outside the remote history projection."""
+    result = _INLINE_IMAGE_MARKDOWN_RE.sub("", value)
+    return _INLINE_IMAGE_DATA_RE.sub("", result)

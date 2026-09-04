@@ -1322,6 +1322,35 @@ def test_remote_history_is_complete_and_redacted() -> None:
     assert len(many[0]["activityDetails"]) == 13_000
 
 
+def test_remote_history_excludes_inline_image_data() -> None:
+    history = _remote_history(
+        [
+            {
+                "id": "image-status",
+                "role": "status",
+                "kind": "status",
+                "content": "画像を確認しました",
+                "activityDetails": "![画像](data:image/png;base64,aGVsbG8=)",
+                "activityKind": "work",
+                "runId": "run-1",
+                "createdAt": "2026-09-04T00:00:00Z",
+            },
+            {
+                "id": "user-data-url",
+                "role": "user",
+                "content": "data:image/jpeg;base64,aGVsbG8=",
+                "createdAt": "2026-09-04T00:00:01Z",
+            },
+        ],
+        "",
+    )
+
+    assert [item["id"] for item in history] == ["image-status"]
+    assert history[0]["content"] == "画像を確認しました"
+    assert history[0]["activityDetails"] == ""
+    assert "data:image/" not in str(history)
+
+
 def test_inline_activity_image_is_project_scoped_and_data_url(linux_tmp_path: Path) -> None:
     project = linux_tmp_path / "inline-image-project"
     project.mkdir()
