@@ -25,7 +25,7 @@ import { loadAgentConfig } from "./config.js";
 import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon, type SseEvent } from "./daemon.js";
 import { appendProgressItem, isCountableProgressEvent, type RemoteProgressItem } from "./progress-sync.js";
-import { historyChunks } from "./history-chunks.js";
+import { historyChunkId, historyChunks } from "./history-chunks.js";
 
 interface QueuedTask {
   operation: RemoteOperation;
@@ -496,10 +496,11 @@ async function syncCatalog(): Promise<void> {
           120_000,
           `会話履歴の取得がタイムアウトしました（${change.chat.id}）。`,
         );
-        const historyWrites = await syncHistoryChunks(change.chat.id, history);
-        recordsTotal += historyWrites;
-        recordsWritten += historyWrites;
+        const historySync = await syncHistoryChunks(change.chat.id, history, previousChat?.historyChunkHashes);
+        recordsTotal += historySync.writes;
+        recordsWritten += historySync.writes;
         data.historyItemCount = history.length;
+        data.historyChunkHashes = historySync.hashes;
         data.historySyncedAt = serverTimestamp();
       }
       writes.push({
@@ -617,6 +618,7 @@ async function loadCloudCatalogSnapshot(): Promise<CatalogProject[]> {
       syncOrder: numberField(chat.data(), "syncOrder"),
       updatedAt: textField(chat.data(), "lastUpdatedAt") || undefined,
       historyRevision: textField(chat.data(), "historyRevision") || undefined,
+      historyChunkHashes: stringArrayField(chat.data(), "historyChunkHashes"),
     })),
   );
 }
@@ -646,23 +648,24 @@ async function staleReferencesFromChanges(changes: ReturnType<typeof diffCatalog
   return [...stale.values()];
 }
 
-async function syncHistoryChunks(chatId: string, history: import("./catalog-sync.js").CatalogHistoryItem[]): Promise<number> {
+async function syncHistoryChunks(
+  chatId: string,
+  history: import("./catalog-sync.js").CatalogHistoryItem[],
+  previousHashes: string[] | undefined,
+): Promise<{ writes: number; hashes: string[] }> {
   const chunksRef = collection(deviceRef, "historyChunks");
-  const existing = await getDocs(query(chunksRef, where("chatId", "==", chatId)));
-  const existingById = new Map(existing.docs.map((snapshot) => [snapshot.id, snapshot]));
   const writes: Array<{ reference: DocumentReference<DocumentData>; data?: Record<string, unknown> }> = [];
-  for (const chunk of historyChunks(chatId, history)) {
-    const previous = existingById.get(chunk.id);
-    existingById.delete(chunk.id);
-    if (previous
-      && textField(previous.data(), "hash") === chunk.hash
-      && typeof previous.data().payload === "string") continue;
+  const chunks = historyChunks(chatId, history);
+  for (const chunk of chunks) {
+    if (previousHashes?.[chunk.index] === chunk.hash) continue;
     writes.push({
       reference: doc(chunksRef, chunk.id),
       data: { chatId, index: chunk.index, hash: chunk.hash, payload: chunk.payload },
     });
   }
-  for (const snapshot of existingById.values()) writes.push({ reference: snapshot.ref });
+  for (let index = chunks.length; index < (previousHashes?.length ?? 0); index += 1) {
+    writes.push({ reference: doc(chunksRef, historyChunkId(chatId, index)) });
+  }
   // Keep each large history document in its own commit. Live activeRun
   // updates then wait behind at most one history document, not a multi-MiB
   // commit containing many documents.
@@ -674,7 +677,7 @@ async function syncHistoryChunks(chatId: string, history: import("./catalog-sync
     }
     await batch.commit();
   }
-  return writes.length;
+  return { writes: writes.length, hashes: chunks.map((chunk) => chunk.hash) };
 }
 
 function reportSyncProgress(progress: Record<string, unknown>): void {
@@ -714,6 +717,14 @@ function textField(value: unknown, name: string): string {
 
 function numberField(value: unknown, name: string): number {
   return isObject(value) && typeof value[name] === "number" ? value[name] as number : Number.MAX_SAFE_INTEGER;
+}
+
+function stringArrayField(value: unknown, name: string): string[] | undefined {
+  if (!isObject(value)) return undefined;
+  const field = value[name];
+  if (!Array.isArray(field)) return undefined;
+  const strings = field.filter((item): item is string => typeof item === "string");
+  return strings.length === field.length ? strings : undefined;
 }
 
 function reportBackgroundError(error: unknown): void {

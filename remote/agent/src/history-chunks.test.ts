@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { historyChunks } from "./history-chunks.js";
+import { historyChunkId, historyChunks } from "./history-chunks.js";
 
 const entry = (id: string, content: string) => ({ id, role: "status", content, createdAt: id, kind: "work" });
 
@@ -28,4 +28,10 @@ test("単一履歴項目が文書上限を超えてもUTF-8を壊さず分割し
   assert.ok(chunks.length > 1);
   assert.ok(chunks.every((chunk) => Buffer.byteLength(chunk.payload, "utf8") <= 400_000));
   assert.deepEqual(JSON.parse(chunks.map((chunk) => chunk.payload).join("")), entries);
+});
+
+test("履歴チャンクIDはチャットと連番から安定して生成する", () => {
+  assert.equal(historyChunkId("chat-1", 0), historyChunks("chat-1", [entry("1", "a")])[0].id);
+  assert.match(historyChunkId("chat-1", 2), /-000002$/);
+  assert.notEqual(historyChunkId("chat-1", 2), historyChunkId("chat-2", 2));
 });
