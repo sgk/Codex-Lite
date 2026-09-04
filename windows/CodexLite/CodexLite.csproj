@@ -8,6 +8,7 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <Version>0.4.0</Version>
     <RemoteSyncEnabled Condition="'$(RemoteSyncEnabled)' == ''">false</RemoteSyncEnabled>
     <DefineConstants Condition="'$(RemoteSyncEnabled)' == 'true'">$(DefineConstants);CODEX_LITE_REMOTE_SYNC</DefineConstants>
   </PropertyGroup>

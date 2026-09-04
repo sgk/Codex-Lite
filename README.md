@@ -82,6 +82,12 @@ make debug-build
 
 ビルド時には `CodexLite.exe`、`CodexLite.dll` に加え、`run-daemon.sh` と `daemon/` が出力先へコピーされます。リポジトリ直下のGit管理外 `.env` に `GOOGLE_OAUTH_CLIENT_SECRET` が設定されている場合だけ、Firebase設定を含むバンドル済み `remote-agent/` とビルド時生成のOAuth設定も同梱し、Remote同期UIを有効にします。Remote Agentは配布先から開発リポジトリを探索しません。実行中プロセスを止めるのは、準備済みディレクトリを実行用ディレクトリへ切り替える間だけです。配置結果とエラーは `runtime/deploy-debug.log` で確認できます。
 
+配布用ReleaseビルドとZIPは次のターゲットで作成します。既定の出力は `artifacts/CodexLite-v0.4.0-win-x64.zip` です。
+
+```bash
+make release-zip VERSION=0.4.0
+```
+
 ## 起動方法
 
 通常は `make debug-build` が配置と起動まで行います。手動で起動する場合は、実行用ディレクトリの `CodexLite.exe` を使います。

@@ -4,10 +4,9 @@ DOTNET ?= /mnt/c/Program Files/dotnet/dotnet.exe
 POWERSHELL ?= /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
 CONFIGURATION ?= Release
 RUNTIME ?= win-x64
+VERSION ?= 0.4.0
 ARTIFACTS_DIR ?= artifacts
-CURRENT_STAMP := $(shell date +%Y%m%d-%H%M%S)
-RELEASE_STAMP ?= $(CURRENT_STAMP)
-RELEASE_NAME ?= CodexLite-$(RELEASE_STAMP)
+RELEASE_NAME ?= CodexLite-v$(VERSION)-$(RUNTIME)
 RELEASE_DIR := $(ARTIFACTS_DIR)/$(RELEASE_NAME)
 RELEASE_ZIP := $(ARTIFACTS_DIR)/$(RELEASE_NAME).zip
 
@@ -20,17 +19,12 @@ debug-build-launch:
 	"$(POWERSHELL)" -NoProfile -ExecutionPolicy Bypass -File scripts/build-debug.ps1
 
 release-zip:
-	mkdir -p "$(ARTIFACTS_DIR)"
-	rm -rf "$(RELEASE_DIR)" "$(RELEASE_ZIP)"
-	npm --prefix remote run build:agent
-	"$(DOTNET)" publish windows/CodexLite/CodexLite.csproj \
-		-c "$(CONFIGURATION)" \
-		-r "$(RUNTIME)" \
-		--self-contained false \
-		-p:PublishSingleFile=false \
-		-o "$(RELEASE_DIR)"
-	"$(POWERSHELL)" -NoProfile -Command \
-		'Compress-Archive -Path "$(RELEASE_DIR)/*" -DestinationPath "$(RELEASE_ZIP)" -Force'
+	"$(POWERSHELL)" -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1 \
+		-Version "$(VERSION)" \
+		-Configuration "$(CONFIGURATION)" \
+		-Runtime "$(RUNTIME)" \
+		-OutputDirectory "$(RELEASE_DIR)" \
+		-ZipPath "$(RELEASE_ZIP)"
 	@echo "$(RELEASE_ZIP)"
 
 clean-release:
