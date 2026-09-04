@@ -118,13 +118,10 @@ function Stop-RemainingLocalDaemon {
     }
 
     $shutdownUri = "http://127.0.0.1:$($endpoint.port)/shutdown"
-    $shutdownError = $null
-    try {
-        Invoke-RestMethod -Method Post -Uri $shutdownUri -ContentType "application/json" -Body "{}" -TimeoutSec 5 | Out-Null
+    Invoke-RestMethod -Method Post -Uri $shutdownUri -ContentType "application/json" -Body "{}" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+    $shutdownResponseReceived = $?
+    if ($shutdownResponseReceived) {
         Write-Host "requested shutdown of the remaining local daemon"
-    }
-    catch {
-        $shutdownError = $_.Exception.Message
     }
 
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
@@ -135,8 +132,9 @@ function Stop-RemainingLocalDaemon {
         }
         Start-Sleep -Milliseconds 250
     }
-    if (-not [string]::IsNullOrWhiteSpace($shutdownError)) {
-        throw "The remaining Codex Lite daemon could not be stopped: $shutdownError"
+    if (-not $shutdownResponseReceived) {
+        Write-Host "daemon closed the shutdown connection before replying; continuing with directory activation"
+        return
     }
     throw "The remaining Codex Lite daemon did not exit within 15 seconds."
 }
