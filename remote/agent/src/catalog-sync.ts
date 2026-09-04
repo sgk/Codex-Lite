@@ -25,6 +25,17 @@ export interface CatalogProject {
   chats: CatalogChat[];
 }
 
+export interface CloudCatalogChatIdentity {
+  documentId: string;
+  projectId: string;
+  chatId: string;
+}
+
+export interface StaleCloudCatalogIds {
+  projectDocumentIds: string[];
+  chats: Array<{ documentId: string; chatId: string }>;
+}
+
 export interface CatalogChanges {
   changedProjects: Array<{ project: CatalogProject; syncOrder: number }>;
   changedChats: Array<{ projectId: string; chat: CatalogChat; syncOrder: number }>;
@@ -97,6 +108,26 @@ export function diffCatalog(previous: CatalogProject[] | undefined, current: Cat
 
 export function catalogRecordCount(projects: CatalogProject[]): number {
   return projects.reduce((total, project) => total + 1 + project.chats.length, 0);
+}
+
+/**
+ * Identify stale lightweight catalog records without reading history payloads.
+ * History chunks can then be queried only for the stale chat ids returned here.
+ */
+export function staleCloudCatalogIds(
+  localProjects: Array<{ id: string; chats: Array<{ id: string }> }>,
+  cloudProjectDocumentIds: string[],
+  cloudChats: CloudCatalogChatIdentity[],
+): StaleCloudCatalogIds {
+  const activeProjects = new Map(
+    localProjects.map((project) => [project.id, new Set(project.chats.map((chat) => chat.id))]),
+  );
+  return {
+    projectDocumentIds: cloudProjectDocumentIds.filter((projectId) => !activeProjects.has(projectId)),
+    chats: cloudChats
+      .filter((chat) => !activeProjects.get(chat.projectId)?.has(chat.chatId))
+      .map((chat) => ({ documentId: chat.documentId, chatId: chat.chatId })),
+  };
 }
 
 /**

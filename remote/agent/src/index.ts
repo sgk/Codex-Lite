@@ -20,7 +20,7 @@ import {
   type DocumentReference,
 } from "firebase/firestore";
 import type { RemoteOperation, RemoteTaskPayload } from "../../shared/src/types.js";
-import { catalogRetryDecision, diffCatalog, prioritizeCatalogChanges, type CatalogProject } from "./catalog-sync.js";
+import { catalogRetryDecision, diffCatalog, prioritizeCatalogChanges, staleCloudCatalogIds, type CatalogProject } from "./catalog-sync.js";
 import { loadAgentConfig } from "./config.js";
 import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon, type SseEvent } from "./daemon.js";
@@ -452,17 +452,12 @@ async function syncCatalog(): Promise<void> {
       catalog.selectedChatId,
     );
     phase = "stale";
+    // Firestore getDocs cannot be cancelled. Do not wrap these reads in a
+    // Promise.race timeout: a timed-out read would continue in the background
+    // and overlap the next retry.
     const staleReferences = lastCatalogSnapshot === undefined
-      ? await withTimeout(
-        findStaleCatalogReferences(catalog),
-        30_000,
-        "クラウド上の既存会話確認がタイムアウトしました。",
-      )
-      : await withTimeout(
-        staleReferencesFromChanges(changes),
-        30_000,
-        "解除したプロジェクトのクラウド会話確認がタイムアウトしました。",
-      );
+      ? await findStaleCatalogReferences(catalog)
+      : await staleReferencesFromChanges(changes);
     let recordsTotal = prioritizedChanges.length + staleReferences.length;
     let recordsWritten = 0;
     for (let offset = 0; offset < staleReferences.length; offset += 450) {
@@ -606,24 +601,29 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message:
 }
 
 async function findStaleCatalogReferences(catalog: { projects: Array<{ id: string; chats: Array<{ id: string }> }> }): Promise<DocumentReference<DocumentData>[]> {
-  const activeProjects = new Map(catalog.projects.map((project) => [project.id, new Set(project.chats.map((chat) => chat.id))]));
-  const stale: DocumentReference<DocumentData>[] = [];
   const existingChats = await getDocs(collection(deviceRef, "chats"));
-  for (const chat of existingChats.docs) {
-    const projectId = textField(chat.data(), "projectId");
-    const chatId = textField(chat.data(), "chatId") || chat.id;
-    if (!activeProjects.get(projectId)?.has(chatId)) stale.push(chat.ref);
-  }
   const existingProjects = await getDocs(collection(deviceRef, "projects"));
-  for (const project of existingProjects.docs) {
-    if (!activeProjects.has(project.id)) stale.push(project.ref);
+  const staleIds = staleCloudCatalogIds(
+    catalog.projects,
+    existingProjects.docs.map((project) => project.id),
+    existingChats.docs.map((chat) => ({
+      documentId: chat.id,
+      projectId: textField(chat.data(), "projectId"),
+      chatId: textField(chat.data(), "chatId") || chat.id,
+    })),
+  );
+  const stale = new Map<string, DocumentReference<DocumentData>>();
+  for (const projectId of staleIds.projectDocumentIds) {
+    const reference = doc(deviceRef, "projects", projectId);
+    stale.set(reference.path, reference);
   }
-  const activeChatIds = new Set(catalog.projects.flatMap((project) => project.chats.map((chat) => chat.id)));
-  const existingHistoryChunks = await getDocs(collection(deviceRef, "historyChunks"));
-  for (const chunk of existingHistoryChunks.docs) {
-    if (!activeChatIds.has(textField(chunk.data(), "chatId"))) stale.push(chunk.ref);
+  for (const chat of staleIds.chats) {
+    const chatReference = doc(deviceRef, "chats", chat.documentId);
+    stale.set(chatReference.path, chatReference);
+    const chunks = await getDocs(query(collection(deviceRef, "historyChunks"), where("chatId", "==", chat.chatId)));
+    for (const chunk of chunks.docs) stale.set(chunk.ref.path, chunk.ref);
   }
-  return stale;
+  return [...stale.values()];
 }
 
 async function staleReferencesFromChanges(changes: ReturnType<typeof diffCatalog>): Promise<DocumentReference<DocumentData>[]> {
