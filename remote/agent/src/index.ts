@@ -20,7 +20,7 @@ import {
   type DocumentReference,
 } from "firebase/firestore";
 import type { RemoteOperation, RemoteTaskPayload } from "../../shared/src/types.js";
-import { catalogRetryDecision, diffCatalog, prioritizeCatalogChanges, staleCloudCatalogIds, type CatalogProject } from "./catalog-sync.js";
+import { catalogRetryDecision, cloudCatalogSnapshot, diffCatalog, prioritizeCatalogChanges, type CatalogProject } from "./catalog-sync.js";
 import { loadAgentConfig } from "./config.js";
 import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon, type SseEvent } from "./daemon.js";
@@ -423,9 +423,9 @@ async function syncCatalog(): Promise<void> {
     // first-time history migration.
     reconcileDesktopRunWatchers(catalog.projects);
     const chatsTotal = catalog.projects.reduce((total, project) => total + project.chats.length, 0);
-    const changes = diffCatalog(lastCatalogSnapshot, catalog.projects);
-    const hasChanges = lastCatalogSnapshot === undefined
-      || changes.changedProjects.length > 0
+    const previousCatalog = lastCatalogSnapshot ?? await loadCloudCatalogSnapshot();
+    const changes = diffCatalog(previousCatalog, catalog.projects);
+    const hasChanges = changes.changedProjects.length > 0
       || changes.changedChats.length > 0
       || changes.removedProjects.length > 0
       || changes.removedChats.length > 0;
@@ -455,9 +455,7 @@ async function syncCatalog(): Promise<void> {
     // Firestore getDocs cannot be cancelled. Do not wrap these reads in a
     // Promise.race timeout: a timed-out read would continue in the background
     // and overlap the next retry.
-    const staleReferences = lastCatalogSnapshot === undefined
-      ? await findStaleCatalogReferences(catalog)
-      : await staleReferencesFromChanges(changes);
+    const staleReferences = await staleReferencesFromChanges(changes);
     let recordsTotal = prioritizedChanges.length + staleReferences.length;
     let recordsWritten = 0;
     for (let offset = 0; offset < staleReferences.length; offset += 450) {
@@ -468,7 +466,7 @@ async function syncCatalog(): Promise<void> {
     }
 
     const previousChats = new Map(
-      (lastCatalogSnapshot ?? []).flatMap((project) =>
+      previousCatalog.flatMap((project) =>
         project.chats.map((chat) => [`${project.id}\n${chat.id}`, chat] as const)),
     );
     const writes: Array<{ reference: DocumentReference<DocumentData>; data: Record<string, unknown> }> = [];
@@ -600,30 +598,27 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message:
   }
 }
 
-async function findStaleCatalogReferences(catalog: { projects: Array<{ id: string; chats: Array<{ id: string }> }> }): Promise<DocumentReference<DocumentData>[]> {
-  const existingChats = await getDocs(collection(deviceRef, "chats"));
-  const existingProjects = await getDocs(collection(deviceRef, "projects"));
-  const staleIds = staleCloudCatalogIds(
-    catalog.projects,
-    existingProjects.docs.map((project) => project.id),
+async function loadCloudCatalogSnapshot(): Promise<CatalogProject[]> {
+  const [existingProjects, existingChats] = await Promise.all([
+    getDocs(collection(deviceRef, "projects")),
+    getDocs(collection(deviceRef, "chats")),
+  ]);
+  return cloudCatalogSnapshot(
+    existingProjects.docs.map((project) => ({
+      id: project.id,
+      name: textField(project.data(), "displayName"),
+      syncOrder: numberField(project.data(), "syncOrder"),
+    })),
     existingChats.docs.map((chat) => ({
-      documentId: chat.id,
+      id: textField(chat.data(), "chatId") || chat.id,
       projectId: textField(chat.data(), "projectId"),
-      chatId: textField(chat.data(), "chatId") || chat.id,
+      title: textField(chat.data(), "title"),
+      status: textField(chat.data(), "status"),
+      syncOrder: numberField(chat.data(), "syncOrder"),
+      updatedAt: textField(chat.data(), "lastUpdatedAt") || undefined,
+      historyRevision: textField(chat.data(), "historyRevision") || undefined,
     })),
   );
-  const stale = new Map<string, DocumentReference<DocumentData>>();
-  for (const projectId of staleIds.projectDocumentIds) {
-    const reference = doc(deviceRef, "projects", projectId);
-    stale.set(reference.path, reference);
-  }
-  for (const chat of staleIds.chats) {
-    const chatReference = doc(deviceRef, "chats", chat.documentId);
-    stale.set(chatReference.path, chatReference);
-    const chunks = await getDocs(query(collection(deviceRef, "historyChunks"), where("chatId", "==", chat.chatId)));
-    for (const chunk of chunks.docs) stale.set(chunk.ref.path, chunk.ref);
-  }
-  return [...stale.values()];
 }
 
 async function staleReferencesFromChanges(changes: ReturnType<typeof diffCatalog>): Promise<DocumentReference<DocumentData>[]> {
@@ -715,6 +710,10 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function textField(value: unknown, name: string): string {
   return isObject(value) && typeof value[name] === "string" ? value[name] as string : "";
+}
+
+function numberField(value: unknown, name: string): number {
+  return isObject(value) && typeof value[name] === "number" ? value[name] as number : Number.MAX_SAFE_INTEGER;
 }
 
 function reportBackgroundError(error: unknown): void {

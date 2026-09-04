@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { catalogRecordCount, catalogRetryDecision, diffCatalog, prioritizeCatalogChanges, staleCloudCatalogIds, type CatalogProject } from "../../agent/src/catalog-sync.js";
+import { catalogRecordCount, catalogRetryDecision, cloudCatalogSnapshot, diffCatalog, prioritizeCatalogChanges, type CatalogProject } from "../../agent/src/catalog-sync.js";
 
 const first: CatalogProject[] = [
   {
@@ -76,20 +76,15 @@ test("同じカタログ版の同期失敗は待機を増やして3回で止め�
   assert.deepEqual(catalogRetryDecision(3, 10, 10), { backoffMs: 120_000 });
 });
 
-test("起動時の削除確認は軽量なカタログから削除対象チャットを特定する", () => {
-  assert.deepEqual(staleCloudCatalogIds(
-    first,
-    ["project-1", "project-old"],
+test("起動時は軽量なクラウドカタログを前回同期状態として復元する", () => {
+  assert.deepEqual(cloudCatalogSnapshot(
     [
-      { documentId: "chat-1", projectId: "project-1", chatId: "chat-1" },
-      { documentId: "chat-old", projectId: "project-1", chatId: "chat-old" },
-      { documentId: "orphan", projectId: "project-old", chatId: "orphan" },
+      { id: "project-2", name: "Two", syncOrder: 1 },
+      { id: "project-1", name: "One", syncOrder: 0 },
     ],
-  ), {
-    projectDocumentIds: ["project-old"],
-    chats: [
-      { documentId: "chat-old", chatId: "chat-old" },
-      { documentId: "orphan", chatId: "orphan" },
+    [
+      { id: "chat-2", projectId: "project-1", title: "Second", status: "idle", historyRevision: "r1", syncOrder: 1 },
+      { id: "chat-1", projectId: "project-1", title: "First", status: "idle", historyRevision: "r1", syncOrder: 0 },
     ],
-  });
+  ), first);
 });

@@ -25,15 +25,20 @@ export interface CatalogProject {
   chats: CatalogChat[];
 }
 
-export interface CloudCatalogChatIdentity {
-  documentId: string;
-  projectId: string;
-  chatId: string;
+export interface CloudCatalogProjectRecord {
+  id: string;
+  name: string;
+  syncOrder: number;
 }
 
-export interface StaleCloudCatalogIds {
-  projectDocumentIds: string[];
-  chats: Array<{ documentId: string; chatId: string }>;
+export interface CloudCatalogChatRecord {
+  id: string;
+  projectId: string;
+  title: string;
+  status: string;
+  syncOrder: number;
+  updatedAt?: string;
+  historyRevision?: string;
 }
 
 export interface CatalogChanges {
@@ -110,24 +115,44 @@ export function catalogRecordCount(projects: CatalogProject[]): number {
   return projects.reduce((total, project) => total + 1 + project.chats.length, 0);
 }
 
-/**
- * Identify stale lightweight catalog records without reading history payloads.
- * History chunks can then be queried only for the stale chat ids returned here.
- */
-export function staleCloudCatalogIds(
-  localProjects: Array<{ id: string; chats: Array<{ id: string }> }>,
-  cloudProjectDocumentIds: string[],
-  cloudChats: CloudCatalogChatIdentity[],
-): StaleCloudCatalogIds {
-  const activeProjects = new Map(
-    localProjects.map((project) => [project.id, new Set(project.chats.map((chat) => chat.id))]),
-  );
-  return {
-    projectDocumentIds: cloudProjectDocumentIds.filter((projectId) => !activeProjects.has(projectId)),
-    chats: cloudChats
-      .filter((chat) => !activeProjects.get(chat.projectId)?.has(chat.chatId))
-      .map((chat) => ({ documentId: chat.documentId, chatId: chat.chatId })),
-  };
+/** Build the previous sync baseline from lightweight Firestore catalog docs. */
+export function cloudCatalogSnapshot(
+  projectRecords: CloudCatalogProjectRecord[],
+  chatRecords: CloudCatalogChatRecord[],
+): CatalogProject[] {
+  const projects = new Map<string, { project: CatalogProject; syncOrder: number }>();
+  for (const record of projectRecords) {
+    projects.set(record.id, {
+      project: { id: record.id, name: record.name, chats: [] },
+      syncOrder: record.syncOrder,
+    });
+  }
+  for (const record of chatRecords) {
+    let target = projects.get(record.projectId);
+    if (!target) {
+      target = {
+        project: { id: record.projectId, name: "", chats: [] },
+        syncOrder: Number.MAX_SAFE_INTEGER,
+      };
+      projects.set(record.projectId, target);
+    }
+    target.project.chats.push({
+      id: record.id,
+      title: record.title,
+      status: record.status,
+      ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
+      ...(record.historyRevision ? { historyRevision: record.historyRevision } : {}),
+    });
+  }
+  const chatOrders = new Map(chatRecords.map((record) => [`${record.projectId}\n${record.id}`, record.syncOrder]));
+  for (const { project } of projects.values()) {
+    project.chats.sort((left, right) =>
+      (chatOrders.get(`${project.id}\n${left.id}`) ?? Number.MAX_SAFE_INTEGER)
+      - (chatOrders.get(`${project.id}\n${right.id}`) ?? Number.MAX_SAFE_INTEGER));
+  }
+  return [...projects.values()]
+    .sort((left, right) => left.syncOrder - right.syncOrder)
+    .map(({ project }) => project);
 }
 
 /**
