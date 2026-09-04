@@ -118,8 +118,9 @@ function Stop-RemainingLocalDaemon {
     }
 
     $shutdownUri = "http://127.0.0.1:$($endpoint.port)/shutdown"
-    Invoke-RestMethod -Method Post -Uri $shutdownUri -ContentType "application/json" -Body "{}" -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
-    $shutdownResponseReceived = $?
+    $curl = Join-Path $env:SystemRoot "System32\curl.exe"
+    & $curl --silent --output NUL --max-time 5 --request POST --header "Content-Type: application/json" --data "{}" $shutdownUri
+    $shutdownResponseReceived = $LASTEXITCODE -eq 0
     if ($shutdownResponseReceived) {
         Write-Host "requested shutdown of the remaining local daemon"
     }
