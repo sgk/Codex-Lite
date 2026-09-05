@@ -40,7 +40,7 @@ const elements = {
   newChat: byId<HTMLInputElement>("new-chat"),
   content: byId<HTMLTextAreaElement>("content"), send: byId<HTMLButtonElement>("send"),
   approvalLevel: byId<HTMLSelectElement>("approval-level"), model: byId<HTMLSelectElement>("model"), reasoning: byId<HTMLSelectElement>("reasoning"), attachFile: byId<HTMLButtonElement>("attach-file"), fileInput: byId<HTMLInputElement>("file-input"), attachments: byId<HTMLElement>("attachments"), composer: byId<HTMLElement>("composer"),
-  conversationBody: byId<HTMLElement>("conversation-body"), history: byId<HTMLElement>("history"), error: byId<HTMLElement>("error"), runProgress: byId<HTMLElement>("run-progress"), runProgressText: byId<HTMLElement>("run-progress-text"), cancelRun: byId<HTMLButtonElement>("cancel-run"), approvalActions: byId<HTMLElement>("approval-actions"), approvalSummary: byId<HTMLElement>("approval-summary"),
+  conversationBody: byId<HTMLElement>("conversation-body"), history: byId<HTMLElement>("history"), sendQueue: byId<HTMLElement>("send-queue"), error: byId<HTMLElement>("error"), runProgress: byId<HTMLElement>("run-progress"), runProgressText: byId<HTMLElement>("run-progress-text"), cancelRun: byId<HTMLButtonElement>("cancel-run"), approvalActions: byId<HTMLElement>("approval-actions"), approvalSummary: byId<HTMLElement>("approval-summary"),
   usagePanel: byId<HTMLElement>("usage-panel"), usageRefresh: byId<HTMLButtonElement>("usage-refresh"), usageProvider: byId<HTMLElement>("usage-provider"), usageFiveText: byId<HTMLElement>("usage-five-text"), usageWeekText: byId<HTMLElement>("usage-week-text"), usageCredits: byId<HTMLElement>("usage-credits"), usageFiveBar: byId<HTMLElement>("usage-five-bar"), usageWeekBar: byId<HTMLElement>("usage-week-bar"), usageFiveStart: byId<HTMLElement>("usage-five-start"), usageFiveEnd: byId<HTMLElement>("usage-five-end"), usageWeekStart: byId<HTMLElement>("usage-week-start"), usageWeekEnd: byId<HTMLElement>("usage-week-end"),
   sidebar: document.querySelector<HTMLElement>(".sidebar")!, treeMenu: byId<HTMLButtonElement>("tree-menu"), sidebarBackdrop: byId<HTMLButtonElement>("sidebar-backdrop"),
   projectTree: byId<HTMLElement>("project-tree"), treeEmpty: byId<HTMLElement>("tree-empty"), breadcrumb: byId<HTMLElement>("breadcrumb"), conversationTitle: byId<HTMLElement>("conversation-title"), conversationStatus: byId<HTMLElement>("conversation-status"),
@@ -74,7 +74,7 @@ let activeTaskId = "";
 let activeTaskEvents: Array<QueryDocumentSnapshot<DocumentData>> = [];
 let activeApproval: { runId: string; requestId: string; summary: string } | undefined;
 let pendingCreatedChat: { taskId: string; deviceId: string; projectId: string; optimisticId: string } | undefined;
-let optimisticInstructions: Array<{ id: string; taskId?: string; deviceId: string; projectId: string; chatId?: string; content: string; createdAt: string; baselineCount: number; state: "sending" | "failed" }> = [];
+let optimisticInstructions: Array<{ id: string; taskId?: string; deviceId: string; projectId: string; chatId?: string; content: string; attachmentCount: number; createdAt: string; baselineCount: number; state: "queued" | "sending" | "accepted" | "failed" }> = [];
 const expandedProgressIds = new Set<string>();
 let pendingAttachments: Array<RemoteAttachment & { previewUrl?: string }> = [];
 let composerFileDragDepth = 0;
@@ -789,9 +789,11 @@ function renderConversationHeader(): void {
   elements.attachFile.disabled = !project;
   elements.usagePanel.hidden = !project || Boolean(chat);
   const optimistic = selectedOptimisticInstructions();
+  const accepted = optimistic.filter((item) => item.state === "accepted");
+  const queued = optimistic.filter((item) => item.state !== "accepted");
   const liveProgress = selectedLiveProgressItems();
   const conversationSelection = `${elements.device.value}:${elements.project.value}:${elements.chat.value}`;
-  const conversationSignature = `${elements.device.value}:${elements.project.value}:${elements.chat.value}:${selectedHistorySignature}:${chat ? `${text(chat.data().historyRevision)}:${number(chat.data().historyItemCount)}` : ""}:${optimistic.map((item) => `${item.id}:${item.state}:${item.chatId || ""}`).join(",")}:${progressSignature(liveProgress)}`;
+  const conversationSignature = `${elements.device.value}:${elements.project.value}:${elements.chat.value}:${selectedHistorySignature}:${chat ? `${text(chat.data().historyRevision)}:${number(chat.data().historyItemCount)}` : ""}:${accepted.map((item) => item.id).join(",")}:${progressSignature(liveProgress)}`;
   if (conversationSignature !== renderedConversationSignature) {
     const selectionChanged = conversationSelection !== renderedConversationSelection;
     if (selectionChanged) expandedProgressIds.clear();
@@ -802,43 +804,44 @@ function renderConversationHeader(): void {
     renderConversationHistory();
     scheduleConversationHistoryPosition(chat ? position : "start", previousOffset);
   }
+  renderSendQueue(queued);
   renderRunProgress();
 }
 
 function renderConversationHistory(): void {
   elements.history.replaceChildren();
   const chat = selectedChats(elements.project.value).find((item) => item.id === elements.chat.value);
-  const optimistic = selectedOptimisticInstructions();
+  const accepted = selectedOptimisticInstructions().filter((item) => item.state === "accepted");
   const liveProgress = selectedLiveProgressItems();
   if (!chat) {
-    if (!optimistic.length && !liveProgress.length) elements.history.append(paragraph(
+    if (!accepted.length && !liveProgress.length) elements.history.append(paragraph(
       elements.project.value ? "メッセージを入力して、新しいチャットを開始できます。" : "左のツリーからチャットを選択してください。",
       "empty muted",
     ));
-    appendConversationTimeline([], optimistic, liveProgress);
+    appendConversationTimeline([], accepted, liveProgress);
     return;
   }
   const entries = selectedHistoryEntries;
-  if (!entries.length && !optimistic.length && !liveProgress.length) {
+  if (!entries.length && !accepted.length && !liveProgress.length) {
     elements.history.append(paragraph("このチャットの履歴はまだ同期されていません。", "empty muted"));
     return;
   }
-  appendConversationTimeline(entries, optimistic, liveProgress);
+  appendConversationTimeline(entries, accepted, liveProgress);
 }
 
 function appendConversationTimeline(
   entries: HistoryEntry[],
-  optimistic: (typeof optimisticInstructions),
+  accepted: (typeof optimisticInstructions),
   liveProgress: Record<string, unknown>[],
 ): void {
   const timeline = sortConversationTimeline([
     ...entries.map((value, sourceOrder) => ({ type: "history" as const, value, createdAt: value.createdAt, sourceOrder })),
-    ...optimistic.map((value, index) => ({ type: "optimistic" as const, value, createdAt: value.createdAt, sourceOrder: entries.length + index })),
-    ...liveProgress.map((value, index) => ({ type: "progress" as const, value, createdAt: text(value.createdAt), sourceOrder: entries.length + optimistic.length + index })),
+    ...accepted.map((value, index) => ({ type: "optimistic" as const, value, createdAt: value.createdAt, sourceOrder: entries.length + index })),
+    ...liveProgress.map((value, index) => ({ type: "progress" as const, value, createdAt: text(value.createdAt), sourceOrder: entries.length + accepted.length + index })),
   ]);
   for (const item of timeline) {
     if (item.type === "optimistic") {
-      appendOptimisticInstruction(item.value);
+      appendAcceptedInstruction(item.value);
       continue;
     }
     if (item.type === "progress") {
@@ -868,6 +871,18 @@ function appendConversationTimeline(
     message.append(meta, bubble);
     elements.history.append(message);
   }
+}
+
+function appendAcceptedInstruction(item: (typeof optimisticInstructions)[number]): void {
+  const message = div("message user instruction optimistic");
+  const meta = document.createElement("div");
+  meta.className = "message-meta";
+  meta.textContent = "あなた · 送信済み";
+  const bubble = document.createElement("div");
+  bubble.className = "message-bubble";
+  renderMarkdown(bubble, item.content);
+  message.append(meta, bubble);
+  elements.history.append(message);
 }
 
 function appendLiveProgressItem(item: Record<string, unknown>): void {
@@ -922,16 +937,22 @@ function appendStatusHistoryItem(kind: "reasoning" | "work", summary: string, de
   elements.history.append(message);
 }
 
-function appendOptimisticInstruction(item: (typeof optimisticInstructions)[number]): void {
-  const message = div(`message user instruction optimistic ${item.state}`);
-  const meta = document.createElement("div");
-  meta.className = "message-meta";
-  meta.textContent = `あなた · ${item.state === "failed" ? "送信失敗" : "送信中"}`;
-  const bubble = document.createElement("div");
-  bubble.className = "message-bubble";
-  renderMarkdown(bubble, item.content);
-  message.append(meta, bubble);
-  elements.history.append(message);
+function renderSendQueue(items = selectedOptimisticInstructions()): void {
+  elements.sendQueue.replaceChildren(...items.map((item) => {
+    const row = div(`send-queue-item ${item.state}`);
+    const state = document.createElement("span");
+    state.className = "send-queue-state";
+    state.textContent = item.state === "failed" ? "送信エラー" : item.state === "sending" ? "送信中" : "送信待ち";
+    const content = document.createElement("span");
+    content.className = "send-queue-content";
+    content.textContent = item.content;
+    const attachments = document.createElement("span");
+    attachments.className = "send-queue-state";
+    attachments.textContent = item.attachmentCount ? `添付 ${item.attachmentCount}件` : "";
+    row.append(state, content, attachments);
+    return row;
+  }));
+  elements.sendQueue.hidden = items.length === 0;
 }
 
 function isConversationHistoryNearEnd(): boolean {
@@ -981,9 +1002,10 @@ async function sendInstruction(): Promise<void> {
     projectId,
     ...(chatId ? { chatId } : {}),
     content,
+    attachmentCount: wireAttachments.length,
     createdAt: new Date().toISOString(),
     baselineCount: chatId ? syncedInstructionCount(deviceId, projectId, chatId, content) : 0,
-    state: "sending" as const,
+    state: "queued" as const,
   };
   optimisticInstructions.push(optimistic);
   elements.content.value = "";
@@ -1185,6 +1207,12 @@ function reconcileOptimisticTaskStatus(): void {
     const status = task ? text(task.data().status) : "";
     if (["failed", "cancelled", "connection_lost"].includes(status) && item.state !== "failed") {
       item.state = "failed";
+      changed = true;
+    } else if (status === "completed" && item.state !== "accepted") {
+      item.state = "accepted";
+      changed = true;
+    } else if (["claimed", "running", "waiting_for_approval"].includes(status) && item.state === "queued") {
+      item.state = "sending";
       changed = true;
     }
   }

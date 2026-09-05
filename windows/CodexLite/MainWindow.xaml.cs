@@ -55,12 +55,59 @@ public partial class MainWindow : Window
     private static readonly TimeSpan InitialHistoryLayoutSettleDelay = TimeSpan.FromMilliseconds(180);
 
     private sealed record ActiveUiRun(string RunId, string ProjectId, string ChatId, CancellationTokenSource Cancellation);
-    private sealed record QueuedComposerSubmission(
-        string ProjectId,
-        string? ChatId,
-        string Model,
-        string Content,
-        IReadOnlyList<MessageAttachmentDto> Attachments);
+    private sealed class QueuedComposerSubmission : INotifyPropertyChanged
+    {
+        public QueuedComposerSubmission(
+            string projectId,
+            string? chatId,
+            string model,
+            string content,
+            IReadOnlyList<MessageAttachmentDto> attachments)
+        {
+            ProjectId = projectId;
+            ChatId = chatId;
+            Model = model;
+            Content = content;
+            Attachments = attachments;
+        }
+
+        public string ProjectId { get; }
+        public string? ChatId { get; private set; }
+        public string Model { get; }
+        public string Content { get; }
+        public IReadOnlyList<MessageAttachmentDto> Attachments { get; }
+        public string State { get; private set; } = "queued";
+        public string StateLabel => State switch
+        {
+            "sending" => "送信中",
+            "failed" => "送信エラー",
+            _ => "送信待ち",
+        };
+        public string AttachmentLabel => Attachments.Count > 0 ? $"添付 {Attachments.Count}件" : "";
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public void AssignChat(string chatId)
+        {
+            if (string.Equals(ChatId, chatId, StringComparison.Ordinal))
+            {
+                return;
+            }
+            ChatId = chatId;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ChatId)));
+        }
+
+        public void SetState(string state)
+        {
+            if (string.Equals(State, state, StringComparison.Ordinal))
+            {
+                return;
+            }
+            State = state;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(State)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StateLabel)));
+        }
+    }
     private sealed record RemoteSyncProgress(
         string State,
         string? Phase = null,
@@ -143,6 +190,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, List<string>> _persistedChatOrderIdsByProject = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<string>> _composerHistoryByChat = new(StringComparer.Ordinal);
     private readonly List<QueuedComposerSubmission> _queuedComposerSubmissions = new();
+    private readonly ObservableCollection<QueuedComposerSubmission> _visibleComposerSubmissions = new();
     private string _textSizeSetting = "small";
     private string _codexHomeMode = DefaultCodexHomeMode();
     private bool _wrapFileText;
@@ -268,6 +316,7 @@ public partial class MainWindow : Window
         FilesTree.AddHandler(TreeViewItem.ExpandedEvent, new RoutedEventHandler(FilesTreeItem_Expanded));
         PendingAttachmentsList.ItemsSource = _pendingAttachments;
         NewChatPendingAttachmentsList.ItemsSource = _pendingAttachments;
+        ComposerQueueList.ItemsSource = _visibleComposerSubmissions;
         CleanupOldAttachmentFiles();
         LocationChanged += (_, _) => SaveUiState();
         SizeChanged += (_, _) => SaveUiState();
@@ -3304,9 +3353,10 @@ public partial class MainWindow : Window
 
     private void UpdateCommandButtonState()
     {
+        RefreshVisibleComposerQueue();
         var hasProjectContext = _selectedProject is not null;
-        var canContinueChat = _selectedChat is { CanContinue: true } && !_isPreparingSend;
-        var canStartNewChat = _selectedProject is not null && _selectedChat is null && !_isPreparingSend;
+        var canContinueChat = _selectedChat is { CanContinue: true };
+        var canStartNewChat = _selectedProject is not null && _selectedChat is null;
         var selectedRun = SelectedActiveRun();
         var isCancellingSelectedRun = _selectedChat is not null && _cancellingRunChatIds.Contains(_selectedChat.Id);
         var hasLiteRun = _activeRunsByChat.Count > 0;
@@ -6898,32 +6948,16 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task SubmitMessageBoxAsync(bool allowQueue = true)
+    private Task SubmitMessageBoxAsync()
     {
         UpdateCommandButtonState();
-        if (allowQueue && (!_isDaemonHttpReady || !_isSendTransportReady))
+        if ((_selectedChat is null && !NewChatSendButton.IsEnabled)
+            || (_selectedChat is not null && !SendButton.IsEnabled))
         {
-            QueueCurrentComposerSubmission();
-            return;
+            return Task.CompletedTask;
         }
-        if (_selectedChat is null)
-        {
-            if (NewChatSendButton.IsEnabled)
-            {
-                await SendCurrentMessageAsync();
-            }
-            return;
-        }
-        if (!SendButton.IsEnabled)
-        {
-            return;
-        }
-        if (SelectedActiveRun() is not null)
-        {
-            await SteerCurrentRunAsync();
-            return;
-        }
-        await SendCurrentMessageAsync();
+        QueueCurrentComposerSubmission();
+        return Task.CompletedTask;
     }
 
     private void QueueCurrentComposerSubmission()
@@ -6958,6 +6992,7 @@ public partial class MainWindow : Window
         }
         _pendingAttachments.Clear();
         _sendReadinessTimer.Start();
+        RefreshVisibleComposerQueue();
         StatusText.Text = $"送信待ち | {_queuedComposerSubmissions.Count}件";
         WritePerformanceLog(
             "composer-queued",
@@ -6981,8 +7016,9 @@ public partial class MainWindow : Window
                 var chatId = _selectedChat?.Id;
                 var index = _queuedComposerSubmissions.FindIndex(item =>
                     string.Equals(item.ProjectId, projectId, StringComparison.Ordinal)
-                    && string.Equals(item.ChatId, chatId, StringComparison.Ordinal));
-                if (index < 0 || HasComposerContent() || _pendingAttachments.Count > 0)
+                    && string.Equals(item.ChatId, chatId, StringComparison.Ordinal)
+                    && !string.Equals(item.State, "failed", StringComparison.Ordinal));
+                if (index < 0)
                 {
                     return;
                 }
@@ -6993,40 +7029,34 @@ public partial class MainWindow : Window
                     var readiness = await _client.PrepareSendAsync(submission.Model, timeout.Token);
                     if (readiness is not { Ready: true })
                     {
+                        submission.SetState("queued");
                         _sendReadinessTimer.Start();
                         StatusText.Text = $"送信準備待ち | {_queuedComposerSubmissions.Count}件";
                         return;
                     }
                     if (!string.Equals(_selectedProject?.Id, submission.ProjectId, StringComparison.Ordinal)
-                        || !string.Equals(_selectedChat?.Id, submission.ChatId, StringComparison.Ordinal)
-                        || HasComposerContent()
-                        || _pendingAttachments.Count > 0)
+                        || !string.Equals(_selectedChat?.Id, submission.ChatId, StringComparison.Ordinal))
                     {
                         return;
                     }
-                    _queuedComposerSubmissions.RemoveAt(index);
                     _preparedSendModel = submission.Model;
                     _isSendTransportReady = true;
-                    if (_selectedChat is null)
-                    {
-                        NewChatMessageBox.Text = submission.Content;
-                    }
-                    else
-                    {
-                        MessageBox.Text = submission.Content;
-                    }
-                    foreach (var attachment in submission.Attachments)
-                    {
-                        _pendingAttachments.Add(attachment);
-                    }
+                    submission.SetState("sending");
                     StatusText.Text = $"送信キューを処理中 | 残り {_queuedComposerSubmissions.Count}件";
-                    await SubmitMessageBoxAsync(allowQueue: false);
+                    var accepted = SelectedActiveRun() is not null
+                        ? await SteerCurrentRunAsync(submission)
+                        : await SendCurrentMessageAsync(submission);
+                    if (!accepted)
+                    {
+                        return;
+                    }
                 }
                 catch (Exception ex)
                 {
                     WritePerformanceLog(
                         "composer-queue-error",
                         $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)} count={_queuedComposerSubmissions.Count}");
+                    submission.SetState("queued");
                     _sendReadinessTimer.Start();
                     StatusText.Text = $"送信準備待ち | {_queuedComposerSubmissions.Count}件";
                     return;
@@ -7038,6 +7068,42 @@ public partial class MainWindow : Window
             _isProcessingComposerQueue = false;
             UpdateCommandButtonState();
         }
+    }
+
+    private void RefreshVisibleComposerQueue()
+    {
+        var projectId = _selectedProject?.Id;
+        var chatId = _selectedChat?.Id;
+        var expected = _queuedComposerSubmissions
+            .Where(item => string.Equals(item.ProjectId, projectId, StringComparison.Ordinal)
+                && string.Equals(item.ChatId, chatId, StringComparison.Ordinal))
+            .ToArray();
+        if (_visibleComposerSubmissions.SequenceEqual(expected))
+        {
+            return;
+        }
+        _visibleComposerSubmissions.Clear();
+        foreach (var submission in expected)
+        {
+            _visibleComposerSubmissions.Add(submission);
+        }
+    }
+
+    private void RemoveQueuedComposerSubmission(QueuedComposerSubmission submission)
+    {
+        _queuedComposerSubmissions.Remove(submission);
+        RefreshVisibleComposerQueue();
+    }
+
+    private void AssignNewChatQueue(string projectId, string chatId)
+    {
+        foreach (var submission in _queuedComposerSubmissions.Where(item =>
+                     string.Equals(item.ProjectId, projectId, StringComparison.Ordinal)
+                     && item.ChatId is null))
+        {
+            submission.AssignChat(chatId);
+        }
+        RefreshVisibleComposerQueue();
     }
 
     private void AttachFiles_Click(object sender, RoutedEventArgs e)
@@ -7183,24 +7249,27 @@ public partial class MainWindow : Window
         RefreshSendTransportReadiness();
     }
 
-    private async Task SendCurrentMessageAsync()
+    private async Task<bool> SendCurrentMessageAsync(QueuedComposerSubmission submission)
     {
         using var phase = EnterUiPhase("SendCurrentMessage");
         if (_selectedProject is not ProjectDto project)
         {
-            return;
+            submission.SetState("failed");
+            return false;
         }
         if (_selectedChat is { CanContinue: false } readOnlyChat)
         {
             StatusText.Text = $"read-only chat | {readOnlyChat.ContinueDisabledReason}";
-            return;
+            submission.SetState("failed");
+            return false;
         }
-        var startsNewChat = _selectedChat is null;
-        var content = startsNewChat ? NewChatMessageBox.Text : MessageBox.Text;
-        var attachments = _pendingAttachments.ToArray();
-        if (string.IsNullOrWhiteSpace(content) && attachments.Length == 0)
+        var startsNewChat = submission.ChatId is null;
+        var content = submission.Content;
+        var attachments = submission.Attachments;
+        if (string.IsNullOrWhiteSpace(content) && attachments.Count == 0)
         {
-            return;
+            submission.SetState("failed");
+            return false;
         }
         if (string.IsNullOrWhiteSpace(content))
         {
@@ -7219,9 +7288,14 @@ public partial class MainWindow : Window
         if (chat is null)
         {
             _isPreparingSend = false;
+            submission.SetState("failed");
             UpdateCommandButtonState();
             WritePerformanceLog("send-aborted", "reason=chat-null");
-            return;
+            return false;
+        }
+        if (startsNewChat)
+        {
+            AssignNewChatQueue(project.Id, chat.Id);
         }
         AddComposerHistory(chat.Id, content);
         WritePerformanceLog("send-chat-ready", $"chatId={LogText(chat.Id)} title={LogText(chat.Title)}");
@@ -7238,39 +7312,7 @@ public partial class MainWindow : Window
         _isPreparingSend = false;
         RemoveComposerHint();
         RemoveNewChatComposerHint();
-        if (startsNewChat)
-        {
-            NewChatMessageBox.Text = "";
-        }
-        else
-        {
-            MessageBox.Text = "";
-        }
-        _pendingAttachments.Clear();
-        string assistantMessageId;
-        using (EnterUiPhase("SendCurrentMessage/AppendLocalMessages"))
-        {
-            AppendMessage(new MessageDto(
-                $"local-user-{Guid.NewGuid():N}",
-                chat.Id,
-                "user",
-                content,
-                null,
-                DateTimeOffset.UtcNow.ToString("O"),
-                "instruction",
-                attachments),
-                scrollToEnd: true);
-            assistantMessageId = $"local-assistant-pending-{Guid.NewGuid():N}";
-            AppendMessage(new MessageDto(
-                assistantMessageId,
-                chat.Id,
-                "assistant",
-                StartingResponseText,
-                null,
-                DateTimeOffset.UtcNow.ToString("O"),
-                "waiting"),
-                scrollToEnd: true);
-        }
+        var assistantMessageId = $"local-assistant-pending-{Guid.NewGuid():N}";
         var sendStartedAt = DateTimeOffset.Now;
         var startHeartbeat = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         startHeartbeat.Tick += (_, _) =>
@@ -7292,6 +7334,29 @@ public partial class MainWindow : Window
             }
             if (result is not null)
             {
+                RemoveQueuedComposerSubmission(submission);
+                using (EnterUiPhase("SendCurrentMessage/AppendLocalMessages"))
+                {
+                    AppendMessageForChat(project.Id, chat.Id, new MessageDto(
+                        $"local-user-{Guid.NewGuid():N}",
+                        chat.Id,
+                        "user",
+                        content,
+                        null,
+                        DateTimeOffset.UtcNow.ToString("O"),
+                        "instruction",
+                        attachments),
+                        scrollToEnd: true);
+                    AppendMessageForChat(project.Id, chat.Id, new MessageDto(
+                        assistantMessageId,
+                        chat.Id,
+                        "assistant",
+                        StartingResponseText,
+                        null,
+                        DateTimeOffset.UtcNow.ToString("O"),
+                        "waiting"),
+                        scrollToEnd: true);
+                }
                 WritePerformanceLog("send-run-started", $"runId={LogText(result.RunId)} messageId={LogText(result.MessageId)}");
                 var startElapsed = DateTimeOffset.Now - sendStartedAt;
                 startHeartbeat.Stop();
@@ -7299,11 +7364,13 @@ public partial class MainWindow : Window
                 _activeRunsByChat[chat.Id] = new ActiveUiRun(result.RunId, project.Id, chat.Id, runCts);
                 ShowRunProgressForChat(chat.Id, $"実行中 | started after {startElapsed.TotalSeconds:F1}s");
                 runStarted = true;
+                EndRunActivity(chat.Id);
                 UpdateCommandButtonState();
-                using (EnterUiPhase("SendCurrentMessage/StreamRun"))
-                {
-                    await StreamRunAsync(result.RunId, project.Id, chat.Id, assistantMessageId, sendStartedAt, runToken);
-                }
+                _ = ContinueAcceptedRunAsync(result.RunId, project.Id, chat.Id, assistantMessageId, sendStartedAt, runToken);
+            }
+            else
+            {
+                submission.SetState("failed");
             }
         }
         catch (OperationCanceledException)
@@ -7311,10 +7378,7 @@ public partial class MainWindow : Window
             WritePerformanceLog("send-cancelled", $"runStarted={runStarted}");
             if (!runStarted)
             {
-                foreach (var attachment in attachments)
-                {
-                    _pendingAttachments.Add(attachment);
-                }
+                submission.SetState("failed");
             }
             ReplaceMessageContentIfWaiting(chat.Id, assistantMessageId, "キャンセルしました");
             StatusText.Text = "キャンセルしました";
@@ -7323,10 +7387,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             WritePerformanceLog("send-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
-            foreach (var attachment in attachments)
-            {
-                _pendingAttachments.Add(attachment);
-            }
+            submission.SetState("failed");
             ReplaceMessageContentIfWaiting(chat.Id, assistantMessageId, $"send error | {ShortError(ex)}");
             StatusText.Text = $"send error | {ShortError(ex)}";
             ShowPendingRunProgressForChat(chat.Id, $"送信エラー | {ShortError(ex)}");
@@ -7334,13 +7395,47 @@ public partial class MainWindow : Window
         finally
         {
             startHeartbeat.Stop();
-            EndRunActivity(chat.Id);
             if (!runStarted)
             {
+                EndRunActivity(chat.Id);
                 runCts.Dispose();
+                CancelButton.IsEnabled = false;
             }
             UpdateCommandButtonState();
-            CancelButton.IsEnabled = false;
+        }
+        return runStarted;
+    }
+
+    private async Task ContinueAcceptedRunAsync(
+        string runId,
+        string projectId,
+        string chatId,
+        string assistantMessageId,
+        DateTimeOffset sendStartedAt,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using (EnterUiPhase("SendCurrentMessage/StreamRun"))
+            {
+                await StreamRunAsync(runId, projectId, chatId, assistantMessageId, sendStartedAt, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            ReplaceMessageContentIfWaiting(chatId, assistantMessageId, "キャンセルしました");
+            StatusText.Text = "キャンセルしました";
+            ShowPendingRunProgressForChat(chatId, "キャンセルしました");
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog("stream-background-error", $"runId={LogText(runId)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+            ReplaceMessageContentIfWaiting(chatId, assistantMessageId, $"stream error | {ShortError(ex)}");
+            StatusText.Text = $"stream error | {ShortError(ex)}";
+        }
+        finally
+        {
+            UpdateCommandButtonState();
         }
     }
 
@@ -7418,19 +7513,21 @@ public partial class MainWindow : Window
         return text.Length > 80 ? text[..77].TrimEnd() + "..." : text;
     }
 
-    private async Task SteerCurrentRunAsync()
+    private async Task<bool> SteerCurrentRunAsync(QueuedComposerSubmission submission)
     {
         if (SelectedActiveRun() is not { } activeRun || _selectedChat is not ChatDto chat)
         {
             StatusText.Text = "追加指示は、Codex Liteで応答中のチャットを選択している時だけ送れます。";
-            return;
+            submission.SetState("failed");
+            return false;
         }
         var runId = activeRun.RunId;
-        var content = MessageBox.Text.Trim();
-        var attachments = _pendingAttachments.ToArray();
-        if (string.IsNullOrWhiteSpace(content) && attachments.Length == 0)
+        var content = submission.Content;
+        var attachments = submission.Attachments;
+        if (string.IsNullOrWhiteSpace(content) && attachments.Count == 0)
         {
-            return;
+            submission.SetState("failed");
+            return false;
         }
         if (string.IsNullOrWhiteSpace(content))
         {
@@ -7440,43 +7537,35 @@ public partial class MainWindow : Window
         WritePerformanceLog(
             "steer-request",
             $"chatId={LogText(chat.Id)} runId={LogText(runId)} content={LogText(content)} attachments={LogText(AttachmentLogText(attachments), 12000)}");
-        MessageBox.Text = "";
-        _pendingAttachments.Clear();
         AddComposerHistory(chat.Id, content);
         var localMessageId = $"local-steer-{Guid.NewGuid():N}";
-        AppendMessage(new MessageDto(
-            localMessageId,
-            chat.Id,
-            "user",
-            content,
-            runId,
-            DateTimeOffset.UtcNow.ToString("O"),
-            "instruction",
-            attachments),
-            scrollToEnd: true);
         try
         {
             SendButton.IsEnabled = false;
             ShowRunProgressForChat(chat.Id, "追加指示を送信中");
             await _client.SteerRunAsync(runId, content, attachments);
+            RemoveQueuedComposerSubmission(submission);
+            AppendMessageForChat(activeRun.ProjectId, chat.Id, new MessageDto(
+                localMessageId,
+                chat.Id,
+                "user",
+                content,
+                runId,
+                DateTimeOffset.UtcNow.ToString("O"),
+                "instruction",
+                attachments),
+                scrollToEnd: true);
             WritePerformanceLog("steer-sent", $"chatId={LogText(chat.Id)} runId={LogText(runId)}");
             ShowRunProgressForChat(chat.Id, "追加指示を送信済み");
+            return true;
         }
         catch (Exception ex)
         {
             WritePerformanceLog("steer-error", $"chatId={LogText(chat.Id)} runId={LogText(runId)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
-            var localMessage = _messages.FirstOrDefault(message => message.Id == localMessageId);
-            if (localMessage is not null)
-            {
-                _messages.Remove(localMessage);
-            }
-            MessageBox.Text = content;
-            foreach (var attachment in attachments)
-            {
-                _pendingAttachments.Add(attachment);
-            }
+            submission.SetState("failed");
             StatusText.Text = $"steer error | {ShortError(ex)}";
             ShowRunProgressForChat(chat.Id, $"追加指示エラー | {ShortError(ex)}");
+            return false;
         }
         finally
         {
@@ -7871,6 +7960,21 @@ public partial class MainWindow : Window
         if (scrollToEnd)
         {
             ScrollMessagesToEnd();
+        }
+    }
+
+    private void AppendMessageForChat(string projectId, string chatId, MessageDto message, bool scrollToEnd)
+    {
+        if (string.Equals(_selectedProject?.Id, projectId, StringComparison.Ordinal)
+            && string.Equals(_selectedChat?.Id, chatId, StringComparison.Ordinal))
+        {
+            AppendMessage(message, scrollToEnd);
+            return;
+        }
+        if (_chatHistoryCache.TryGetValue(ChatHistoryCacheKey(projectId, chatId), out var entry))
+        {
+            InsertMessageInChronologicalOrder(entry.Messages, message);
+            entry.TotalCount = Math.Max(entry.TotalCount, entry.Messages.Count(IsRealHistoryMessage));
         }
     }
 
