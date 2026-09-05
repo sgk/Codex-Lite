@@ -237,7 +237,8 @@ public sealed record RunDto(
     long Revision = 0,
     long EventSequence = 0,
     IReadOnlyList<PendingApprovalDto>? PendingApprovals = null,
-    bool Adopted = false);
+    bool Adopted = false,
+    string? MessageId = null);
 
 public sealed record RemoteCatalogRevisionDto(long Revision);
 

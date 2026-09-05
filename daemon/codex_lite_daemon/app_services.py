@@ -995,9 +995,17 @@ class AppServerRunService:
                     "summary": "The previous turn had already completed; the instruction was started as the next turn.",
                 },
             )
-        self.messages.insert_message(run.chat_id, "user", _content_with_attachment_summary(clean_content, attachments or []), run_id=run_id, kind="instruction")
+        user_message = self.messages.insert_message(
+            run.chat_id,
+            "user",
+            _content_with_attachment_summary(clean_content, attachments or []),
+            run_id=run_id,
+            kind="instruction",
+        )
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
-        return _run_out(run_id, run)
+        result = _run_out(run_id, run)
+        result["messageId"] = user_message["id"]
+        return result
 
     async def resolve_approval(self, run_id: str, request_id: str, decision: str) -> dict:
         run = self.runs.get(run_id)

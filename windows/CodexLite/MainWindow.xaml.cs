@@ -7338,11 +7338,11 @@ public partial class MainWindow : Window
                 using (EnterUiPhase("SendCurrentMessage/AppendLocalMessages"))
                 {
                     AppendMessageForChat(project.Id, chat.Id, new MessageDto(
-                        $"local-user-{Guid.NewGuid():N}",
+                        result.MessageId,
                         chat.Id,
                         "user",
                         content,
-                        null,
+                        result.RunId,
                         DateTimeOffset.UtcNow.ToString("O"),
                         "instruction",
                         attachments),
@@ -7538,15 +7538,18 @@ public partial class MainWindow : Window
             "steer-request",
             $"chatId={LogText(chat.Id)} runId={LogText(runId)} content={LogText(content)} attachments={LogText(AttachmentLogText(attachments), 12000)}");
         AddComposerHistory(chat.Id, content);
-        var localMessageId = $"local-steer-{Guid.NewGuid():N}";
         try
         {
             SendButton.IsEnabled = false;
             ShowRunProgressForChat(chat.Id, "追加指示を送信中");
-            await _client.SteerRunAsync(runId, content, attachments);
+            var result = await _client.SteerRunAsync(runId, content, attachments);
+            if (result is null || string.IsNullOrWhiteSpace(result.MessageId))
+            {
+                throw new InvalidOperationException("追加指示の保存済みメッセージIDを取得できませんでした。");
+            }
             RemoveQueuedComposerSubmission(submission);
             AppendMessageForChat(activeRun.ProjectId, chat.Id, new MessageDto(
-                localMessageId,
+                result.MessageId,
                 chat.Id,
                 "user",
                 content,
@@ -7968,11 +7971,19 @@ public partial class MainWindow : Window
         if (string.Equals(_selectedProject?.Id, projectId, StringComparison.Ordinal)
             && string.Equals(_selectedChat?.Id, chatId, StringComparison.Ordinal))
         {
+            if (_messages.Any(item => string.Equals(item.Id, message.Id, StringComparison.Ordinal)))
+            {
+                return;
+            }
             AppendMessage(message, scrollToEnd);
             return;
         }
         if (_chatHistoryCache.TryGetValue(ChatHistoryCacheKey(projectId, chatId), out var entry))
         {
+            if (entry.Messages.Any(item => string.Equals(item.Id, message.Id, StringComparison.Ordinal)))
+            {
+                return;
+            }
             InsertMessageInChronologicalOrder(entry.Messages, message);
             entry.TotalCount = Math.Max(entry.TotalCount, entry.Messages.Count(IsRealHistoryMessage));
         }

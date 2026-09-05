@@ -2782,6 +2782,7 @@ async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
     )
 
     assert steered["status"] == "running"
+    assert steered["messageId"].startswith("msg_")
     assert app_server.requests[-1] == (
         "turn/steer",
         {
@@ -2803,6 +2804,7 @@ async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
         },
     )
     stored_messages = messages.list_messages(project_id, chat_id)
+    assert stored_messages[-1]["id"] == steered["messageId"]
     assert stored_messages[-1]["content"] == f"please continue with more detail\n\nAttachments:\n- image.png: {image_path}\n- note.txt: {note_path}"
     db.close()
 
