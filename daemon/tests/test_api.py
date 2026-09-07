@@ -414,6 +414,8 @@ def test_model_list_adds_configured_deepseek_model(monkeypatch: pytest.MonkeyPat
     result = _model_list_out(["gpt-5.6-sol"], {}, "", dynamic=True)
 
     assert "gpt-5.6-sol" in result["availableModels"]
+    assert "gpt-6-astra" in result["availableModels"]
+    assert result["reasoningEffortsByModel"]["gpt-6-astra"] == ["low", "medium", "high", "xhigh", "max"]
     assert "deepseek-v4-flash" in result["availableModels"]
     assert "deepseek-v4-pro" in result["availableModels"]
     assert "deepseek-v4-flash-vision-exp" in result["availableModels"]

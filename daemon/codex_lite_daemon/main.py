@@ -36,7 +36,10 @@ from .services import ChatService, MessageService, ProjectService
 from .transcript_import import TranscriptImportService
 
 
-_STATIC_OPENAI_MODELS = ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5", "gpt-5-codex"]
+_STATIC_OPENAI_MODELS = ["gpt-6-astra", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5", "gpt-5-codex"]
+_STATIC_OPENAI_REASONING_EFFORTS = {
+    "gpt-6-astra": ["low", "medium", "high", "xhigh", "max"],
+}
 
 
 def create_app(config: Config | None = None) -> Starlette:
@@ -841,6 +844,8 @@ def _model_ids_from_response(response: object) -> list[str]:
 def _static_reasoning_efforts(model: str = "") -> list[str]:
     if model.strip().lower().startswith("deepseek-"):
         return ["", *deepseek_reasoning_efforts()]
+    if model in _STATIC_OPENAI_REASONING_EFFORTS:
+        return ["", *_STATIC_OPENAI_REASONING_EFFORTS[model]]
     if model.endswith("luna"):
         return ["", "low", "medium", "high", "xhigh", "max"]
     return ["", "low", "medium", "high", "xhigh", "max", "ultra"]
@@ -850,6 +855,8 @@ def _model_list_out(models: list[str], efforts_by_model: dict[str, list[str]], s
     configured_deepseek_models = deepseek_model_ids()
     merged_models = [*models, *_STATIC_OPENAI_MODELS, *configured_deepseek_models]
     merged_efforts = dict(efforts_by_model)
+    for model, efforts in _STATIC_OPENAI_REASONING_EFFORTS.items():
+        merged_efforts.setdefault(model, efforts)
     for model in configured_deepseek_models:
         merged_efforts.setdefault(model, deepseek_reasoning_efforts())
     return {
