@@ -120,7 +120,7 @@ app-serverから `item/commandExecution/requestApproval` または `item/fileCha
 
 Windowsアプリは `wsl.exe -d <ディストリビューション> -- bash -c ...` で同梱スクリプトを起動する。起動時に login shell は使わない。これは `.bash_profile` 等で ssh-agent や ssh-add がパスフレーズ入力待ちになり、デーモン起動が止まることを避けるためである。スクリプトは `$HOME/.local/share/codex-lite/daemon-venv` を作成または再利用し、同梱 `pyproject.toml` のハッシュが変わった場合だけパッケージを再導入する。
 
-開発ビルドでは `windows/CodexLite/bin` をビルド成果物、`runtime/CodexLite` を実行用配置先として分離する。ビルドが成功するまでは実行中クライアントを停止しない。成功後の配置は独立したWindowsプロセスへ引き渡し、隣接ディレクトリへのコピー完了後にクライアントを正常終了して実行用ディレクトリを入れ替え、最新クライアントを起動する。デスクトップショートカットは実行用配置先を参照する。
+開発ビルドでは `windows/CodexLite/bin` をビルド成果物、Windowsデスクトップ直下の `Codex Lite` フォルダーを実行用配置先として分離する。ビルドが成功するまでは実行中クライアントを停止しない。成功後の配置は独立したWindowsプロセスへ引き渡し、デスクトップ上の隣接ディレクトリへのコピー完了後にクライアントを正常終了して `Codex Lite` フォルダーを入れ替え、最新クライアントを起動する。デスクトップの `Codex Lite` ショートカットはこの実行用配置先を参照する。以後のデプロイ、配置、更新はこのフォルダー内容を更新する。
 
 WindowsのRemote同期対応ビルドと配布ZIPには、Firebase SDKを含むRemote Agentを単一のNode用JavaScriptへバンドルし、Firebase公開設定およびAgent既定値とともに `remote-agent/` へ同梱する。OAuthクライアントIDとクライアントシークレットはリポジトリ直下のGit管理外 `.env` だけで管理し、ビルド時に一時設定へ変換してパッケージへ同梱する。`.env` 自体は同梱しない。`GOOGLE_OAUTH_CLIENT_SECRET` が無い場合、Remote AgentとOAuth設定を同梱せず、WindowsアプリのRemote同期UIおよび自動接続を無効にしたビルドを生成する。Windowsアプリは `AppContext.BaseDirectory/remote-agent/index.js` だけをWSLのNode.jsで起動し、開発リポジトリ、ソース版 `remote/`、`node_modules`を探索しない。Firebase同期先は同梱 `firebase-config.json` の `projectId`、`apiKey`、`appId`で決定する。OAuthクライアント設定はGoogleログインにだけ使い、同期先の決定には使わない。
 

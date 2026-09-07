@@ -144,10 +144,14 @@ if (-not (Test-Path -LiteralPath (Join-Path $BuildDirectory "CodexLite.dll") -Pa
     throw "Build output is incomplete: $BuildDirectory"
 }
 
-$runtimeDirectory = [System.IO.Path]::GetFullPath((Split-Path -Parent $DeploymentDirectory))
-$currentDirectory = Assert-ExactChildPath -RuntimeDirectory $runtimeDirectory -Candidate $DeploymentDirectory -ExpectedName "CodexLite"
-$nextDirectory = Assert-ExactChildPath -RuntimeDirectory $runtimeDirectory -Candidate (Join-Path $runtimeDirectory "CodexLite-next") -ExpectedName "CodexLite-next"
-$previousDirectory = Assert-ExactChildPath -RuntimeDirectory $runtimeDirectory -Candidate (Join-Path $runtimeDirectory "CodexLite-previous") -ExpectedName "CodexLite-previous"
+$desktopDirectory = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath("Desktop"))
+$deploymentParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $DeploymentDirectory))
+if (-not [string]::Equals($deploymentParent, $desktopDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to deploy outside the Windows desktop: $DeploymentDirectory"
+}
+$currentDirectory = Assert-ExactChildPath -RuntimeDirectory $deploymentParent -Candidate $DeploymentDirectory -ExpectedName "Codex Lite"
+$nextDirectory = Assert-ExactChildPath -RuntimeDirectory $deploymentParent -Candidate (Join-Path $deploymentParent "Codex Lite-next") -ExpectedName "Codex Lite-next"
+$previousDirectory = Assert-ExactChildPath -RuntimeDirectory $deploymentParent -Candidate (Join-Path $deploymentParent "Codex Lite-previous") -ExpectedName "Codex Lite-previous"
 
 if (Test-Path -LiteralPath $nextDirectory) {
     Remove-Item -LiteralPath $nextDirectory -Recurse -Force

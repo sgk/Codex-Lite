@@ -73,13 +73,15 @@ function Read-DotEnvFile {
 
 function Assert-DeploymentPath {
     param(
-        [string]$RepoRoot,
         [string]$DeploymentDirectory
     )
 
-    $runtimeRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot "runtime"))
+    $desktopDirectory = [Environment]::GetFolderPath("Desktop")
+    if ([string]::IsNullOrWhiteSpace($desktopDirectory)) {
+        throw "The Windows desktop directory could not be resolved."
+    }
     $deploymentPath = [System.IO.Path]::GetFullPath($DeploymentDirectory)
-    $expectedPath = [System.IO.Path]::GetFullPath((Join-Path $runtimeRoot "CodexLite"))
+    $expectedPath = [System.IO.Path]::GetFullPath((Join-Path $desktopDirectory "Codex Lite"))
     if (-not [string]::Equals($deploymentPath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to replace unexpected deployment directory: $deploymentPath"
     }
@@ -126,7 +128,8 @@ if ($remoteSyncEnabled -and [string]::IsNullOrWhiteSpace($oauthClientId)) {
 $remoteSyncEnabledText = if ($remoteSyncEnabled) { "true" } else { "false" }
 $generatedOAuthConfigPath = Join-Path $repoRoot "windows/CodexLite/obj/remote-oauth.generated.json"
 $buildDirectory = Join-Path $repoRoot "windows/CodexLite/bin/$Configuration/net8.0-windows"
-$deploymentDirectory = Assert-DeploymentPath -RepoRoot $repoRoot -DeploymentDirectory (Join-Path $repoRoot "runtime/CodexLite")
+$desktopDirectory = [Environment]::GetFolderPath("Desktop")
+$deploymentDirectory = Assert-DeploymentPath -DeploymentDirectory (Join-Path $desktopDirectory "Codex Lite")
 
 $ancestry = @(Get-ProcessAncestry -ProcessId $PID)
 $protectedProcessIds = @($ancestry | ForEach-Object { [int]$_.ProcessId })
@@ -176,11 +179,11 @@ finally {
     }
 }
 
-$runtimeDirectory = Split-Path -Parent $deploymentDirectory
-New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
+$logDirectory = Join-Path $repoRoot "runtime"
+New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $deployScript = Join-Path $repoRoot "scripts/deploy-debug.ps1"
 $protectedIds = $protectedProcessIds -join ","
-$deployLog = Join-Path $runtimeDirectory "deploy-debug.log"
+$deployLog = Join-Path $logDirectory "deploy-debug.log"
 $deployArguments = @(
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
