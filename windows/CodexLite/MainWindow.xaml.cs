@@ -9305,16 +9305,31 @@ public partial class MainWindow : Window
         Process.Start(new ProcessStartInfo { FileName = fileName, Arguments = arguments, UseShellExecute = true });
     }
 
-    private static void OpenExplorer(string targetPath, bool selectTarget)
+    private void OpenExplorer(string targetPath, bool selectTarget)
     {
         var explorerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
-        var startInfo = new ProcessStartInfo
+        var arguments = selectTarget
+            ? $"/select,\"{targetPath}\""
+            : $"\"{targetPath}\"";
+        try
         {
-            FileName = explorerPath,
-            UseShellExecute = true
-        };
-        startInfo.ArgumentList.Add(selectTarget ? $"/select,{targetPath}" : targetPath);
-        Process.Start(startInfo);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = explorerPath,
+                Arguments = arguments,
+                UseShellExecute = true
+            });
+            WritePerformanceLog(
+                "explorer-opened",
+                $"selectTarget={selectTarget} targetPath={LogText(targetPath)}");
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog(
+                "explorer-open-error",
+                $"selectTarget={selectTarget} targetPath={LogText(targetPath)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+            StatusText.Text = $"Explorer open error | {ShortError(ex)}";
+        }
     }
 
     private string ToUncPath(string projectPath, string relativePath)
