@@ -523,6 +523,9 @@ public partial class MainWindow : Window
         BeginRunActivity(run.ChatId, "途中経過の配信へ再接続中...");
         var terminalReceived = false;
         var terminalSucceeded = false;
+        var currentAssistantMessageId = $"local-assistant-recovered-{Guid.NewGuid():N}";
+        var currentAgentMessageItemId = "";
+        var currentAssistantMessagePhase = "";
         try
         {
             foreach (var approval in run.PendingApprovals ?? [])
@@ -556,6 +559,16 @@ public partial class MainWindow : Window
                         continue;
                     }
                     FlushReasoningProgress(run.Id);
+                    if (IsAssistantMessageBoundaryProgress(method))
+                    {
+                        FlushAssistantMessageText(currentAssistantMessageId);
+                        if (HasRealAssistantContent(currentAssistantMessageId))
+                        {
+                            MarkAssistantMessageCompleted(run.ChatId, currentAssistantMessageId);
+                            currentAssistantMessageId = $"local-assistant-boundary-{Guid.NewGuid():N}";
+                        }
+                        continue;
+                    }
                     if (IsDisplayableProgress(progress) && !IsLowLevelDeltaProgress(method, progress))
                     {
                         ShowRunProgressForChat(run.ChatId, $"再接続済み | {progress}");
@@ -564,10 +577,49 @@ public partial class MainWindow : Window
                             AddRunProgress(progress, ProgressCategory(method, progress));
                         }
                     }
+                    if (IsDisplayableProgress(progress) && ShouldShowInlineProgress(method, progress))
+                    {
+                        FlushAssistantMessageText(currentAssistantMessageId);
+                        if (HasRealAssistantContent(currentAssistantMessageId))
+                        {
+                            MarkAssistantMessageCompleted(run.ChatId, currentAssistantMessageId);
+                        }
+                        else
+                        {
+                            RemoveAssistantPlaceholder(currentAssistantMessageId);
+                        }
+                        AddInlineProgressMessage(run.ChatId, run.Id, method, progress, details);
+                        currentAssistantMessageId = $"local-assistant-progress-{Guid.NewGuid():N}";
+                    }
                 }
                 else if (item.Event == "output")
                 {
                     ShowRunProgressForChat(run.ChatId, "再接続済み | 応答を受信中");
+                    var text = ExtractSseText(item.Data);
+                    var agentMessageItemId = ExtractSseString(item.Data, "messageId");
+                    var assistantMessagePhase = ExtractSseString(item.Data, "phase");
+                    if (!string.IsNullOrWhiteSpace(assistantMessagePhase)
+                        && !string.IsNullOrWhiteSpace(agentMessageItemId)
+                        && !agentMessageItemId.Equals(currentAgentMessageItemId, StringComparison.Ordinal))
+                    {
+                        FlushAssistantMessageText(currentAssistantMessageId);
+                        if (HasRealAssistantContent(currentAssistantMessageId))
+                        {
+                            MarkAssistantMessageCompleted(run.ChatId, currentAssistantMessageId);
+                            currentAssistantMessageId = NewAssistantMessageIdForPhase(assistantMessagePhase);
+                        }
+                        currentAgentMessageItemId = agentMessageItemId;
+                    }
+                    if (!string.IsNullOrWhiteSpace(assistantMessagePhase))
+                    {
+                        currentAssistantMessagePhase = assistantMessagePhase;
+                    }
+                    AppendOrUpdateAssistantMessage(
+                        run.ChatId,
+                        currentAssistantMessageId,
+                        run.Id,
+                        text,
+                        MessageKindForPhase(currentAssistantMessagePhase));
                 }
                 else if (item.Event == "approval")
                 {
@@ -575,6 +627,18 @@ public partial class MainWindow : Window
                 }
                 else if (item.Event is "done" or "error")
                 {
+                    FlushReasoningProgress(run.Id);
+                    FlushAssistantMessageText(currentAssistantMessageId);
+                    if (item.Event == "error")
+                    {
+                        AppendOrUpdateAssistantMessage(
+                            run.ChatId,
+                            currentAssistantMessageId,
+                            run.Id,
+                            ExtractSseText(item.Data));
+                        FlushAssistantMessageText(currentAssistantMessageId);
+                    }
+                    MarkAssistantMessageCompleted(run.ChatId, currentAssistantMessageId);
                     terminalReceived = true;
                     terminalSucceeded = item.Event == "done"
                         && ExtractSseString(item.Data, "status").Equals("succeeded", StringComparison.OrdinalIgnoreCase);
