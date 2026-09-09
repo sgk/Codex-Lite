@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 import shutil
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 from ..config import Config
 from ..errors import AppError
-from ..process_env import codex_process_env
+from ..process_env import codex_process_env, codex_search_path
 from .base import Runner, RunnerEvent
 
 
@@ -27,7 +26,11 @@ class CodexRunner(Runner):
                 self.codex_path = candidate
                 self.codex_version = version
                 return self.codex_path
-        raise AppError("codex_not_found", "Codex binary was not found.", 503)
+        raise AppError(
+            "codex_not_found",
+            "Codex CLI was not found in the WSL login PATH. Install Codex CLI in WSL or set CODEX_LITE_CODEX_PATH.",
+            503,
+        )
 
     def resolved_path_sync(self) -> str | None:
         if self.codex_path:
@@ -39,12 +42,7 @@ class CodexRunner(Runner):
         candidates: list[str] = []
         if self.config.codex_path:
             candidates.append(self.config.codex_path)
-        candidates.extend(str(path) for path in sorted((self.config.codex_home / "bin" / "wsl").glob("*/codex"), reverse=True))
-        candidates.extend(self._codex_desktop_candidate_paths())
-        home = Path.home()
-        candidates.extend(str(path) for path in sorted((home / ".vscode-server" / "extensions").glob("*/bin/linux-x86_64/codex"), reverse=True))
-        candidates.extend(str(path) for path in sorted((home / ".codex" / "bin").glob("*/codex"), reverse=True))
-        path_codex = shutil.which("codex")
+        path_codex = shutil.which("codex", path=codex_search_path())
         if path_codex:
             candidates.append(path_codex)
         seen: set[str] = set()
@@ -54,23 +52,6 @@ class CodexRunner(Runner):
                 seen.add(candidate)
                 unique.append(candidate)
         return unique
-
-    def _codex_desktop_candidate_paths(self) -> list[str]:
-        windows_home = _windows_home_from_codex_home(self.config.codex_home)
-        if windows_home is None:
-            return []
-        local_app_data = windows_home / "AppData" / "Local"
-        roots = [
-            local_app_data / "Programs",
-            local_app_data / "Codex",
-            local_app_data / "OpenAI",
-        ]
-        candidates: list[str] = []
-        for root in roots:
-            if not root.exists():
-                continue
-            candidates.extend(str(path) for path in _desktop_bundle_candidates(root))
-        return candidates
 
     async def _try_version(self, candidate: str) -> str | None:
         try:
@@ -159,35 +140,3 @@ class CodexRunner(Runner):
 
     def _env(self) -> dict[str, str]:
         return codex_process_env(self.config)
-
-
-def _windows_home_from_codex_home(codex_home: Path) -> Path | None:
-    path = codex_home
-    if path.name != ".codex":
-        return None
-    parent = path.parent
-    parts = parent.parts
-    if len(parts) >= 4 and parts[:3] == ("/", "mnt", "c") and parts[3] == "Users":
-        return parent
-    return None
-
-
-def _desktop_bundle_candidates(root: Path) -> list[Path]:
-    patterns = [
-        "Codex*/resources/app/bin/linux-x86_64/codex",
-        "Codex*/resources/app.asar.unpacked/bin/linux-x86_64/codex",
-        "Codex*/resources/app*/bin/linux-x86_64/codex",
-        "OpenAI*/resources/app/bin/linux-x86_64/codex",
-        "OpenAI*/resources/app.asar.unpacked/bin/linux-x86_64/codex",
-        "OpenAI*/resources/app*/bin/linux-x86_64/codex",
-        "*/resources/app/bin/linux-x86_64/codex",
-        "*/resources/app.asar.unpacked/bin/linux-x86_64/codex",
-        "*/resources/app*/bin/linux-x86_64/codex",
-        "resources/app/bin/linux-x86_64/codex",
-        "resources/app.asar.unpacked/bin/linux-x86_64/codex",
-        "resources/app*/bin/linux-x86_64/codex",
-    ]
-    candidates: list[Path] = []
-    for pattern in patterns:
-        candidates.extend(root.glob(pattern))
-    return candidates

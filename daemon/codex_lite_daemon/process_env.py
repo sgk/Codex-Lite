@@ -55,6 +55,11 @@ def codex_process_env(config: Config, codex_home: Path | None = None, codex_sqli
     return env
 
 
+def codex_search_path() -> str:
+    """Return the sanitized PATH from the user's normal WSL login shell."""
+    return _login_shell_env().get("PATH") or DEFAULT_PATH
+
+
 def _login_shell_env() -> dict[str, str]:
     global _LOGIN_ENV
     if _LOGIN_ENV is not None:

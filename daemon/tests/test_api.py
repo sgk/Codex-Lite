@@ -69,14 +69,10 @@ def make_runtime_settings(permission_profile: str = ":danger-full-access", appro
     return AppServerRuntimeSettings(permission_profile=permission_profile, approval_policy=approval_policy, model=model, reasoning_effort=reasoning_effort, approvals_reviewer=approvals_reviewer)
 
 
-def test_codex_runner_prefers_desktop_bundle_then_vscode_before_path(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    windows_home = linux_tmp_path / "mnt" / "c" / "Users" / "tester"
-    codex_home_codex = windows_home / ".codex" / "bin" / "wsl" / "abc123" / "codex"
-    desktop_codex = windows_home / "AppData" / "Local" / "Programs" / "Codex" / "resources" / "app" / "bin" / "linux-x86_64" / "codex"
-    vscode_codex = linux_tmp_path / "home" / "tester" / ".vscode-server" / "extensions" / "openai.chatgpt-test" / "bin" / "linux-x86_64" / "codex"
+def test_codex_runner_prefers_explicit_path_then_wsl_login_path(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path_codex = linux_tmp_path / "bin" / "codex"
     explicit_codex = linux_tmp_path / "explicit" / "codex"
-    for path in (codex_home_codex, desktop_codex, vscode_codex, path_codex, explicit_codex):
+    for path in (path_codex, explicit_codex):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("", encoding="utf-8")
 
@@ -84,18 +80,22 @@ def test_codex_runner_prefers_desktop_bundle_then_vscode_before_path(linux_tmp_p
     cfg = Config(
         **{
             **cfg.__dict__,
-            "codex_home": windows_home / ".codex",
             "codex_path": str(explicit_codex),
         }
     )
     runner = CodexRunner(cfg)
-    monkeypatch.setattr("codex_lite_daemon.runner.codex_runner.shutil.which", lambda name: str(path_codex) if name == "codex" else None)
-    monkeypatch.setattr("codex_lite_daemon.runner.codex_runner.Path.home", lambda: linux_tmp_path / "home" / "tester")
-    monkeypatch.setattr("codex_lite_daemon.runner.codex_runner._windows_home_from_codex_home", lambda _: windows_home)
+    monkeypatch.setattr("codex_lite_daemon.runner.codex_runner.codex_search_path", lambda: "/wsl/login/bin:/usr/bin")
+
+    def fake_which(name: str, *, path: str | None = None) -> str | None:
+        assert name == "codex"
+        assert path == "/wsl/login/bin:/usr/bin"
+        return str(path_codex)
+
+    monkeypatch.setattr("codex_lite_daemon.runner.codex_runner.shutil.which", fake_which)
 
     candidates = runner._candidate_paths()
 
-    assert candidates[:5] == [str(explicit_codex), str(codex_home_codex), str(desktop_codex), str(vscode_codex), str(path_codex)]
+    assert candidates == [str(explicit_codex), str(path_codex)]
 
 
 def test_app_server_command_enables_auto_compaction(linux_tmp_path: Path) -> None:
@@ -270,6 +270,7 @@ def test_codex_process_env_uses_safe_login_shell_values(linux_tmp_path: Path, mo
     assert env["PATH"] == "/opt/codex-lite-test/bin:/usr/bin"
     assert env["CODEX_HOME"] == str(cfg.codex_home)
     assert env["CODEX_SQLITE_HOME"] == str(cfg.codex_sqlite_home)
+    assert process_env.codex_search_path() == "/opt/codex-lite-test/bin:/usr/bin"
     assert "OPENAI_API_KEY" not in env
     assert "SOME_TOKEN" not in env
     assert calls[0][1] == "-lic"
@@ -296,6 +297,7 @@ def test_codex_process_env_loads_deepseek_key_from_user_file(linux_tmp_path: Pat
     secret_path = home / ".config" / "codex-lite" / "deepseek.env"
     secret_path.parent.mkdir(parents=True)
     secret_path.write_text("DEEPSEEK_API_KEY=sk-test-only\n", encoding="utf-8")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr(deepseek.Path, "home", lambda: home)
     monkeypatch.setattr(process_env, "_LOGIN_ENV", {"PATH": process_env.DEFAULT_PATH})
 
