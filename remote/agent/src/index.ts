@@ -24,7 +24,7 @@ import { catalogRetryDecision, cloudCatalogSnapshot, diffCatalog, prioritizeCata
 import { loadAgentConfig } from "./config.js";
 import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon, type SseEvent } from "./daemon.js";
-import { appendProgressItem, isCountableProgressEvent, type RemoteProgressItem } from "./progress-sync.js";
+import { appendProgressItem, isCountableProgressEvent, shouldFlushProgress, type RemoteProgressItem } from "./progress-sync.js";
 import { historyChunkId, historyChunks } from "./history-chunks.js";
 
 interface QueuedTask {
@@ -246,6 +246,8 @@ async function relayRun(taskRef: DocumentReference<DocumentData>, taskId: string
   let workActivityCount = 0;
   let progressItems: RemoteProgressItem[] = [];
   let writtenActivityCount = 0;
+  let progressRevision = 0;
+  let writtenProgressRevision = 0;
   let lastActivityWriteAt = 0;
   let pendingOutput: SseEvent[] = [];
   let outputTimer: ReturnType<typeof setTimeout> | undefined;
@@ -270,13 +272,20 @@ async function relayRun(taskRef: DocumentReference<DocumentData>, taskId: string
     });
   };
   const flushActivityCount = async (force = false) => {
-    if (!force && activityCount === writtenActivityCount) return;
     const now = Date.now();
-    if (!force && now - lastActivityWriteAt < 2_000) return;
+    if (!shouldFlushProgress(
+      activityCount,
+      writtenActivityCount,
+      progressRevision,
+      writtenProgressRevision,
+      now - lastActivityWriteAt,
+      force,
+    )) return;
     await updateDoc(chatRef, {
       activeRun: { id: runId, status: "running", startedAt, activityCount, reasoningActivityCount, workActivityCount, progressItems },
     });
     writtenActivityCount = activityCount;
+    writtenProgressRevision = progressRevision;
     lastActivityWriteAt = now;
   };
   for await (const event of daemon.events(runId)) {
@@ -288,13 +297,17 @@ async function relayRun(taskRef: DocumentReference<DocumentData>, taskId: string
     await flushOutput();
     if (event.event === "progress") {
       const method = isObject(event.data) ? textField(event.data, "method") : "";
-      progressItems = appendProgressItem(progressItems, event);
+      const nextProgressItems = appendProgressItem(progressItems, event);
+      if (nextProgressItems !== progressItems) {
+        progressItems = nextProgressItems;
+        progressRevision += 1;
+      }
       if (isCountableProgressEvent(event)) {
         activityCount += 1;
         if (method.startsWith("item/reasoning/")) reasoningActivityCount += 1;
         else workActivityCount += 1;
-        await flushActivityCount();
       }
+      await flushActivityCount();
       continue;
     }
     if (event.event === "output") {
@@ -350,31 +363,44 @@ async function relayDesktopRun(projectId: string, chatId: string, runId: string,
   let workActivityCount = 0;
   let progressItems: RemoteProgressItem[] = [];
   let writtenActivityCount = 0;
+  let progressRevision = 0;
+  let writtenProgressRevision = 0;
   let lastActivityWriteAt = 0;
   let terminalStatus = "connection_lost";
   await updateDoc(chatRef, {
     activeRun: { id: runId, status: "running", startedAt, activityCount: 0, reasoningActivityCount: 0, workActivityCount: 0, progressItems: [] },
   });
   const flush = async (force = false) => {
-    if (!force && activityCount === writtenActivityCount) return;
     const now = Date.now();
-    if (!force && now - lastActivityWriteAt < 2_000) return;
+    if (!shouldFlushProgress(
+      activityCount,
+      writtenActivityCount,
+      progressRevision,
+      writtenProgressRevision,
+      now - lastActivityWriteAt,
+      force,
+    )) return;
     await updateDoc(chatRef, {
       activeRun: { id: runId, status: "running", startedAt, activityCount, reasoningActivityCount, workActivityCount, progressItems },
     });
     writtenActivityCount = activityCount;
+    writtenProgressRevision = progressRevision;
     lastActivityWriteAt = now;
   };
   for await (const event of daemon.events(runId, afterSequence)) {
     if (event.event === "progress") {
       const method = isObject(event.data) ? textField(event.data, "method") : "";
-      progressItems = appendProgressItem(progressItems, event);
+      const nextProgressItems = appendProgressItem(progressItems, event);
+      if (nextProgressItems !== progressItems) {
+        progressItems = nextProgressItems;
+        progressRevision += 1;
+      }
       if (isCountableProgressEvent(event)) {
         activityCount += 1;
         if (method.startsWith("item/reasoning/")) reasoningActivityCount += 1;
         else workActivityCount += 1;
-        await flush();
       }
+      await flush();
     } else if (event.event === "done") {
       terminalStatus = isObject(event.data) ? textField(event.data, "status") || "completed" : "completed";
     } else if (event.event === "error") {

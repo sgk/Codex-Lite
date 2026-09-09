@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendProgressItem, isCountableProgressEvent, type RemoteProgressItem } from "./progress-sync.js";
+import { appendProgressItem, isCountableProgressEvent, shouldFlushProgress, type RemoteProgressItem } from "./progress-sync.js";
 
 test("reasoning deltas are combined without creating a Firestore write per delta", () => {
   let items = appendProgressItem([], { sequence: 1, event: "progress", data: { method: "item/reasoning/textDelta", details: '{"delta":"考え"}' }, observedAt: "2026-09-01T10:00:00Z" });
@@ -49,4 +49,11 @@ test("本文deltaは表示内容へ結合するが進行件数には数えない
   assert.equal(isCountableProgressEvent({ sequence: 1, event: "progress", data: { method: "item/reasoning/summaryTextDelta" } }), false);
   assert.equal(isCountableProgressEvent({ sequence: 2, event: "progress", data: { method: "item/commandExecution/outputDelta" } }), false);
   assert.equal(isCountableProgressEvent({ sequence: 3, event: "progress", data: { method: "item/completed" } }), true);
+});
+
+test("最初の思考本文は直前に件数を書き込んでいても即時同期する", () => {
+  assert.equal(shouldFlushProgress(1, 1, 1, 0, 50), true);
+  assert.equal(shouldFlushProgress(1, 1, 2, 1, 50), false);
+  assert.equal(shouldFlushProgress(1, 1, 2, 1, 2_000), true);
+  assert.equal(shouldFlushProgress(1, 1, 1, 1, 2_000), false);
 });

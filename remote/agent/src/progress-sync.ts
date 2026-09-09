@@ -59,6 +59,20 @@ export function isCountableProgressEvent(event: SseEvent): boolean {
   return !isDelta(stringField(event.data, "method"));
 }
 
+export function shouldFlushProgress(
+  activityCount: number,
+  writtenActivityCount: number,
+  progressRevision: number,
+  writtenProgressRevision: number,
+  elapsedSinceWriteMs: number,
+  force = false,
+): boolean {
+  if (force) return true;
+  if (activityCount === writtenActivityCount && progressRevision === writtenProgressRevision) return false;
+  if (progressRevision > 0 && writtenProgressRevision === 0) return true;
+  return elapsedSinceWriteMs >= 2_000;
+}
+
 function objectJson(value: string): Record<string, unknown> | undefined {
   if (!value) return undefined;
   try {
