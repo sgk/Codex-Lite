@@ -3019,6 +3019,7 @@ public partial class MainWindow : Window
 
     private void UpdateRightPaneVisibility()
     {
+        RefreshVisibleComposerQueue();
         if (_treeLoadingDepth > 0)
         {
             MainTabs.Visibility = Visibility.Collapsed;
