@@ -15,7 +15,7 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 import type { FirebasePublicConfig, RemoteAttachment, RemoteOperation, RemoteTaskPayload } from "../../shared/src/types.js";
-import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldKeepCompletedProgress, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection } from "./conversation-behavior.js";
+import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, mergeProgressWindow, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldKeepCompletedProgress, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection } from "./conversation-behavior.js";
 import { renderMarkdown } from "./markdown.js";
 
 if ("serviceWorker" in navigator) {
@@ -29,11 +29,16 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-const firebaseConfig = await loadFirebaseConfig();
+const firebaseConfig = await loadFirebaseConfig().catch((error) => {
+  const loading = document.getElementById("startup-loading");
+  if (loading) loading.textContent = error instanceof Error ? error.message : String(error);
+  throw error;
+});
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 const elements = {
+  startupLoading: byId<HTMLElement>("startup-loading"), historyLoading: byId<HTMLElement>("history-loading"), runtimeLoading: byId<HTMLElement>("runtime-loading"),
   login: byId<HTMLElement>("login"), app: byId<HTMLElement>("app"), logout: byId<HTMLButtonElement>("logout"),
   googleLogin: byId<HTMLButtonElement>("google-login"),
   device: byId<HTMLSelectElement>("device"), project: byId<HTMLSelectElement>("project"), chat: byId<HTMLSelectElement>("chat"),
@@ -69,6 +74,8 @@ let renderedConversationSelection = "";
 let selectedHistoryKey = "";
 let selectedHistorySignature = "";
 let selectedHistoryEntries: HistoryEntry[] = [];
+let selectedHistoryChunkDocs: Array<QueryDocumentSnapshot<DocumentData>> = [];
+const retainedProgressByRun = new Map<string, Record<string, unknown>[]>();
 let historyScrollVersion = 0;
 let activeTaskId = "";
 let activeTaskEvents: Array<QueryDocumentSnapshot<DocumentData>> = [];
@@ -215,6 +222,7 @@ onAuthStateChanged(auth, (current) => {
   loadChatReadStates(current?.uid);
   restoredSelection = current ? chatSelectionFromHash(location.hash) ?? loadStoredSelection(current.uid) : undefined;
   elements.login.hidden = Boolean(current);
+  elements.startupLoading.hidden = !current;
   elements.app.hidden = !current;
   elements.logout.hidden = !current;
   clearError();
@@ -237,6 +245,7 @@ async function loginWithGoogle(): Promise<void> {
 function subscribeDevices(): void {
   if (!user) return;
   deviceUnsubscribe = onSnapshot(collection(db, "users", user.uid, "devices"), (snapshot) => {
+    elements.startupLoading.hidden = true;
     devices = snapshot.docs;
     const previousDeviceId = elements.device.value;
     renderDevices();
@@ -244,7 +253,10 @@ function subscribeDevices(): void {
     if (elements.device.value !== subscribedDeviceId || elements.device.value !== previousDeviceId) {
       subscribeDeviceContents();
     }
-  }, showError);
+  }, (error) => {
+    elements.startupLoading.hidden = true;
+    showError(error);
+  });
 }
 
 function renderDevices(): void {
@@ -369,6 +381,7 @@ function subscribeDeviceChats(deviceId: string, deviceRef: ReturnType<typeof doc
         elements.chat.value = "";
         elements.newChat.checked = Boolean(elements.project.value);
       }
+      applySelectedHistoryChunks();
       renderConversationHeader();
       renderRunProgress();
     }
@@ -738,6 +751,8 @@ function syncSelectedHistorySubscription(): void {
   selectedHistoryKey = desiredKey;
   selectedHistorySignature = "";
   selectedHistoryEntries = [];
+  selectedHistoryChunkDocs = [];
+  setHistoryLoading(Boolean(desiredKey));
   if (!user || !desiredKey) return;
   const subscriptionKey = desiredKey;
   const chunks = query(
@@ -746,14 +761,33 @@ function syncSelectedHistorySubscription(): void {
   );
   historyUnsubscribe = onSnapshot(chunks, (snapshot) => {
     if (selectedHistoryKey !== subscriptionKey) return;
-    const ordered = [...snapshot.docs].sort((left, right) => number(left.data().index) - number(right.data().index));
+    selectedHistoryChunkDocs = snapshot.docs;
+    applySelectedHistoryChunks();
+  }, (error) => {
+    setHistoryLoading(false);
+    showError(error);
+  });
+}
+
+function applySelectedHistoryChunks(): void {
+  const chat = selectedChats(elements.project.value).find((item) => item.id === elements.chat.value);
+  if (!chat) return;
+  const expectedHashes = Array.isArray(chat.data().historyChunkHashes)
+    ? chat.data().historyChunkHashes.filter((item: unknown): item is string => typeof item === "string")
+    : [];
+  const actual = selectedHistoryChunkDocs.map((chunk) => ({ index: number(chunk.data().index), hash: text(chunk.data().hash) }));
+  if (!historyChunksAreComplete(expectedHashes, actual)) return;
+  const ordered = [...selectedHistoryChunkDocs].sort((left, right) => number(left.data().index) - number(right.data().index));
+  const nextSignature = ordered.map((chunk) => `${chunk.id}:${text(chunk.data().hash)}`).join("|");
+  if (nextSignature !== selectedHistorySignature) {
     selectedHistoryEntries = parseHistoryChunk(ordered.map((chunk) => text(chunk.data().payload)).join(""))
       .filter(isHistoryEntry);
-    selectedHistorySignature = ordered.map((chunk) => `${chunk.id}:${text(chunk.data().hash)}`).join("|");
+    selectedHistorySignature = nextSignature;
     reconcileOptimisticHistory(elements.device.value);
     renderedConversationSignature = "";
-    renderConversationHeader();
-  }, showError);
+  }
+  setHistoryLoading(false);
+  renderConversationHeader();
 }
 
 function mobileLayout(): boolean {
@@ -943,6 +977,7 @@ function renderSendQueue(items = selectedOptimisticInstructions()): void {
     const state = document.createElement("span");
     state.className = "send-queue-state";
     state.textContent = item.state === "failed" ? "送信エラー" : item.state === "sending" ? "送信中" : "送信待ち";
+    if (item.state !== "failed") state.prepend(spinner());
     const content = document.createElement("span");
     content.className = "send-queue-content";
     content.textContent = item.content;
@@ -1025,6 +1060,10 @@ async function sendInstruction(): Promise<void> {
     };
     const taskId = await createTask(operation, payload);
     optimistic.taskId = taskId;
+    optimistic.state = "sending";
+    renderedConversationSignature = "";
+    reconcileOptimisticTaskStatus();
+    renderConversationHeader();
     if (operation === "create_chat") {
       pendingCreatedChat = {
         taskId,
@@ -1277,14 +1316,21 @@ function selectedLiveProgressItems(): Record<string, unknown>[] {
     const taskRun = { id: taskRunId(task.data()), startedAt: timestamp(task.data().startedAt) ? new Date(timestamp(task.data().startedAt)).toISOString() : "", progressItems: task.data().progressItems };
     if (text(taskRun.id) && !runs.some((run) => text(run.id) === text(taskRun.id))) runs.push(taskRun);
   }
+  const retainedRunIds = new Set(runs.map((run) => text(run.id)).filter(Boolean));
+  for (const runId of [...retainedProgressByRun.keys()]) {
+    if (!retainedRunIds.has(runId)) retainedProgressByRun.delete(runId);
+  }
   return runs.sort((left, right) => text(left.startedAt).localeCompare(text(right.startedAt))).flatMap((run) => {
     const source = run.progressItems;
     const runId = text(run.id);
-    return Array.isArray(source) ? source.filter(isObject).map((item) => ({
+    const incoming = Array.isArray(source) ? source.filter(isObject) : [];
+    const retained = mergeProgressWindow(retainedProgressByRun.get(runId) ?? [], incoming);
+    retainedProgressByRun.set(runId, retained);
+    return retained.map((item) => ({
       ...item,
       createdAt: text(item.createdAt) || text(run.startedAt),
       displayKey: `live:${runId}:${number(item.firstSequence)}`,
-    })) : [];
+    }));
   });
 }
 
@@ -1321,6 +1367,7 @@ function renderDesktopRunProgress(run: Record<string, unknown>): void {
   const activity = activityCountLabel(number(run.reasoningActivityCount), number(run.workActivityCount));
   elements.runProgress.hidden = false;
   elements.runProgressText.textContent = `デスクトップで会話を実行中 — ${statusLabel(text(run.status) || "running")}${activity ? ` / ${activity}` : ""}`;
+  elements.runProgressText.prepend(spinner());
   elements.cancelRun.hidden = !text(run.id) || !["running", "waiting_for_approval"].includes(text(run.status) || "running");
   elements.approvalActions.hidden = true;
 }
@@ -1337,6 +1384,7 @@ function renderActiveTask(task: QueryDocumentSnapshot<DocumentData>): void {
   const activityDetail = activity ? ` / ${activity}` : "";
   elements.runProgress.hidden = false;
   elements.runProgressText.textContent = `${operationLabel(text(data.operation))} — ${statusLabel(status)}${activityDetail}`;
+  elements.runProgressText.prepend(spinner());
   elements.cancelRun.hidden = !runId || !["queued", "claimed", "running", "waiting_for_approval"].includes(status);
 
   activeApproval = undefined;
@@ -1445,10 +1493,14 @@ function stopSubscriptions(): void {
   selectedHistoryKey = "";
   selectedHistorySignature = "";
   selectedHistoryEntries = [];
+  selectedHistoryChunkDocs = [];
+  retainedProgressByRun.clear();
   historyScrollVersion += 1;
   composerDraftContext = "";
   elements.content.value = "";
   elements.history.innerHTML = '<p class="empty muted">左のツリーからチャットを選択してください。</p>';
+  setHistoryLoading(false);
+  elements.runtimeLoading.hidden = true;
   elements.runProgress.hidden = true;
   elements.approvalActions.hidden = true;
   renderTree();
@@ -1498,6 +1550,7 @@ async function refreshRuntime(force = false): Promise<void> {
   const key = `${elements.device.value}/${elements.project.value}/${elements.chat.value}`;
   if (!force && runtimeKey === key) return;
   runtimeKey = key;
+  elements.runtimeLoading.hidden = false;
   elements.usageRefresh.disabled = true;
   elements.model.disabled = true;
   elements.reasoning.disabled = true;
@@ -1516,6 +1569,7 @@ async function refreshRuntime(force = false): Promise<void> {
       showError(error);
     }
   } finally {
+    if (runtimeKey === key || !runtimeKey) elements.runtimeLoading.hidden = true;
     elements.usageRefresh.disabled = false;
     if (runtimeKey === key && elements.project.value) {
       elements.model.disabled = false;
@@ -1677,7 +1731,12 @@ function sortBySyncOrder<T extends QueryDocumentSnapshot<DocumentData>>(items: T
   });
 }
 function div(className: string): HTMLDivElement { const value = document.createElement("div"); value.className = className; return value; }
+function spinner(): HTMLSpanElement { const value = document.createElement("span"); value.className = "spinner"; value.setAttribute("aria-hidden", "true"); return value; }
 function paragraph(content: string, className: string): HTMLParagraphElement { const value = document.createElement("p"); value.textContent = content; value.className = className; return value; }
 function byId<T extends HTMLElement>(id: string): T { const value = document.getElementById(id); if (!value) throw new Error(`UI要素がありません: ${id}`); return value as T; }
 function clearError(): void { elements.error.textContent = ""; }
 function showError(error: unknown): void { elements.error.textContent = error instanceof Error ? error.message : String(error); }
+function setHistoryLoading(loading: boolean): void {
+  elements.historyLoading.hidden = !loading;
+  elements.conversationBody.setAttribute("aria-busy", String(loading));
+}

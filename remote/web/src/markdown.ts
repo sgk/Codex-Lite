@@ -1,6 +1,7 @@
 export type MarkdownInline =
   | { type: "text"; value: string }
   | { type: "strong" | "em"; children: MarkdownInline[] }
+  | { type: "delete"; children: MarkdownInline[] }
   | { type: "code"; value: string }
   | { type: "link"; href: string; children: MarkdownInline[] }
   | { type: "image"; src: string; alt: string };
@@ -8,6 +9,7 @@ export type MarkdownInline =
 export type MarkdownBlock =
   | { type: "paragraph"; children: MarkdownInline[] }
   | { type: "heading"; level: number; children: MarkdownInline[] }
+  | { type: "blockquote"; children: MarkdownInline[] }
   | { type: "list"; ordered: boolean; items: MarkdownInline[][] }
   | { type: "code"; language: string; value: string }
   | { type: "table"; header: MarkdownInline[][]; rows: MarkdownInline[][][] };
@@ -30,6 +32,18 @@ export function parseMarkdown(source: string): MarkdownBlock[] {
       while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) body.push(lines[index++]);
       if (index < lines.length) index += 1;
       blocks.push({ type: "code", language: fence[1].trim(), value: body.join("\n") });
+      continue;
+    }
+    const quote = lines[index].match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      const quoted: string[] = [];
+      while (index < lines.length) {
+        const line = lines[index].match(/^\s*>\s?(.*)$/);
+        if (!line) break;
+        quoted.push(line[1]);
+        index += 1;
+      }
+      blocks.push({ type: "blockquote", children: parseMarkdownInline(quoted.join("\n")) });
       continue;
     }
     if (index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
@@ -58,7 +72,7 @@ export function parseMarkdown(source: string): MarkdownBlock[] {
     }
     const paragraph: string[] = [];
     while (index < lines.length && lines[index].trim()) {
-      if (paragraph.length && (/^\s*(?:```|#{1,6}\s+)/.test(lines[index]) || parseListItem(lines[index]) || (index + 1 < lines.length && isTableSeparator(lines[index + 1])))) break;
+      if (paragraph.length && (/^\s*(?:```|#{1,6}\s+|>)/.test(lines[index]) || parseListItem(lines[index]) || (index + 1 < lines.length && isTableSeparator(lines[index + 1])))) break;
       paragraph.push(lines[index++]);
     }
     blocks.push({ type: "paragraph", children: parseMarkdownInline(paragraph.join("\n")) });
@@ -74,18 +88,22 @@ export function parseMarkdownInline(source: string): MarkdownInline[] {
     if (source.startsWith("![", index)) {
       const close = source.indexOf("](", index + 2); const end = close >= 0 ? source.indexOf(")", close + 2) : -1;
       if (close >= 0 && end >= 0) {
-        flush(); nodes.push({ type: "image", alt: source.slice(index + 2, close), src: source.slice(close + 2, end).trim() }); index = end + 1; continue;
+        flush(); nodes.push({ type: "image", alt: source.slice(index + 2, close), src: markdownDestination(source.slice(close + 2, end)) }); index = end + 1; continue;
       }
     }
     if (source[index] === "[") {
       const close = source.indexOf("](", index + 1); const end = close >= 0 ? source.indexOf(")", close + 2) : -1;
       if (close >= 0 && end >= 0) {
-        flush(); nodes.push({ type: "link", href: source.slice(close + 2, end).trim(), children: parseMarkdownInline(source.slice(index + 1, close)) }); index = end + 1; continue;
+        flush(); nodes.push({ type: "link", href: markdownDestination(source.slice(close + 2, end)), children: parseMarkdownInline(source.slice(index + 1, close)) }); index = end + 1; continue;
       }
     }
     if (source.startsWith("**", index)) {
       const end = source.indexOf("**", index + 2);
       if (end >= 0) { flush(); nodes.push({ type: "strong", children: parseMarkdownInline(source.slice(index + 2, end)) }); index = end + 2; continue; }
+    }
+    if (source.startsWith("~~", index)) {
+      const end = source.indexOf("~~", index + 2);
+      if (end >= 0) { flush(); nodes.push({ type: "delete", children: parseMarkdownInline(source.slice(index + 2, end)) }); index = end + 2; continue; }
     }
     if (source[index] === "`") {
       const end = source.indexOf("`", index + 1);
@@ -109,6 +127,8 @@ export function renderMarkdown(container: HTMLElement, source: string): void {
     } else if (block.type === "heading") {
       const heading = document.createElement(`h${block.level}`);
       appendInline(heading, block.children); container.append(heading);
+    } else if (block.type === "blockquote") {
+      const quote = document.createElement("blockquote"); appendInline(quote, block.children); container.append(quote);
     } else if (block.type === "code") {
       const pre = document.createElement("pre"); const code = document.createElement("code");
       if (block.language) code.dataset.language = block.language;
@@ -144,7 +164,7 @@ function appendInline(parent: HTMLElement, nodes: MarkdownInline[]): void {
       const src = safeHttpUrl(node.src); if (!src) { parent.append(document.createTextNode(`![${node.alt}](${node.src})`)); continue; }
       const image = document.createElement("img"); image.src = src; image.alt = node.alt; image.loading = "lazy"; image.referrerPolicy = "no-referrer"; parent.append(image); continue;
     }
-    const element = document.createElement(node.type === "strong" ? "strong" : node.type === "em" ? "em" : "a");
+    const element = document.createElement(node.type === "strong" ? "strong" : node.type === "em" ? "em" : node.type === "delete" ? "del" : "a");
     if (node.type === "link") {
       const href = safeHttpUrl(node.href); if (!href) { appendInline(parent, node.children); continue; }
       element.setAttribute("href", href); element.setAttribute("target", "_blank"); element.setAttribute("rel", "noopener noreferrer");
@@ -158,6 +178,11 @@ function safeHttpUrl(value: string): string | undefined {
     const url = new URL(value, document.baseURI);
     return url.protocol === "http:" || url.protocol === "https:" ? url.href : undefined;
   } catch { return undefined; }
+}
+
+function markdownDestination(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1) : trimmed;
 }
 
 function isTableSeparator(line: string): boolean {

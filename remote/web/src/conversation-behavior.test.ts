@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldKeepCompletedProgress, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction } from "./conversation-behavior.js";
+import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, mergeProgressWindow, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldKeepCompletedProgress, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction } from "./conversation-behavior.js";
 
 test("新規チャットのタイトルはデスクトップと同じく最初の指示から作る", () => {
   assert.equal(titleFromFirstInstruction("  最初の\n\n指示です  "), "最初の 指示です");
@@ -98,6 +98,18 @@ test("完了Runの進捗は永続履歴へ到着するまで保持する", () =>
   assert.equal(shouldKeepCompletedProgress("run-2", ["run-1"]), true);
   assert.equal(shouldKeepCompletedProgress("run-2", ["run-1", "run-2"]), false);
   assert.equal(shouldKeepCompletedProgress("", []), false);
+});
+
+test("履歴チャンクは全ハッシュが揃った時だけ完成とみなす", () => {
+  assert.equal(historyChunksAreComplete(["a", "b"], [{ index: 0, hash: "a" }, { index: 1, hash: "b" }]), true);
+  assert.equal(historyChunksAreComplete(["a", "b"], [{ index: 0, hash: "new" }, { index: 1, hash: "b" }]), false);
+  assert.equal(historyChunksAreComplete(["a", "b"], [{ index: 0, hash: "a" }]), false);
+});
+
+test("進捗の短い受信窓を既に表示した項目へ累積する", () => {
+  const retained = [{ firstSequence: 1, kind: "reasoning", text: "方針" }, { firstSequence: 2, kind: "work", text: "調査" }];
+  const incoming = [{ firstSequence: 2, kind: "work", text: "調査完了" }, { firstSequence: 3, kind: "work", text: "修正" }];
+  assert.deepEqual(mergeProgressWindow(retained, incoming).map((item) => item.text), ["方針", "調査完了", "修正"]);
 });
 
 test("思考本文を表示せず進行件数だけを表示する", () => {

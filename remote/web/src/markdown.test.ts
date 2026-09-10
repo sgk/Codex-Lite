@@ -55,3 +55,20 @@ test("順序なしと順序付きの箇条書きを解析する", () => {
 test("生HTMLはMarkdownとして解釈しない", () => {
   assert.deepEqual(parseMarkdownInline("<script>alert(1)</script>"), [{ type: "text", value: "<script>alert(1)</script>" }]);
 });
+
+test("引用と取り消し線をデスクトップ版同様に解析する", () => {
+  assert.deepEqual(parseMarkdown("> 方針\n> 続き"), [{
+    type: "blockquote",
+    children: [{ type: "text", value: "方針\n続き" }],
+  }]);
+  assert.deepEqual(parseMarkdownInline("~~取り消し `code`~~"), [{
+    type: "delete",
+    children: [{ type: "text", value: "取り消し " }, { type: "code", value: "code" }],
+  }]);
+  assert.deepEqual(parseMarkdownInline("[リンク](<https://example.com/a>)"), [{
+    type: "link",
+    href: "https://example.com/a",
+    children: [{ type: "text", value: "リンク" }],
+  }]);
+  assert.deepEqual(parseMarkdown("前文\n> 引用").map((block) => block.type), ["paragraph", "blockquote"]);
+});

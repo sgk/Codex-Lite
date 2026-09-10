@@ -18,6 +18,29 @@ export function parseHistoryChunk(value: string): unknown[] {
   }
 }
 
+export function historyChunksAreComplete(expectedHashes: string[], actualChunks: Array<{ index: number; hash: string }>): boolean {
+  if (expectedHashes.length !== actualChunks.length) return false;
+  const ordered = [...actualChunks].sort((left, right) => left.index - right.index);
+  return ordered.every((chunk, index) => chunk.index === index && chunk.hash === expectedHashes[index]);
+}
+
+export function mergeProgressWindow(
+  retained: Record<string, unknown>[],
+  incoming: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const merged = new Map<string, Record<string, unknown>>();
+  for (const item of [...retained, ...incoming]) {
+    const firstSequence = typeof item.firstSequence === "number" ? item.firstSequence : 0;
+    const kind = typeof item.kind === "string" ? item.kind : "work";
+    merged.set(`${firstSequence}:${kind}`, item);
+  }
+  return [...merged.values()].sort((left, right) => {
+    const leftSequence = typeof left.firstSequence === "number" ? left.firstSequence : 0;
+    const rightSequence = typeof right.firstSequence === "number" ? right.firstSequence : 0;
+    return leftSequence - rightSequence;
+  });
+}
+
 export function historyUpdatePosition(selectionChanged: boolean, wasNearEnd: boolean, endFollowPending = false): "end" | "preserve" {
   return selectionChanged || wasNearEnd || endFollowPending ? "end" : "preserve";
 }

@@ -11,7 +11,8 @@
   <body>
     <header><div><p class="eyebrow">REMOTE WORKSPACE</p><h1>Codex Lite</h1></div><button id="logout" hidden>ログアウト</button></header>
     <main>
-      <section id="login" class="card">
+      <section id="startup-loading" class="startup-loading" role="status"><span class="spinner" aria-hidden="true"></span><span>読み込み中…</span></section>
+      <section id="login" class="card" hidden>
         <h2>ログイン</h2>
         <button id="google-login" type="button">Google でログイン</button>
       </section>
@@ -26,7 +27,9 @@
           <main class="conversation">
             <div class="conversation-header"><div class="conversation-heading"><button id="tree-menu" class="tree-menu" type="button" aria-label="プロジェクト一覧を開く" aria-expanded="false">☰</button><div><p id="breadcrumb" class="eyebrow">プロジェクトを選択してください</p><h2 id="conversation-title">会話</h2></div></div><span id="conversation-status" class="pill">待機中</span></div>
             <section id="conversation-body" class="conversation-body">
+              <div id="history-loading" class="history-loading" role="status" hidden><span class="spinner" aria-hidden="true"></span><span>会話を読み込み中…</span></div>
               <section id="usage-panel" class="usage-panel" hidden>
+                <div id="runtime-loading" class="runtime-loading" role="status" hidden><span class="spinner" aria-hidden="true"></span><span>使用状況を読み込み中…</span></div>
                 <div class="usage-heading"><div><h3>使用状況</h3><p id="usage-provider" class="muted">提供元: 未取得</p></div><button id="usage-refresh" type="button" class="secondary">再読み込み</button></div>
                 <div class="usage-grid">
                   <article class="usage-balance"><strong>残りチャージ額</strong><span id="usage-credits">未取得</span></article>
