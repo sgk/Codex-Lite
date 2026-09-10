@@ -4735,11 +4735,17 @@ public partial class MainWindow : Window
     private void MessagesList_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         _messageScrollInteractionVersion++;
-        _isMessageScrollBarPointerDown = e.OriginalSource is DependencyObject source &&
+        var source = e.OriginalSource as DependencyObject;
+        _isMessageScrollBarPointerDown = source is not null &&
             FindVisualAncestor<System.Windows.Controls.Primitives.ScrollBar>(source) is not null;
         if (_isMessageScrollBarPointerDown)
         {
             SetCurrentChatFollowNewMessages(false);
+        }
+        if (source is not null &&
+            FindVisualAncestor<System.Windows.Documents.Hyperlink>(source) is not null)
+        {
+            return;
         }
         ActiveMessagesList.Focus();
     }
