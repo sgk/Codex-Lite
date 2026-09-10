@@ -41,6 +41,7 @@ export interface CloudCatalogChatRecord {
   updatedAt?: string;
   historyRevision?: string;
   historyChunkHashes?: string[];
+  activeRunId?: string;
 }
 
 export interface CatalogChanges {
@@ -145,6 +146,7 @@ export function cloudCatalogSnapshot(
       ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
       ...(record.historyRevision ? { historyRevision: record.historyRevision } : {}),
       ...(record.historyChunkHashes ? { historyChunkHashes: record.historyChunkHashes } : {}),
+      ...(record.activeRunId ? { activeRunId: record.activeRunId } : {}),
     });
   }
   const chatOrders = new Map(chatRecords.map((record) => [`${record.projectId}\n${record.id}`, record.syncOrder]));

@@ -88,3 +88,18 @@ test("起動時は軽量なクラウドカタログを前回同期状態とし�
     ],
   ), first);
 });
+
+test("起動時にクラウドへ残った実行中投影を差分削除対象にする", () => {
+  const cloud = cloudCatalogSnapshot(
+    [{ id: "project-1", name: "One", syncOrder: 0 }],
+    [{ id: "chat-1", projectId: "project-1", title: "First", status: "running", activeRunId: "stale-run", historyRevision: "r1", syncOrder: 0 }],
+  );
+  const local: CatalogProject[] = [{
+    id: "project-1",
+    name: "One",
+    chats: [{ id: "chat-1", title: "First", status: "idle", historyRevision: "r1" }],
+  }];
+
+  const changes = diffCatalog(cloud, local);
+  assert.deepEqual(changes.changedChats.map((item) => item.chat.id), ["chat-1"]);
+});

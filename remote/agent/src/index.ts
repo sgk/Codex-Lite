@@ -645,6 +645,7 @@ async function loadCloudCatalogSnapshot(): Promise<CatalogProject[]> {
       updatedAt: textField(chat.data(), "lastUpdatedAt") || undefined,
       historyRevision: textField(chat.data(), "historyRevision") || undefined,
       historyChunkHashes: stringArrayField(chat.data(), "historyChunkHashes"),
+      activeRunId: isObject(chat.data().activeRun) ? textField(chat.data().activeRun, "id") || undefined : undefined,
     })),
   );
 }

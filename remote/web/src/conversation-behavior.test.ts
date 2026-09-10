@@ -119,10 +119,10 @@ test("思考本文を表示せず進行件数だけを表示する", () => {
 });
 
 test("チャットツリーは実行中を未読より優先して表示する", () => {
-  assert.equal(chatTreeIndicator("running", "", true), "running");
-  assert.equal(chatTreeIndicator("idle", "waiting_for_approval", true), "running");
-  assert.equal(chatTreeIndicator("idle", "", true), "unread");
-  assert.equal(chatTreeIndicator("idle", "", false), "none");
+  assert.equal(chatTreeIndicator("running", true), "running");
+  assert.equal(chatTreeIndicator("waiting_for_approval", true), "running");
+  assert.equal(chatTreeIndicator("", true), "unread");
+  assert.equal(chatTreeIndicator("", false), "none");
   assert.equal(projectTreeIndicator(["unread", "running"]), "running");
   assert.equal(projectTreeIndicator(["none", "unread"]), "unread");
   assert.equal(projectTreeIndicator(["none"]), "none");

@@ -157,9 +157,9 @@ export function completedRunVersion(lastRunProgress: unknown): string {
   return typeof id === "string" ? id : "";
 }
 
-export function chatTreeIndicator(status: string, activeRunStatus: string, unread: boolean): "running" | "unread" | "none" {
+export function chatTreeIndicator(activeRunStatus: string, unread: boolean): "running" | "unread" | "none" {
   const activeStatuses = ["queued", "claimed", "running", "waiting_for_approval"];
-  if (status === "running" || activeStatuses.includes(activeRunStatus)) return "running";
+  if (activeStatuses.includes(activeRunStatus)) return "running";
   return unread ? "unread" : "none";
 }
 
