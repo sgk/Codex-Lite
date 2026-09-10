@@ -1953,6 +1953,13 @@ public partial class MainWindow : Window
         ApplyProjectChats(projectItem, chats, preferredChatId, markUpdatedChats);
     }
 
+    private void InvalidateProjectChatLoads(string projectId)
+    {
+        _chatLoadVersions[projectId] = _chatLoadVersions.TryGetValue(projectId, out var version)
+            ? version + 1
+            : 1;
+    }
+
     private List<ChatDto> OrderChats(ProjectTreeItem projectItem, IEnumerable<ChatDto> chats)
     {
         var chatList = chats.ToList();
@@ -1967,8 +1974,8 @@ public partial class MainWindow : Window
             .ToDictionary(group => group.Key, group => group.First().index, StringComparer.Ordinal);
         return chatList
             .Select((chat, index) => new { chat, index })
-            .OrderBy(item => order.TryGetValue(item.chat.Id, out var savedIndex) ? savedIndex : int.MaxValue)
-            .ThenBy(item => item.index)
+            .OrderBy(item => order.ContainsKey(item.chat.Id) ? 1 : 0)
+            .ThenBy(item => order.TryGetValue(item.chat.Id, out var savedIndex) ? savedIndex : item.index)
             .Select(item => item.chat)
             .ToList();
     }
@@ -7555,6 +7562,9 @@ public partial class MainWindow : Window
 
     private void AddCreatedChatToTree(ProjectDto project, ChatDto chat)
     {
+        // A list request started before this chat was created must not replace
+        // the tree with its now-stale response and remove the new item again.
+        InvalidateProjectChatLoads(project.Id);
         var projectItem = FindProjectItem(project.Id);
         if (projectItem is null)
         {
