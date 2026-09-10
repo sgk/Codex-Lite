@@ -26,7 +26,7 @@ class AppServerNotification:
 class AppServerClient:
     REQUEST_TIMEOUT_SECONDS = 20
     STDIO_LIMIT_BYTES = 64 * 1024 * 1024
-    IDLE_SHUTDOWN_SECONDS = 60
+    IDLE_SHUTDOWN_SECONDS = 15 * 60
 
     def __init__(self, config: Config, codex_runner: CodexRunner, model_provider: str | None = None) -> None:
         self.config = config

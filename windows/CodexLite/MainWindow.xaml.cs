@@ -53,6 +53,7 @@ public partial class MainWindow : Window
     private static readonly TimeSpan ChatListLoadTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan InitialMessageLoadTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan InitialHistoryLayoutSettleDelay = TimeSpan.FromMilliseconds(180);
+    private static readonly TimeSpan PreparedSendTransportLifetime = TimeSpan.FromMinutes(14);
 
     private sealed record ActiveUiRun(string RunId, string ProjectId, string ChatId, CancellationTokenSource Cancellation);
     private sealed class QueuedComposerSubmission : INotifyPropertyChanged
@@ -244,6 +245,7 @@ public partial class MainWindow : Window
     private bool _isPreparingSendTransport;
     private TaskCompletionSource<bool>? _sendTransportPreparationCompletion;
     private string _preparedSendModel = "";
+    private DateTimeOffset _sendTransportPreparedAt = DateTimeOffset.MinValue;
     private bool _isApplyingComposerHistory;
     private bool _isProcessingComposerQueue;
     private bool _isLoadingRuntimeSettings;
@@ -317,6 +319,7 @@ public partial class MainWindow : Window
         PendingAttachmentsList.ItemsSource = _pendingAttachments;
         NewChatPendingAttachmentsList.ItemsSource = _pendingAttachments;
         ComposerQueueList.ItemsSource = _visibleComposerSubmissions;
+        NewChatComposerQueueList.ItemsSource = _visibleComposerSubmissions;
         CleanupOldAttachmentFiles();
         LocationChanged += (_, _) => SaveUiState();
         SizeChanged += (_, _) => SaveUiState();
@@ -984,8 +987,12 @@ public partial class MainWindow : Window
 
     private async void SendReadinessTimer_Tick(object? sender, EventArgs e)
     {
-        await EnsureSendTransportReadyAsync(forceProbe: true);
-        await ProcessComposerQueueAsync();
+        if (HasQueuedComposerSubmissionForCurrentContext())
+        {
+            await ProcessComposerQueueAsync();
+            return;
+        }
+        await EnsureSendTransportReadyAsync();
     }
 
     private void RefreshSendTransportReadiness()
@@ -999,6 +1006,7 @@ public partial class MainWindow : Window
             _sendReadinessTimer.Stop();
             _isSendTransportReady = false;
             _preparedSendModel = "";
+            _sendTransportPreparedAt = DateTimeOffset.MinValue;
             UpdateCommandButtonState();
             return;
         }
@@ -1010,17 +1018,18 @@ public partial class MainWindow : Window
         }
         _sendReadinessTimer.Start();
         UpdateCommandButtonState();
-        _ = EnsureSendTransportReadyAsync(forceProbe: false);
+        _ = EnsureSendTransportReadyAsync();
     }
 
     private void InvalidateSendTransportReadiness()
     {
         _isSendTransportReady = false;
         _preparedSendModel = "";
+        _sendTransportPreparedAt = DateTimeOffset.MinValue;
         UpdateCommandButtonState();
     }
 
-    private async Task EnsureSendTransportReadyAsync(bool forceProbe)
+    private async Task EnsureSendTransportReadyAsync(string? requestedModel = null)
     {
         if (!_isDaemonHttpReady || !HasSendPreparationContext())
         {
@@ -1033,11 +1042,10 @@ public partial class MainWindow : Window
             {
                 await pendingPreparation.Task;
             }
-            return;
         }
 
-        var model = SelectedComposerModel();
-        if (!forceProbe && _isSendTransportReady && string.Equals(_preparedSendModel, model, StringComparison.Ordinal))
+        var model = requestedModel ?? SelectedComposerModel();
+        if (IsSendTransportPrepared(model))
         {
             return;
         }
@@ -1056,16 +1064,19 @@ public partial class MainWindow : Window
             var readiness = await _client.PrepareSendAsync(model, timeout.Token);
             if (readiness is { Ready: true }
                 && HasSendPreparationContext()
-                && string.Equals(SelectedComposerModel(), model, StringComparison.Ordinal))
+                && (requestedModel is not null
+                    || string.Equals(SelectedComposerModel(), model, StringComparison.Ordinal)))
             {
                 _preparedSendModel = model;
                 _isSendTransportReady = true;
+                _sendTransportPreparedAt = DateTimeOffset.UtcNow;
                 WritePerformanceLog("send-ready", $"model={LogText(model)} provider={LogText(readiness.Provider)}");
             }
         }
         catch (Exception ex)
         {
             _isSendTransportReady = false;
+            _sendTransportPreparedAt = DateTimeOffset.MinValue;
             WritePerformanceLog("send-ready-error", $"model={LogText(model)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
         }
         finally
@@ -1087,9 +1098,24 @@ public partial class MainWindow : Window
             return false;
         }
         return _selectedChat is null
-            ? HasNewChatComposerContent()
-            : _selectedChat.CanContinue && HasChatComposerContent();
+            ? HasNewChatComposerContent() || HasQueuedComposerSubmissionForCurrentContext()
+            : _selectedChat.CanContinue && (HasChatComposerContent() || HasQueuedComposerSubmissionForCurrentContext());
     }
+
+    private bool HasQueuedComposerSubmissionForCurrentContext()
+    {
+        var projectId = _selectedProject?.Id;
+        var chatId = _selectedChat?.Id;
+        return _queuedComposerSubmissions.Any(item =>
+            string.Equals(item.ProjectId, projectId, StringComparison.Ordinal)
+            && string.Equals(item.ChatId, chatId, StringComparison.Ordinal)
+            && !string.Equals(item.State, "failed", StringComparison.Ordinal));
+    }
+
+    private bool IsSendTransportPrepared(string model) =>
+        _isSendTransportReady
+        && string.Equals(_preparedSendModel, model, StringComparison.Ordinal)
+        && DateTimeOffset.UtcNow - _sendTransportPreparedAt < PreparedSendTransportLifetime;
 
     private string SelectedComposerModel() => _selectedChat is null
         ? SelectedModel(NewChatModelBox)
@@ -7103,9 +7129,8 @@ public partial class MainWindow : Window
                 var submission = _queuedComposerSubmissions[index];
                 try
                 {
-                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                    var readiness = await _client.PrepareSendAsync(submission.Model, timeout.Token);
-                    if (readiness is not { Ready: true })
+                    await EnsureSendTransportReadyAsync(submission.Model);
+                    if (!IsSendTransportPrepared(submission.Model))
                     {
                         submission.SetState("queued");
                         _sendReadinessTimer.Start();
@@ -7117,8 +7142,6 @@ public partial class MainWindow : Window
                     {
                         return;
                     }
-                    _preparedSendModel = submission.Model;
-                    _isSendTransportReady = true;
                     submission.SetState("sending");
                     StatusText.Text = $"送信キューを処理中 | 残り {_queuedComposerSubmissions.Count}件";
                     var accepted = SelectedActiveRun() is not null
@@ -7171,6 +7194,7 @@ public partial class MainWindow : Window
     {
         _queuedComposerSubmissions.Remove(submission);
         RefreshVisibleComposerQueue();
+        RefreshSendTransportReadiness();
     }
 
     private void AssignNewChatQueue(string projectId, string chatId)
