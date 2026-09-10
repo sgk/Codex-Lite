@@ -71,7 +71,20 @@ public sealed class ProjectTreeItem : INotifyPropertyChanged
         }
     }
 
-    public bool ShowCollapsedRunningIndicator => IsRunning && !IsExpanded;
+    private bool _hasQueuedNewChat;
+    public bool HasQueuedNewChat
+    {
+        get => _hasQueuedNewChat;
+        set
+        {
+            if (_hasQueuedNewChat == value) return;
+            _hasQueuedNewChat = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(ShowCollapsedRunningIndicator));
+        }
+    }
+
+    public bool ShowCollapsedRunningIndicator => HasQueuedNewChat || (IsRunning && !IsExpanded);
 
     public bool ShowDropBefore
     {

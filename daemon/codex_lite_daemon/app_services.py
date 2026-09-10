@@ -476,7 +476,7 @@ class AppServerRunService:
         self.db = db
         self.runs: dict[str, AppServerActiveRun] = {}
         self.events = EventHub(db)
-        self._runtime_reconcile_lock = asyncio.Lock()
+        self._runtime_reconcile_locks: dict[str, asyncio.Lock] = {}
         self._starting_chats: set[str] = set()
         self._untracked_threads: dict[str, dict[str, Any]] = {}
 
@@ -485,7 +485,7 @@ class AppServerRunService:
         chat = self.chats.get_chat_row(project_id, chat_id)
         if not bool(chat.get("can_continue", 1)):
             raise AppError("chat_read_only", str(chat.get("continue_disabled_reason") or "This imported Codex history cannot be continued by Codex Lite."), 409)
-        async with self._runtime_reconcile_lock:
+        async with self._runtime_reconcile_locks.setdefault(chat_id, asyncio.Lock()):
             active_count = sum(1 for run in self.runs.values() if run.status == "running")
             if active_count + len(self._starting_chats) >= self.max_concurrent_runs:
                 raise AppError("run_already_active", "Another run is already active.", 409)
@@ -495,7 +495,7 @@ class AppServerRunService:
         try:
             return await self._start_message_run_reserved(project_id, chat_id, content, attachments, project, chat)
         finally:
-            async with self._runtime_reconcile_lock:
+            async with self._runtime_reconcile_locks.setdefault(chat_id, asyncio.Lock()):
                 self._starting_chats.discard(chat_id)
 
     async def _start_message_run_reserved(
@@ -688,7 +688,7 @@ class AppServerRunService:
         return result
 
     async def reconcile_chat_runtime(self, project_id: str, chat_id: str) -> None:
-        async with self._runtime_reconcile_lock:
+        async with self._runtime_reconcile_locks.setdefault(chat_id, asyncio.Lock()):
             self.projects.get_project_row(project_id)
             self.chats.get_chat_row(project_id, chat_id)
             if chat_id in self._starting_chats:

@@ -3100,6 +3100,52 @@ async def test_app_server_event_reconnect_starts_after_snapshot(linux_tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_slow_chat_reconciliation_does_not_block_another_chat_send(linux_tmp_path: Path, monkeypatch) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowInspect(ActiveTurnInspectAppServer):
+        async def request(self, method: str, params: dict) -> dict:
+            if method == "thread/read":
+                entered.set()
+                await release.wait()
+                return {"thread": {"status": {"type": "idle"}}}
+            return await super().request(method, params)
+
+    server = SlowInspect()
+    threads = AppServerThreadService(projects, chats, messages, TranscriptImportService(cfg, projects, chats), server, make_runtime_settings())
+    runs = AppServerRunService(projects, threads, messages, server, max_concurrent_runs=2, settings=make_runtime_settings(), db=db)
+    project_id = projects.create_project(str(project_dir))["id"]
+    old_chat = chats.upsert_chat_index(project_id, "old-thread", "old", "old-thread", utc_now(), utc_now())["id"]
+    chats.upsert_provider_thread(project_id, old_chat, "openai", "old-thread", history_initialized=True)
+    new_chat = chats.create_chat(project_id, "new")["id"]
+
+    async def accept(*args):
+        return {"runId": "accepted"}
+
+    monkeypatch.setattr(runs, "_start_message_run_reserved", accept)
+    inspection = asyncio.create_task(runs.reconcile_chat_runtime(project_id, old_chat))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        result = await asyncio.wait_for(runs.start_message_run(project_id, new_chat, "hello"), 1)
+        assert result["runId"] == "accepted"
+        assert not inspection.done()
+        assert not runs._starting_chats
+    finally:
+        release.set()
+        await inspection
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_adopts_untracked_active_turn(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()

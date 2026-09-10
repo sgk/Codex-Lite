@@ -20,6 +20,7 @@ public sealed class DaemonClient
     public event Action<string>? StatusChanged;
 
     public string CodexHomeMode { get; set; } = "auto";
+    public bool HasEndpoint => _http.BaseAddress is not null;
 
     public async Task<WslEnvironment> ResolveDefaultWslEnvironmentAsync(CancellationToken cancellationToken = default)
     {

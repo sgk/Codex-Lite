@@ -997,9 +997,10 @@ public partial class MainWindow : Window
 
     private void RefreshSendTransportReadiness()
     {
-        if (_queuedComposerSubmissions.Count > 0 && _isDaemonHttpReady)
+        if (_queuedComposerSubmissions.Count > 0 && _client.HasEndpoint)
         {
             _ = ProcessComposerQueueAsync();
+            return;
         }
         if (!HasSendPreparationContext())
         {
@@ -1042,6 +1043,7 @@ public partial class MainWindow : Window
             {
                 await pendingPreparation.Task;
             }
+            return;
         }
 
         var model = requestedModel ?? SelectedComposerModel();
@@ -3452,6 +3454,12 @@ public partial class MainWindow : Window
     private void UpdateCommandButtonState()
     {
         RefreshVisibleComposerQueue();
+        foreach (var projectItem in _projectTree)
+        {
+            foreach (var chatItem in projectItem.Chats)
+                chatItem.IsRunning = IsChatRunning(chatItem.Chat.Id);
+        }
+        UpdateProjectRunningIndicators();
         var hasProjectContext = _selectedProject is not null;
         var canContinueChat = _selectedChat is { CanContinue: true };
         var canStartNewChat = _selectedProject is not null && _selectedChat is null;
@@ -6150,7 +6158,8 @@ public partial class MainWindow : Window
 
     private bool IsChatRunning(string chatId)
     {
-        return _runActivityDepthByChat.ContainsKey(chatId) || ActiveRunForChat(chatId) is not null;
+        return _runActivityDepthByChat.ContainsKey(chatId) || ActiveRunForChat(chatId) is not null
+            || _queuedComposerSubmissions.Any(item => item.ChatId == chatId && item.State != "failed");
     }
 
     private void UpdateChatRunningIndicator(string chatId)
@@ -6165,6 +6174,7 @@ public partial class MainWindow : Window
     private bool IsProjectRunning(string projectId)
     {
         return _activeRunsByChat.Values.Any(run => run.ProjectId == projectId)
+            || _queuedComposerSubmissions.Any(item => item.ProjectId == projectId && item.State != "failed")
             || _runActivityDepthByChat.Keys.Any(chatId => ProjectIdForChat(chatId) == projectId);
     }
 
@@ -6172,6 +6182,8 @@ public partial class MainWindow : Window
     {
         foreach (var projectItem in _projectTree)
         {
+            projectItem.HasQueuedNewChat = _queuedComposerSubmissions.Any(item =>
+                item.ProjectId == projectItem.Project.Id && item.ChatId is null && item.State != "failed");
             projectItem.IsRunning = IsProjectRunning(projectItem.Project.Id);
         }
     }
@@ -7107,13 +7119,16 @@ public partial class MainWindow : Window
 
     private async Task ProcessComposerQueueAsync()
     {
-        if (_isProcessingComposerQueue || _isClosing || !_isDaemonHttpReady)
+        if (_isProcessingComposerQueue || _isClosing || !_client.HasEndpoint)
         {
             return;
         }
         _isProcessingComposerQueue = true;
         try
         {
+            // Finish the input's TextChanged event and paint the queue before
+            // sending. Preparation is optional: the message API starts Codex.
+            await System.Windows.Threading.Dispatcher.Yield(DispatcherPriority.Background);
             while (!_isClosing)
             {
                 var projectId = _selectedProject?.Id;
@@ -7129,14 +7144,6 @@ public partial class MainWindow : Window
                 var submission = _queuedComposerSubmissions[index];
                 try
                 {
-                    await EnsureSendTransportReadyAsync(submission.Model);
-                    if (!IsSendTransportPrepared(submission.Model))
-                    {
-                        submission.SetState("queued");
-                        _sendReadinessTimer.Start();
-                        StatusText.Text = $"送信準備待ち | {_queuedComposerSubmissions.Count}件";
-                        return;
-                    }
                     if (!string.Equals(_selectedProject?.Id, submission.ProjectId, StringComparison.Ordinal)
                         || !string.Equals(_selectedChat?.Id, submission.ChatId, StringComparison.Ordinal))
                     {
@@ -7157,9 +7164,8 @@ public partial class MainWindow : Window
                     WritePerformanceLog(
                         "composer-queue-error",
                         $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)} count={_queuedComposerSubmissions.Count}");
-                    submission.SetState("queued");
-                    _sendReadinessTimer.Start();
-                    StatusText.Text = $"送信準備待ち | {_queuedComposerSubmissions.Count}件";
+                    submission.SetState("failed");
+                    StatusText.Text = $"送信エラー | {ShortError(ex)}";
                     return;
                 }
             }
@@ -7167,6 +7173,7 @@ public partial class MainWindow : Window
         finally
         {
             _isProcessingComposerQueue = false;
+            _isPreparingSend = false;
             UpdateCommandButtonState();
         }
     }

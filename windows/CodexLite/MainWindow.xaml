@@ -968,31 +968,6 @@
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
-                                        <Viewbox Width="14" Height="14" Margin="0,0,8,0" RenderTransformOrigin="0.5,0.5" VerticalAlignment="Center">
-                                            <Viewbox.Style>
-                                                <Style TargetType="{x:Type Viewbox}">
-                                                    <Setter Property="Visibility" Value="Visible"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding State}" Value="failed">
-                                                            <Setter Property="Visibility" Value="Hidden"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Viewbox.Style>
-                                            <Viewbox.RenderTransform><RotateTransform/></Viewbox.RenderTransform>
-                                            <Canvas Width="12" Height="12">
-                                                <Path Stroke="#B17A00" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 6,1 A 5,5 0 1 1 2.46,9.54"/>
-                                            </Canvas>
-                                            <Viewbox.Triggers>
-                                                <EventTrigger RoutedEvent="Loaded">
-                                                    <BeginStoryboard>
-                                                        <Storyboard RepeatBehavior="Forever">
-                                                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)" From="0" To="360" Duration="0:0:1"/>
-                                                        </Storyboard>
-                                                    </BeginStoryboard>
-                                                </EventTrigger>
-                                            </Viewbox.Triggers>
-                                        </Viewbox>
                                         <TextBlock Grid.Column="1" Text="{Binding StateLabel}" Foreground="#8A6500" FontWeight="SemiBold" Margin="0,0,10,0" VerticalAlignment="Center"/>
                                         <TextBlock Grid.Column="2" Text="{Binding Content}" Foreground="#3F3A2A" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                                         <TextBlock Grid.Column="3" Text="{Binding AttachmentLabel}" Foreground="#8A6500" FontSize="11" Margin="10,0,0,0" VerticalAlignment="Center"/>
@@ -1304,44 +1279,6 @@
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
-                                        <Viewbox Width="14"
-                                                 Height="14"
-                                                 Margin="0,0,8,0"
-                                                 RenderTransformOrigin="0.5,0.5"
-                                                 VerticalAlignment="Center">
-                                            <Viewbox.Style>
-                                                <Style TargetType="{x:Type Viewbox}">
-                                                    <Setter Property="Visibility" Value="Visible"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding State}" Value="failed">
-                                                            <Setter Property="Visibility" Value="Hidden"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </Viewbox.Style>
-                                            <Viewbox.RenderTransform>
-                                                <RotateTransform/>
-                                            </Viewbox.RenderTransform>
-                                            <Canvas Width="12" Height="12">
-                                                <Path Stroke="#B17A00"
-                                                      StrokeThickness="2"
-                                                      StrokeStartLineCap="Round"
-                                                      StrokeEndLineCap="Round"
-                                                      Data="M 6,1 A 5,5 0 1 1 2.46,9.54"/>
-                                            </Canvas>
-                                            <Viewbox.Triggers>
-                                                <EventTrigger RoutedEvent="Loaded">
-                                                    <BeginStoryboard>
-                                                        <Storyboard RepeatBehavior="Forever">
-                                                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
-                                                                             From="0"
-                                                                             To="360"
-                                                                             Duration="0:0:1"/>
-                                                        </Storyboard>
-                                                    </BeginStoryboard>
-                                                </EventTrigger>
-                                            </Viewbox.Triggers>
-                                        </Viewbox>
                                         <TextBlock Grid.Column="1"
                                                    Text="{Binding StateLabel}"
                                                    Foreground="#8A6500"
