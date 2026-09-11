@@ -150,6 +150,7 @@ public partial class MainWindow : Window
     private GoogleOAuthSession? _remoteAuthSession;
     private CancellationTokenSource? _remoteAuthRefreshCts;
     private bool _isRemoteAgentConnecting;
+    private DateTimeOffset _nextRemoteReconnectAt = DateTimeOffset.MinValue;
     private readonly ObservableCollection<ProjectTreeItem> _projectTree = new();
     private ObservableCollection<MessageDto> _messages = new();
     private readonly ObservableCollection<AutomationDto> _automations = new();
@@ -378,8 +379,8 @@ public partial class MainWindow : Window
                     _isDaemonHttpReady = true;
                     RefreshSendTransportReadiness();
                     ScheduleRemotePrioritySync();
-                    _ = TryReconnectRemoteAsync();
                 }
+                _ = TryReconnectRemoteAsync();
                 return;
             }
 
@@ -890,7 +891,8 @@ public partial class MainWindow : Window
     private async Task TryReconnectRemoteAsync()
     {
         if (!RemoteSyncFeature.IsEnabled || _isClosing || _remoteAgent.IsRunning ||
-            _isRemoteAgentConnecting || !_isDaemonHttpReady)
+            _isRemoteAgentConnecting || !_isDaemonHttpReady ||
+            DateTimeOffset.UtcNow < _nextRemoteReconnectAt)
         {
             return;
         }
@@ -905,6 +907,7 @@ public partial class MainWindow : Window
                     var session = await _googleOAuth.TryRestoreSessionAsync();
                     if (session is null || _isClosing)
                     {
+                        _nextRemoteReconnectAt = DateTimeOffset.MaxValue;
                         RemoteSyncDetailText.Text = "保存済みのRemote認証がありません。初回認証後は自動接続されます。";
                         return;
                     }
@@ -915,6 +918,7 @@ public partial class MainWindow : Window
                         _wslDistroName = wsl.DistroName;
                     }
                     await _remoteAgent.StartAsync(_wslDistroName, session.AccessToken);
+                    _nextRemoteReconnectAt = DateTimeOffset.MinValue;
                     StartRemoteAuthRefreshLoop();
                     if (!_isClosing)
                     {
@@ -932,6 +936,7 @@ public partial class MainWindow : Window
                     }
                 }
             }
+            _nextRemoteReconnectAt = DateTimeOffset.UtcNow.AddMinutes(1);
         }
         finally
         {
@@ -1423,6 +1428,7 @@ public partial class MainWindow : Window
             }
             setStatus("Remote Agentを起動中...");
             await _remoteAgent.StartAsync(_wslDistroName, _remoteAuthSession.AccessToken);
+            _nextRemoteReconnectAt = DateTimeOffset.MinValue;
             StartRemoteAuthRefreshLoop();
             setStatus("クラウド同期を有効にしました");
         }
@@ -1483,6 +1489,7 @@ public partial class MainWindow : Window
     private void RemoteAgent_Exited()
     {
         if (_isClosing) return;
+        _nextRemoteReconnectAt = DateTimeOffset.MinValue;
         _ = Dispatcher.BeginInvoke(() =>
         {
             RemoteSyncStatusText.Text = "クラウド同期を再開しています...";
