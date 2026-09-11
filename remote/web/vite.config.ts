@@ -1,13 +1,24 @@
 import { defineConfig } from "vite";
+import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = path.resolve(root, "../..");
+const revision = execFileSync("git", ["rev-parse", "--short=8", "HEAD"], {
+  cwd: repositoryRoot,
+  encoding: "utf8",
+}).trim();
+const buildDate = new Date().toISOString();
 const serviceWorkerPlaceholder = "__CODEX_LITE_BUILD_ID__";
 export default defineConfig({
   root,
   publicDir: path.join(root, "public"),
+  define: {
+    __CODEX_LITE_REVISION__: JSON.stringify(revision),
+    __CODEX_LITE_BUILD_DATE__: JSON.stringify(buildDate),
+  },
   build: { outDir: path.join(root, "dist"), emptyOutDir: true },
   plugins: [{
     name: "codex-lite-service-worker-version",

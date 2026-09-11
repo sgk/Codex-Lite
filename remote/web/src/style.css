@@ -4,6 +4,8 @@
 html, body { height: var(--visual-viewport-height); }
 body { margin: 0; min-height: var(--visual-viewport-height); overflow: hidden; }
 header { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; color: #f8fafc; background: #101828; }
+.header-actions { display: flex; align-items: center; gap: 14px; }
+.build-info { color: #98a2b3; font-size: 11px; font-variant-numeric: tabular-nums; line-height: 1.25; text-align: right; white-space: pre-line; }
 h1, h2, h3, p { margin: 0; }
 h1 { font-size: 19px; letter-spacing: -.02em; }
 h2 { font-size: 17px; }

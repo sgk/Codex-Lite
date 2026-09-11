@@ -18,6 +18,17 @@ import type { FirebasePublicConfig, RemoteAttachment, RemoteOperation, RemoteTas
 import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, mergeProgressWindow, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldKeepCompletedProgress, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection } from "./conversation-behavior.js";
 import { renderMarkdown } from "./markdown.js";
 
+const buildInfo = document.getElementById("build-info");
+if (buildInfo) {
+  const builtAt = new Date(__CODEX_LITE_BUILD_DATE__);
+  const formattedDate = new Intl.DateTimeFormat("ja-JP", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(builtAt);
+  buildInfo.textContent = `${__CODEX_LITE_REVISION__}\n${formattedDate}`;
+  buildInfo.title = `revision ${__CODEX_LITE_REVISION__} / build ${__CODEX_LITE_BUILD_DATE__}`;
+}
+
 if ("serviceWorker" in navigator) {
   void navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).then((registration) => {
     const checkForUpdate = (): void => { if (navigator.onLine) void registration.update(); };
