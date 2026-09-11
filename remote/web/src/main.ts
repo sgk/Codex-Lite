@@ -81,6 +81,8 @@ let activeTaskId = "";
 let activeTaskEvents: Array<QueryDocumentSnapshot<DocumentData>> = [];
 let activeApproval: { runId: string; requestId: string; summary: string } | undefined;
 let pendingCreatedChat: { taskId: string; deviceId: string; projectId: string; optimisticId: string } | undefined;
+let pendingCancelRunId = "";
+let pendingCancelTaskId = "";
 let optimisticInstructions: Array<{ id: string; taskId?: string; deviceId: string; projectId: string; chatId?: string; content: string; attachmentCount: number; createdAt: string; baselineCount: number; state: "queued" | "sending" | "accepted" | "failed" }> = [];
 const expandedProgressIds = new Set<string>();
 let pendingAttachments: Array<RemoteAttachment & { previewUrl?: string }> = [];
@@ -303,6 +305,7 @@ function subscribeDeviceContents(): void {
   const deviceRef = doc(db, "users", user.uid, "devices", elements.device.value);
   taskUnsubscribe = onSnapshot(collection(deviceRef, "tasks"), (snapshot) => {
     tasks = [...snapshot.docs].sort((a, b) => timestamp(b.data().createdAt) - timestamp(a.data().createdAt)).slice(0, 30);
+    reconcilePendingCancel();
     reconcileOptimisticTaskStatus();
     reconcileCreatedChatSelection();
     renderedConversationSignature = "";
@@ -375,6 +378,7 @@ function subscribeDeviceChats(deviceId: string, deviceRef: ReturnType<typeof doc
     reconcileOptimisticHistory(deviceId);
     reconcileCreatedChatSelection();
     if (deviceId === elements.device.value) {
+      reconcilePendingCancel();
       syncHiddenChatOptions(elements.project.value);
       const selected = selectedChats(elements.project.value);
       if (elements.chat.value && !selected.some((item) => item.id === elements.chat.value)) {
@@ -1376,10 +1380,13 @@ function progressSignature(items: Record<string, unknown>[]): string {
 
 function renderDesktopRunProgress(run: Record<string, unknown>): void {
   const activity = activityCountLabel(number(run.reasoningActivityCount), number(run.workActivityCount));
+  const cancelling = pendingCancelRunId === text(run.id);
   elements.runProgress.hidden = false;
-  elements.runProgressText.textContent = `デスクトップで会話を実行中 — ${statusLabel(text(run.status) || "running")}${activity ? ` / ${activity}` : ""}`;
+  elements.runProgressText.textContent = cancelling
+    ? "実行を停止中 — 送信済み"
+    : `デスクトップで会話を実行中 — ${statusLabel(text(run.status) || "running")}${activity ? ` / ${activity}` : ""}`;
   elements.runProgressText.prepend(spinner());
-  elements.cancelRun.hidden = !text(run.id) || !["running", "waiting_for_approval"].includes(text(run.status) || "running");
+  elements.cancelRun.hidden = pendingCancelRunId === text(run.id) || !text(run.id) || !["running", "waiting_for_approval"].includes(text(run.status) || "running");
   elements.approvalActions.hidden = true;
 }
 
@@ -1387,16 +1394,20 @@ function renderActiveTask(task: QueryDocumentSnapshot<DocumentData>): void {
   const data = task.data();
   const status = text(data.status);
   const runId = taskRunId(data);
+  const isCancelTask = text(data.operation) === "cancel_run";
   const cloudRun = selectedDesktopRun();
   const activity = activityCountLabel(
     number(cloudRun?.reasoningActivityCount ?? data.reasoningActivityCount),
     number(cloudRun?.workActivityCount ?? data.workActivityCount),
   );
   const activityDetail = activity ? ` / ${activity}` : "";
+  const cancelling = isCancelTask || pendingCancelRunId === runId;
   elements.runProgress.hidden = false;
-  elements.runProgressText.textContent = `${operationLabel(text(data.operation))} — ${statusLabel(status)}${activityDetail}`;
+  elements.runProgressText.textContent = cancelling
+    ? `実行を停止中 — ${statusLabel(status)}`
+    : `${operationLabel(text(data.operation))} — ${statusLabel(status)}${activityDetail}`;
   elements.runProgressText.prepend(spinner());
-  elements.cancelRun.hidden = !runId || !["queued", "claimed", "running", "waiting_for_approval"].includes(status);
+  elements.cancelRun.hidden = isCancelTask || pendingCancelRunId === runId || !runId || !["queued", "claimed", "running", "waiting_for_approval"].includes(status);
 
   activeApproval = undefined;
   for (const event of [...activeTaskEvents].sort((a, b) => Number(b.data().sequence) - Number(a.data().sequence))) {
@@ -1419,11 +1430,40 @@ function renderActiveTask(task: QueryDocumentSnapshot<DocumentData>): void {
 async function cancelActiveRun(): Promise<void> {
   const task = visibleActiveTask();
   const runId = task ? taskRunId(task.data()) : text(selectedDesktopRun()?.id);
-  if (!runId) return;
+  if (!runId || pendingCancelRunId === runId) return;
+  pendingCancelRunId = runId;
+  pendingCancelTaskId = "";
+  renderRunProgress();
   try {
-    await createTask("cancel_run", { runId });
+    pendingCancelTaskId = await createTask("cancel_run", {
+      runId,
+      projectId: elements.project.value,
+      chatId: elements.chat.value,
+    });
     clearError();
-  } catch (error) { showError(error); }
+  } catch (error) {
+    pendingCancelRunId = "";
+    pendingCancelTaskId = "";
+    renderRunProgress();
+    showError(error);
+  }
+}
+
+function reconcilePendingCancel(): void {
+  if (!pendingCancelRunId || !pendingCancelTaskId) return;
+  const cancelTask = tasks.find((task) => task.id === pendingCancelTaskId);
+  if (!cancelTask) return;
+  const status = text(cancelTask.data().status);
+  if (["failed", "cancelled", "connection_lost"].includes(status)) {
+    pendingCancelRunId = "";
+    pendingCancelTaskId = "";
+    return;
+  }
+  const desktopRunId = text(selectedDesktopRun()?.id);
+  if (status === "completed" && desktopRunId !== pendingCancelRunId) {
+    pendingCancelRunId = "";
+    pendingCancelTaskId = "";
+  }
 }
 
 async function resolveApproval(decision: "accept" | "decline"): Promise<void> {
@@ -1486,6 +1526,8 @@ function stopSubscriptions(): void {
   activeTaskEvents = [];
   activeApproval = undefined;
   pendingCreatedChat = undefined;
+  pendingCancelRunId = "";
+  pendingCancelTaskId = "";
   optimisticInstructions = [];
   expandedProgressIds.clear();
   runtimeKey = "";
