@@ -149,6 +149,7 @@ public partial class MainWindow : Window
     private readonly RemoteAgentClient _remoteAgent = new();
     private GoogleOAuthSession? _remoteAuthSession;
     private CancellationTokenSource? _remoteAuthRefreshCts;
+    private bool _isRemoteAgentConnecting;
     private readonly ObservableCollection<ProjectTreeItem> _projectTree = new();
     private ObservableCollection<MessageDto> _messages = new();
     private readonly ObservableCollection<AutomationDto> _automations = new();
@@ -377,6 +378,7 @@ public partial class MainWindow : Window
                     _isDaemonHttpReady = true;
                     RefreshSendTransportReadiness();
                     ScheduleRemotePrioritySync();
+                    _ = TryReconnectRemoteAsync();
                 }
                 return;
             }
@@ -398,6 +400,7 @@ public partial class MainWindow : Window
             await ReconcileActiveRunsAsync();
             RefreshSendTransportReadiness();
             ScheduleRemotePrioritySync();
+            _ = TryReconnectRemoteAsync();
         }
         catch (Exception ex)
         {
@@ -886,44 +889,53 @@ public partial class MainWindow : Window
 
     private async Task TryReconnectRemoteAsync()
     {
-        if (!RemoteSyncFeature.IsEnabled || _isClosing || _remoteAgent.IsRunning || !_isDaemonHttpReady)
+        if (!RemoteSyncFeature.IsEnabled || _isClosing || _remoteAgent.IsRunning ||
+            _isRemoteAgentConnecting || !_isDaemonHttpReady)
         {
             return;
         }
 
-        for (var attempt = 1; attempt <= 3 && !_isClosing; attempt++)
+        _isRemoteAgentConnecting = true;
+        try
         {
-            try
+            for (var attempt = 1; attempt <= 3 && !_isClosing; attempt++)
             {
-                var session = await _googleOAuth.TryRestoreSessionAsync();
-                if (session is null || _isClosing)
+                try
                 {
-                    RemoteSyncDetailText.Text = "保存済みのRemote認証がありません。初回認証後は自動接続されます。";
+                    var session = await _googleOAuth.TryRestoreSessionAsync();
+                    if (session is null || _isClosing)
+                    {
+                        RemoteSyncDetailText.Text = "保存済みのRemote認証がありません。初回認証後は自動接続されます。";
+                        return;
+                    }
+                    _remoteAuthSession = session;
+                    if (string.IsNullOrWhiteSpace(_wslDistroName))
+                    {
+                        var wsl = await _client.ResolveDefaultWslEnvironmentAsync();
+                        _wslDistroName = wsl.DistroName;
+                    }
+                    await _remoteAgent.StartAsync(_wslDistroName, session.AccessToken);
+                    StartRemoteAuthRefreshLoop();
+                    if (!_isClosing)
+                    {
+                        StatusText.Text = "クラウド同期を開始しました";
+                    }
                     return;
                 }
-                _remoteAuthSession = session;
-                if (string.IsNullOrWhiteSpace(_wslDistroName))
+                catch (Exception ex)
                 {
-                    var wsl = await _client.ResolveDefaultWslEnvironmentAsync();
-                    _wslDistroName = wsl.DistroName;
-                }
-                await _remoteAgent.StartAsync(_wslDistroName, session.AccessToken);
-                StartRemoteAuthRefreshLoop();
-                if (!_isClosing)
-                {
-                    StatusText.Text = "クラウド同期を開始しました";
-                }
-                return;
-            }
-            catch (Exception ex)
-            {
-                WritePerformanceLog("remote-auto-reconnect-error", $"attempt={attempt} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
-                if (attempt < 3)
-                {
-                    RemoteSyncDetailText.Text = $"クラウド同期を再試行しています（{attempt}/3）。";
-                    await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None);
+                    WritePerformanceLog("remote-auto-reconnect-error", $"attempt={attempt} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+                    if (attempt < 3)
+                    {
+                        RemoteSyncDetailText.Text = $"クラウド同期を再試行しています（{attempt}/3）。";
+                        await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None);
+                    }
                 }
             }
+        }
+        finally
+        {
+            _isRemoteAgentConnecting = false;
         }
     }
 
