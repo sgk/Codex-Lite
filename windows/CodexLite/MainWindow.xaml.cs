@@ -381,6 +381,7 @@ public partial class MainWindow : Window
                     ScheduleRemotePrioritySync();
                 }
                 _ = TryReconnectRemoteAsync();
+                await ReconcileActiveRunsAsync();
                 return;
             }
 
@@ -482,8 +483,12 @@ public partial class MainWindow : Window
                 {
                     continue;
                 }
-                if (_isPreparingSend && _selectedChat?.Id == daemonRun.ChatId)
+                if ((_isPreparingSend && _selectedChat?.Id == daemonRun.ChatId)
+                    || _queuedComposerSubmissions.Any(submission =>
+                        submission.ChatId == daemonRun.ChatId && submission.State == "sending"))
                 {
+                    // The sender owns this run until the HTTP response is handled,
+                    // even when the user has selected a different chat.
                     continue;
                 }
                 var projectId = daemonRun.ProjectId;
@@ -804,33 +809,34 @@ public partial class MainWindow : Window
                 _wslHomePath = wsl.HomePath;
                 await _client.EnsureDaemonAsync(_wslDistroName);
                 _isDaemonHttpReady = true;
-                UpdateCommandButtonState();
-                SetBusyMessage("実行設定を復元中...");
-                var runtimeSettings = await _client.GetSettingsAsync();
-                if (runtimeSettings is not null)
-                {
-                    ApplyRuntimeSettingsSelection(runtimeSettings);
-                }
-                SetBusyMessage("プロジェクトを読み込み中...");
-                await RefreshProjectsAsync();
-                SetBusyMessage("中断した会話を再開中...");
-                var restartResume = await _client.ResumeRunsAfterAppRestartAsync();
-                if (restartResume is { Resumed.Count: > 0 })
-                {
-                    WritePerformanceLog(
-                        "startup-runs-resumed",
-                        $"resumed={restartResume.Resumed.Count} pending={restartResume.PendingCount}");
-                }
-                SetBusyMessage("診断情報を読み込み中...");
-                await RefreshDiagnosticsAsync();
-                await ReconcileActiveRunsAsync();
-                if (RemoteSyncFeature.IsEnabled)
-                {
-                    _ = WatchRemoteRunChangesAsync(_remoteRunWatchCts.Token);
-                }
-                StatusText.Text = "待機中 | daemon ok";
+                // Observe runs even if a later startup request times out.
                 _messageRefreshTimer.Start();
                 _daemonHealthTimer.Start();
+                if (RemoteSyncFeature.IsEnabled)
+                    _ = WatchRemoteRunChangesAsync(_remoteRunWatchCts.Token);
+                UpdateCommandButtonState();
+                SetBusyMessage("実行設定を復元中...");
+                var startupOk = await RunStartupStepAsync("settings", async () =>
+                {
+                    var runtimeSettings = await _client.GetSettingsAsync();
+                    if (runtimeSettings is not null)
+                        ApplyRuntimeSettingsSelection(runtimeSettings);
+                });
+                SetBusyMessage("プロジェクトを読み込み中...");
+                startupOk &= await RunStartupStepAsync("projects", () => RefreshProjectsAsync());
+                SetBusyMessage("中断した会話を再開中...");
+                startupOk &= await RunStartupStepAsync("resume", async () =>
+                {
+                    var restartResume = await _client.ResumeRunsAfterAppRestartAsync();
+                    WritePerformanceLog(
+                        "startup-runs-resumed",
+                        $"resumed={restartResume?.Resumed.Count ?? 0} pending={restartResume?.PendingCount ?? 0}");
+                });
+                await ReconcileActiveRunsAsync();
+                SetBusyMessage("診断情報を読み込み中...");
+                startupOk &= await RunStartupStepAsync("diagnostics", RefreshDiagnosticsAsync);
+                await ReconcileActiveRunsAsync();
+                StatusText.Text = startupOk ? "待機中 | daemon ok" : "起動処理の一部でエラー | 会話の更新は継続しています";
                 RefreshSendTransportReadiness();
                 ScheduleRemotePrioritySync();
             });
@@ -841,9 +847,26 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            _isDaemonHttpReady = false;
-            InvalidateSendTransportReadiness();
+            WritePerformanceLog("startup-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+            if (!_isDaemonHttpReady)
+                InvalidateSendTransportReadiness();
             StatusText.Text = $"daemon error | {ex.Message}";
+        }
+    }
+
+    private async Task<bool> RunStartupStepAsync(string stage, Func<Task> action)
+    {
+        WritePerformanceLog("startup-step-start", $"stage={stage}");
+        try
+        {
+            await action();
+            WritePerformanceLog("startup-step-complete", $"stage={stage}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog("startup-step-error", $"stage={stage} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+            return false;
         }
     }
 
