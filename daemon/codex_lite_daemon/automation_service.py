@@ -126,7 +126,7 @@ class AutomationService:
         return self.db.fetchall(
             """
             SELECT * FROM automations
-            WHERE enabled = 1 AND running = 0 AND next_run_at IS NOT NULL AND next_run_at <= ?
+            WHERE enabled = 1 AND running = 0 AND next_run_at IS NOT NULL AND julianday(next_run_at) <= julianday(?)
             ORDER BY next_run_at ASC
             LIMIT 5
             """,

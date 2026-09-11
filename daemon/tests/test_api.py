@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,38 @@ from codex_lite_daemon.services import ChatService, MessageService, ProjectServi
 from codex_lite_daemon.transcript_import import TranscriptImportService
 from codex_lite_daemon.util.ids import new_id
 from codex_lite_daemon.util.time import utc_now
+import codex_lite_daemon.util.time as time_util
+
+
+def test_message_timestamps_keep_microseconds_and_sort_with_legacy_seconds(linux_tmp_path: Path, monkeypatch) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 11, 3, 0, 0, 123456, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(time_util, "datetime", Clock)
+    cfg = make_test_config(linux_tmp_path)
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    db = Database(cfg.database_path)
+    db.migrate()
+    try:
+        projects = ProjectService(db, cfg)
+        chats = ChatService(db, projects)
+        messages = MessageService(db, chats)
+        project_id = projects.create_project(str(project_dir))["id"]
+        chat_id = chats.create_chat(project_id, "test")["id"]
+        legacy = messages.insert_message(chat_id, "user", "legacy", kind="instruction")
+        db.execute("UPDATE messages SET created_at = ? WHERE id = ?", ("2026-09-11T03:00:00Z", legacy["id"]))
+        newer = messages.insert_message(chat_id, "user", "new", kind="instruction")
+        final = messages.insert_message(chat_id, "assistant", "done", kind="conclusion")
+        assert final["createdAt"] == "2026-09-11T03:00:00.123456Z"
+        assert [m["id"] for m in messages.list_messages(project_id, chat_id)] == [legacy["id"], newer["id"], final["id"]]
+        assert messages.list_input_history(project_id, chat_id, limit=1) == ["new"]
+        page = message_page(messages.list_messages(project_id, chat_id), 10, newer["createdAt"], "")
+        assert [m["id"] for m in page["messages"]] == [legacy["id"]]
+    finally:
+        db.close()
 
 
 @pytest.fixture
