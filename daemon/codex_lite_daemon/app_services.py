@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import asyncio
 import base64
 import json
@@ -478,7 +480,84 @@ class AppServerRunService:
         self.events = EventHub(db)
         self._runtime_reconcile_locks: dict[str, asyncio.Lock] = {}
         self._starting_chats: set[str] = set()
+        self._submission_tasks: dict[str, asyncio.Task] = {}
+        self._cancel_requested_submissions: set[str] = set()
         self._untracked_threads: dict[str, dict[str, Any]] = {}
+
+    async def submit_message(self, project_id: str, chat_id: str, content: str, attachments: list[dict[str, Any]] | None = None, request_id: str | None = None) -> dict:
+        """Save acceptance immediately; execution is owned by the daemon."""
+        project = self.projects.get_project_row(project_id)
+        chat = self.chats.get_chat_row(project_id, chat_id)
+        payload_hash = hashlib.sha256(json.dumps([project_id, chat_id, content, attachments or []], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        if request_id is not None:
+            if not request_id or len(request_id) > 200:
+                raise AppError("invalid_request_id", "Invalid submission request ID.", 400)
+            receipt = self.chats.db.fetchone("SELECT * FROM submission_receipts WHERE request_id = ?", (request_id,))
+            if receipt is not None:
+                if receipt["payload_hash"] != payload_hash:
+                    raise AppError("request_id_conflict", "Request ID was already used for different content.", 409)
+                return {"messageId": receipt["message_id"], "runId": receipt["run_id"], "createdAt": receipt["created_at"], "status": self.get_run(str(receipt["run_id"]))["status"], "eventSequence": 0}
+        if not bool(chat.get("can_continue", 1)):
+            raise AppError("chat_read_only", str(chat.get("continue_disabled_reason") or "This chat is read-only."), 409)
+        if chat_id in self._starting_chats or any(r.chat_id == chat_id and r.status in {"queued", "running"} for r in self.runs.values()):
+            raise AppError("run_already_active_in_chat", "Another run is already active in this chat.", 409)
+        if sum(r.status in {"queued", "running"} for r in self.runs.values()) >= self.max_concurrent_runs:
+            raise AppError("run_already_active", "Another run is already active.", 409)
+        settings = self.threads.settings_for_chat(project_id, chat_id)
+        run_id = new_id("run")
+        with self.chats.db.transaction():
+            self._insert_run_row(run_id, chat_id)
+            message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
+            if request_id is not None:
+                self.chats.db.execute("INSERT INTO submission_receipts(request_id, payload_hash, run_id, message_id, created_at) VALUES (?, ?, ?, ?, ?)", (request_id, payload_hash, run_id, message["id"], message["createdAt"]))
+        # Admission has no await before this reservation. Slow provider requests
+        # never hold the admission path for other chats.
+        self._starting_chats.add(chat_id)
+        self.runs[run_id] = AppServerActiveRun("", "", chat_id, provider=model_provider_for_model(settings.model), status="queued")
+        self._submission_tasks[run_id] = asyncio.create_task(self._execute_submission(run_id, project_id, chat_id, content, attachments, project, chat, message, settings))
+        return {"messageId": message["id"], "runId": run_id, "status": "queued", "createdAt": message["createdAt"], "eventSequence": 0}
+
+    async def _execute_submission(self, run_id: str, project_id: str, chat_id: str, content: str, attachments: list[dict[str, Any]] | None, project: dict, chat: dict, message: dict, settings: AppServerRuntimeSettings) -> None:
+        try:
+            await self.events.publish(run_id, "status", {"status": "queued", "messageId": message["id"], "createdAt": message["createdAt"]})
+            await self._start_message_run_reserved(project_id, chat_id, content, attachments, project, chat, run_id, message, settings)
+            self.chats.clear_resume_on_start(chat_id)
+        except (Exception, asyncio.CancelledError) as exc:
+            run = self.runs[run_id]
+            run.status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+            run.error = "Daemon stopped while the submission was starting." if isinstance(exc, asyncio.CancelledError) else str(exc)
+            run.finished_at = utc_now()
+            self._finish_run_row(run_id, run.status, run.error, "submission_start_failed")
+            await self.events.publish(run_id, "error", {"status": run.status, "message": run.error, "code": getattr(exc, "code", "submission_start_failed")})
+        else:
+            if run_id in self._cancel_requested_submissions:
+                try:
+                    await self.cancel_run(run_id)
+                except Exception as exc:
+                    # An interrupt failure must not retire a still-live watcher.
+                    self.runs[run_id].error = str(exc)
+                    await self.events.publish(run_id, "progress", {"method": "turn/interrupt", "summary": str(exc)})
+        finally:
+            self._starting_chats.discard(chat_id)
+            self._submission_tasks.pop(run_id, None)
+            self._cancel_requested_submissions.discard(run_id)
+
+    async def close_submissions(self) -> None:
+        tasks = list(self._submission_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # A task cancelled before its first instruction never enters finally.
+        for run_id in list(self._submission_tasks):
+            run = self.runs[run_id]
+            run.status = "cancelled"
+            run.error = "Daemon stopped before the submission started."
+            run.finished_at = utc_now()
+            self._finish_run_row(run_id, run.status, run.error, "submission_cancelled")
+            await self.events.publish(run_id, "error", {"status": run.status, "message": run.error, "code": "submission_cancelled"})
+            self._starting_chats.discard(run.chat_id)
+            self._submission_tasks.pop(run_id, None)
+            self._cancel_requested_submissions.discard(run_id)
 
     async def start_message_run(self, project_id: str, chat_id: str, content: str, attachments: list[dict[str, Any]] | None = None) -> dict:
         project = self.projects.get_project_row(project_id)
@@ -506,9 +585,12 @@ class AppServerRunService:
         attachments: list[dict[str, Any]] | None,
         project: dict[str, Any],
         chat: dict[str, Any],
+        accepted_run_id: str | None = None,
+        accepted_message: dict | None = None,
+        accepted_settings: AppServerRuntimeSettings | None = None,
     ) -> dict:
-        run_id = new_id("run")
-        run_settings = self.threads.settings_for_chat(project_id, chat_id)
+        run_id = accepted_run_id or new_id("run")
+        run_settings = accepted_settings or self.threads.settings_for_chat(project_id, chat_id)
         provider = model_provider_for_model(run_settings.model)
         app_server = _app_server_for_provider(self.app_server, provider)
         # A combination is considered recently used when a chat message is
@@ -518,16 +600,17 @@ class AppServerRunService:
         prior_context = await self.threads.context_for_provider(project_id, chat_id, provider, exclude_content=content)
         provider_rows_before = self.chats.list_provider_threads(project_id, chat_id)
         last_provider = _latest_provider(provider_rows_before)
-        self._insert_run_row(run_id, chat_id)
+        if accepted_run_id is None:
+            self._insert_run_row(run_id, chat_id)
         try:
-            user_message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
+            user_message = accepted_message if accepted_message is not None else self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
         except Exception as exc:
             self._finish_run_row(run_id, "failed", str(exc), "user_message_store_failed")
             raise
         _acquire_run_lease(app_server)
         try:
             await app_server.ensure_started()
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             await _release_run_lease(app_server)
             self._finish_run_row(run_id, "failed", str(exc), "app_server_start_failed")
             raise
@@ -564,7 +647,7 @@ class AppServerRunService:
             if thread_id != str(provider_thread["thread_id"]):
                 self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=bool(provider_thread.get("history_initialized")))
             self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=True)
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             if notification_queue is not None:
                 app_server.unsubscribe_queue(notification_queue)
             await _release_run_lease(app_server)
@@ -675,7 +758,7 @@ class AppServerRunService:
     def list_active_runs(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for run_id, run in self.runs.items():
-            if run.status != "running":
+            if run.status not in {"queued", "running"}:
                 continue
             chat = self.chats.db.fetchone("SELECT project_id FROM chats WHERE id = ?", (run.chat_id,))
             result.append(
@@ -884,6 +967,10 @@ class AppServerRunService:
         run = self.runs.get(run_id)
         if run is None:
             raise AppError("cancel_failed", "Run is not active.", 409)
+        if run.status == "queued":
+            self._cancel_requested_submissions.add(run_id)
+            await self.events.publish(run_id, "status", {"status": "queued", "cancelRequested": True})
+            return _run_out(run_id, run)
         if run.status != "running":
             return _run_out(run_id, run)
         app_server = _app_server_for_provider(self.app_server, run.provider)
@@ -939,6 +1026,7 @@ class AppServerRunService:
         if not clean_content:
             raise AppError("validation_error", "Steer content must not be empty.", 400)
         input_items = _build_turn_input(clean_content, attachments or [])
+        accepted_at = utc_now()
         app_server = _app_server_for_provider(self.app_server, run.provider)
         chat_row = self.chats.get_chat_row_by_id(run.chat_id)
         run_settings = self.threads.settings_for_chat(str(chat_row["project_id"]), run.chat_id)
@@ -1001,10 +1089,12 @@ class AppServerRunService:
             _content_with_attachment_summary(clean_content, attachments or []),
             run_id=run_id,
             kind="instruction",
+            created_at=accepted_at,
         )
         await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
         result = _run_out(run_id, run)
         result["messageId"] = user_message["id"]
+        result["createdAt"] = user_message["createdAt"]
         return result
 
     async def resolve_approval(self, run_id: str, request_id: str, decision: str) -> dict:
@@ -1049,7 +1139,9 @@ class AppServerRunService:
             if not terminal_seen:
                 status = str(row["status"])
                 event = "done" if status in {"succeeded", "cancelled"} else "error"
-                data = {"status": status, "message": row.get("error"), "recovered": True}
+                data = {"status": status, "message": row.get("error"), "recovered": True,
+                        "runId": run_id, "eventSequence": sequence + 1,
+                        "occurredAt": row.get("finished_at") or row.get("started_at")}
                 yield f"id: {sequence + 1}\nevent: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
             return
         async for item in self.events.subscribe(run_id, after_sequence=after_sequence):

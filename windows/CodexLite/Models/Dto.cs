@@ -238,7 +238,8 @@ public sealed record RunDto(
     long EventSequence = 0,
     IReadOnlyList<PendingApprovalDto>? PendingApprovals = null,
     bool Adopted = false,
-    string? MessageId = null);
+    string? MessageId = null,
+    string? CreatedAt = null);
 
 public sealed record RemoteCatalogRevisionDto(long Revision);
 
@@ -249,7 +250,7 @@ public sealed record PendingApprovalDto(
     string? Command,
     string? Cwd);
 
-public sealed record MessagePostResult(string MessageId, string RunId);
+public sealed record MessagePostResult(string MessageId, string RunId, string? CreatedAt = null, string Status = "queued", long EventSequence = 0);
 
 public sealed record AppRestartPreparationDto(int MarkedCount);
 

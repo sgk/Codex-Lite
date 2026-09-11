@@ -543,9 +543,9 @@ class MessageService:
         )
         return message_out(row) if row is not None else None
 
-    def insert_message(self, chat_id: str, role: str, content: str, run_id: str | None = None, kind: str | None = None) -> dict:
+    def insert_message(self, chat_id: str, role: str, content: str, run_id: str | None = None, kind: str | None = None, created_at: str | None = None) -> dict:
         message_id = new_id("msg")
-        now = utc_now()
+        now = created_at or utc_now()
         clean_kind = _message_kind(role, kind)
         self.db.execute(
             "INSERT INTO messages(id, chat_id, role, content, run_id, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",

@@ -250,7 +250,7 @@ class RemoteGateway:
             attachments = _remote_attachments(payload)
             if attachments and not self.use_app_server:
                 raise AppError("remote_attachment_not_supported", "Remote attachments require app-server mode.", 409)
-            return await self.app_runs.start_message_run(project_id, chat_id, content, attachments) if self.use_app_server else self.runs.start_message_run(project_id, chat_id, content)
+            return await self.app_runs.submit_message(project_id, chat_id, content, attachments) if self.use_app_server else self.runs.start_message_run(project_id, chat_id, content)
 
         if operation == "create_chat":
             project_id = _required_text(payload.get("projectId"), "projectId")
@@ -275,7 +275,7 @@ class RemoteGateway:
             attachments = _remote_attachments(payload)
             if attachments and not self.use_app_server:
                 raise AppError("remote_attachment_not_supported", "Remote attachments require app-server mode.", 409)
-            run = await self.app_runs.start_message_run(project_id, str(chat["id"]), content, attachments) if self.use_app_server else self.runs.start_message_run(project_id, str(chat["id"]), content)
+            run = await self.app_runs.submit_message(project_id, str(chat["id"]), content, attachments) if self.use_app_server else self.runs.start_message_run(project_id, str(chat["id"]), content)
             return {**run, "chat": _remote_chat(chat)}
 
         run_id = _required_text(payload.get("runId"), "runId")

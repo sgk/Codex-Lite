@@ -138,7 +138,7 @@ export function runEventsPath(runId: string, afterSequence?: number): string {
     : base;
 }
 
-function parseSseBlock(block: string): SseEvent | undefined {
+export function parseSseBlock(block: string): SseEvent | undefined {
   let sequence = 0;
   let event = "message";
   let data = "";
@@ -148,7 +148,10 @@ function parseSseBlock(block: string): SseEvent | undefined {
     else if (line.startsWith("data: ")) data += line.slice(6);
   }
   if (!data) return undefined;
-  const observedAt = new Date().toISOString();
-  try { return { sequence, event, data: JSON.parse(data), observedAt }; }
-  catch { return { sequence, event, data, observedAt }; }
+  const payload: unknown = JSON.parse(data);
+  if (!payload || typeof payload !== "object" || !("occurredAt" in payload)
+      || typeof payload.occurredAt !== "string" || !Number.isFinite(Date.parse(payload.occurredAt))) {
+    throw new Error(`Run event ${sequence} has no valid daemon timestamp`);
+  }
+  return { sequence, event, data: payload, observedAt: payload.occurredAt };
 }

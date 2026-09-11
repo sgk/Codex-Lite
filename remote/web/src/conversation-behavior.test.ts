@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+test("同じミリ秒内でも送信と応答をデーモン時刻順に並べる", () => {
+  const ordered = sortConversationTimeline([
+    { createdAt: "2026-09-11T01:02:03.123456Z", sourceOrder: 0 },
+    { createdAt: "2026-09-11T01:02:03.123123Z", sourceOrder: 1 },
+    { createdAt: "2026-09-11T01:02:03.123Z", sourceOrder: 2 },
+  ]);
+  assert.deepEqual(ordered.map(item => item.sourceOrder), [2, 1, 0]);
+});
 import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, mergeProgressWindow, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldKeepCompletedProgress, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction } from "./conversation-behavior.js";
 
 test("新規チャットのタイトルはデスクトップと同じく最初の指示から作る", () => {

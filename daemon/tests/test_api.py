@@ -713,8 +713,10 @@ async def test_event_hub_replays_persisted_events_after_recreation(linux_tmp_pat
     ))
     await first_hub.publish("run_1", "status", {"status": "running"})
     await first_hub.publish("run_1", "progress", {"summary": "working"})
+    await first_hub.publish("run_1", "progress", {"summary": "burst"})
+    assert [item["sequence"] for item in first_hub.replay_history("run_1", 0)] == [1, 2, 3]
     await first_hub.publish("run_1", "done", {"status": "succeeded"})
-    assert db.fetchone("SELECT COUNT(*) AS count FROM run_events WHERE run_id = 'run_1'") == {"count": 2}
+    assert db.fetchone("SELECT COUNT(*) AS count FROM run_events WHERE run_id = 'run_1'") == {"count": 4}
     assert terminal_persistence[-1] == 1
 
     recreated_hub = EventHub(db)
@@ -722,10 +724,15 @@ async def test_event_hub_replays_persisted_events_after_recreation(linux_tmp_pat
     async for item in recreated_hub.subscribe("run_1", after_sequence=1):
         events.append((item["sequence"], item["event"], item["data"]))
 
-    assert events == [
-        (2, "progress", {"summary": "working"}),
-        (3, "done", {"status": "succeeded"}),
-    ]
+    assert [(seq, kind) for seq, kind, _ in events] == [(2, "progress"), (3, "progress"), (4, "done")]
+    assert events[0][2]["summary"] == "working"
+    assert events[2][2]["status"] == "succeeded"
+    assert [item["sequence"] for item in recreated_hub.replay_history("run_1", 0)] == [1, 2, 3, 4]
+    for sequence, _, data in events:
+        assert data["eventSequence"] == sequence
+        assert data["runId"] == "run_1"
+        assert data["occurredAt"]
+    assert recreated_hub.replay_history("run_1") == first_hub.replay_history("run_1")
     db.close()
 
 
@@ -3175,6 +3182,72 @@ async def test_slow_chat_reconciliation_does_not_block_another_chat_send(linux_t
     finally:
         release.set()
         await inspection
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_is_saved_before_slow_start_and_deduplicated(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    server = DelayedTurnStartAppServer()
+    threads = AppServerThreadService(projects, chats, messages, TranscriptImportService(cfg, projects, chats), server, make_runtime_settings())
+    runs = AppServerRunService(projects, threads, messages, server, max_concurrent_runs=2, settings=make_runtime_settings(), db=db)
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    chats.upsert_provider_thread(project_id, chat_id, "openai", "thread_1", history_initialized=True)
+    try:
+        execute = db.execute
+
+        def reject_receipt(sql, params=()):
+            if sql.startswith("INSERT INTO submission_receipts"):
+                raise OSError("receipt storage failed")
+            return execute(sql, params)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(db, "execute", reject_receipt)
+            with pytest.raises(OSError, match="receipt storage failed"):
+                await runs.submit_message(project_id, chat_id, "hello", request_id="request-1")
+        assert messages.list_messages(project_id, chat_id) == []
+        assert db.fetchall("SELECT id FROM runs") == []
+        assert not runs._submission_tasks
+        receipt = await asyncio.wait_for(runs.submit_message(project_id, chat_id, "hello", request_id="request-1"), 1)
+        await asyncio.wait_for(server.turn_start_entered.wait(), 1)
+        assert receipt["status"] == "queued"
+        assert runs.list_active_runs()[0]["id"] == receipt["runId"]
+        stored = messages.list_messages(project_id, chat_id)
+        assert len(stored) == 1
+        assert stored[0]["createdAt"] == receipt["createdAt"]
+        assert stored[0]["runId"] == receipt["runId"]
+        assert await runs.submit_message(project_id, chat_id, "hello", request_id="request-1") == receipt
+        with pytest.raises(AppError) as conflict:
+            await runs.submit_message(project_id, chat_id, "different", request_id="request-1")
+        assert conflict.value.code == "request_id_conflict"
+        with pytest.raises(AppError) as active:
+            await runs.submit_message(project_id, chat_id, "second")
+        assert active.value.code == "run_already_active_in_chat"
+        second_chat = chats.create_chat(project_id, "second")["id"]
+        second = await asyncio.wait_for(runs.submit_message(project_id, second_chat, "independent"), 1)
+        assert second["status"] == "queued"
+        assert second["runId"] != receipt["runId"]
+        assert len(runs.list_active_runs()) == 2
+        # A client disconnect cannot cancel daemon-owned work. Explicit shutdown
+        # does terminate startup and leaves a replayable terminal result.
+        await runs.close_submissions()
+        assert runs.get_run(receipt["runId"])["status"] == "cancelled"
+        assert not runs._starting_chats
+        assert not runs._submission_tasks
+        journal = runs.events.replay_history(receipt["runId"])
+        assert [event["event"] for event in journal] == ["status", "error"]
+        assert all(event["data"]["occurredAt"] >= receipt["createdAt"] for event in journal)
+    finally:
+        await runs.close_submissions()
+        await runs.events.flush()
         db.close()
 
 

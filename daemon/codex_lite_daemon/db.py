@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -51,6 +52,14 @@ CREATE TABLE IF NOT EXISTS messages (
   run_id TEXT,
   created_at TEXT NOT NULL,
   kind TEXT NOT NULL CHECK(kind IN ('instruction', 'work', 'conclusion', 'waiting', 'status', 'activity'))
+);
+
+CREATE TABLE IF NOT EXISTS submission_receipts (
+  request_id TEXT PRIMARY KEY,
+  payload_hash TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL
 );
 
 -- One Codex Lite chat may have a separate internal thread per provider.
@@ -152,6 +161,7 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.RLock()
+        self._in_transaction = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -246,16 +256,35 @@ class Database:
             """
         )
 
+    @contextmanager
+    def transaction(self):
+        """Group synchronous service writes into one acceptance commit."""
+        with self._lock:
+            if self._in_transaction:
+                raise RuntimeError("Nested database transactions are not supported.")
+            self._in_transaction = True
+            try:
+                self._conn.execute("BEGIN")
+                yield
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+            finally:
+                self._in_transaction = False
+
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
             cur = self._conn.execute(sql, tuple(params))
-            self._conn.commit()
+            if not self._in_transaction:
+                self._conn.commit()
             return cur
 
     def executemany(self, sql: str, params: Iterable[Iterable[Any]]) -> None:
         with self._lock:
             self._conn.executemany(sql, params)
-            self._conn.commit()
+            if not self._in_transaction:
+                self._conn.commit()
 
     def fetchone(self, sql: str, params: Iterable[Any] = ()) -> dict[str, Any] | None:
         with self._lock:

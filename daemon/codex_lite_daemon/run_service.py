@@ -25,7 +25,6 @@ class ActiveRun:
 
 class EventHub:
     MAX_PERSISTED_EVENTS_PER_RUN = 2000
-    MAX_PERSISTED_DATA_BYTES = 256 * 1024
     PERSIST_BATCH_SECONDS = 0.25
 
     def __init__(self, db: Database | None = None) -> None:
@@ -46,6 +45,7 @@ class EventHub:
         async with self._lock:
             sequence = self.current_sequence(run_id) + 1
             self._sequences[run_id] = sequence
+            data = dict(data) | {"runId": run_id, "eventSequence": sequence, "occurredAt": utc_now()}
             payload = {"event": event, "data": data, "sequence": sequence}
             history = self._history.setdefault(run_id, [])
             history.append(payload)
@@ -53,7 +53,7 @@ class EventHub:
                 del history[:-self.MAX_PERSISTED_EVENTS_PER_RUN]
             subscribers = list(self._subscribers.get(run_id, []))
             if self._db is not None:
-                self._pending_persistence.append((run_id, sequence, event, self._persistable_data(data), utc_now()))
+                self._pending_persistence.append((run_id, sequence, event, self._persistable_data(data), data["occurredAt"]))
                 if self._flush_task is None or self._flush_task.done():
                     self._flush_task = asyncio.create_task(self._flush_after_delay())
         for queue in subscribers:
@@ -77,15 +77,7 @@ class EventHub:
     async def subscribe(self, run_id: str, after_sequence: int | None = None) -> AsyncIterator[dict]:
         queue: asyncio.Queue[dict] = asyncio.Queue()
         async with self._lock:
-            persisted = self._persisted_history(run_id, after_sequence)
-            memory = [
-                item
-                for item in self._history.get(run_id, [])
-                if after_sequence is None or int(item.get("sequence") or 0) > after_sequence
-            ]
-            history_by_sequence = {int(item["sequence"]): item for item in persisted}
-            history_by_sequence.update({int(item["sequence"]): item for item in memory})
-            history = [history_by_sequence[key] for key in sorted(history_by_sequence)]
+            history = self.replay_history(run_id, after_sequence)
             self._subscribers.setdefault(run_id, []).append(queue)
         try:
             for item in history:
@@ -132,16 +124,8 @@ class EventHub:
                     "INSERT OR REPLACE INTO run_events(run_id, sequence, event, data_json, created_at) VALUES (?, ?, ?, ?, ?)",
                     valid_pending,
                 )
-            latest_sequence_by_run: dict[str, int] = {}
-            for run_id, sequence, _, _, _ in valid_pending:
-                latest_sequence_by_run[run_id] = max(sequence, latest_sequence_by_run.get(run_id, 0))
-            for run_id, latest_sequence in latest_sequence_by_run.items():
-                if latest_sequence <= self.MAX_PERSISTED_EVENTS_PER_RUN:
-                    continue
-                self._db.execute(
-                    "DELETE FROM run_events WHERE run_id = ? AND sequence <= ?",
-                    (run_id, latest_sequence - self.MAX_PERSISTED_EVENTS_PER_RUN),
-                )
+            # Only the memory cache is bounded. Durable events are needed for
+            # cursor replay until the user deletes the associated conversation.
             self._last_persistence_error = None
         except Exception as exc:
             # Event persistence is diagnostic/replay support. It must never
@@ -152,15 +136,14 @@ class EventHub:
         return {
             "pendingCount": len(self._pending_persistence),
             "lastError": self._last_persistence_error,
-            "maxEventsPerRun": self.MAX_PERSISTED_EVENTS_PER_RUN,
-            "maxEventDataBytes": self.MAX_PERSISTED_DATA_BYTES,
+            "maxMemoryEventsPerRun": self.MAX_PERSISTED_EVENTS_PER_RUN,
         }
 
     def _persisted_history(self, run_id: str, after_sequence: int | None) -> list[dict]:
         if self._db is None:
             return []
         rows = self._db.fetchall(
-            "SELECT sequence, event, data_json FROM run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence",
+            "SELECT sequence, event, data_json, created_at FROM run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence",
             (run_id, after_sequence if after_sequence is not None else -1),
         )
         result: list[dict] = []
@@ -169,6 +152,9 @@ class EventHub:
                 data = json.loads(str(row["data_json"]))
             except json.JSONDecodeError:
                 data = {"message": "保存されたイベントを読み取れませんでした。"}
+            data.setdefault("occurredAt", row["created_at"])
+            data.setdefault("eventSequence", int(row["sequence"]))
+            data.setdefault("runId", run_id)
             result.append({"event": row["event"], "data": data, "sequence": int(row["sequence"])})
         return result
 
@@ -180,19 +166,16 @@ class EventHub:
             if after_sequence is None or int(item.get("sequence") or 0) > after_sequence
         ]
         history_by_sequence = {int(item["sequence"]): item for item in persisted}
+        # A burst can exceed the memory window before the next DB batch. Those
+        # accepted events still belong to the replay/live boundary.
+        for pending_run, sequence, event, data_json, _ in self._pending_persistence:
+            if pending_run == run_id and (after_sequence is None or sequence > after_sequence):
+                history_by_sequence[sequence] = {"sequence": sequence, "event": event, "data": json.loads(data_json)}
         history_by_sequence.update({int(item["sequence"]): item for item in memory})
         return [history_by_sequence[key] for key in sorted(history_by_sequence)]
 
     def _persistable_data(self, data: dict) -> str:
-        encoded = json.dumps(data, ensure_ascii=False)
-        if len(encoded.encode("utf-8")) <= self.MAX_PERSISTED_DATA_BYTES:
-            return encoded
-        reduced = {
-            "truncated": True,
-            "method": data.get("method"),
-            "summary": str(data.get("summary") or data.get("message") or "")[:4000],
-        }
-        return json.dumps(reduced, ensure_ascii=False)
+        return json.dumps(data, ensure_ascii=False)
 
 
 class RunService:
@@ -258,8 +241,8 @@ class RunService:
             settings.get("model") or self.config.model,
             settings.get("reasoning_effort") or "",
         )
-        user_message = self.messages.insert_message(chat_id, "user", content, kind="instruction")
         run_id = new_id("run")
+        user_message = self.messages.insert_message(chat_id, "user", content, run_id=run_id, kind="instruction")
         log_path = self._log_path(run_id)
         self.db.execute(
             "INSERT INTO runs(id, chat_id, status, pid, exit_code, started_at, finished_at, log_path, error) VALUES (?, ?, 'queued', NULL, NULL, NULL, NULL, ?, NULL)",
@@ -267,7 +250,7 @@ class RunService:
         )
         task = asyncio.create_task(self._run(run_id, project["path"], chat["id"], content, log_path))
         self.active_runs[run_id] = ActiveRun(task)
-        return {"messageId": user_message["id"], "runId": run_id}
+        return {"messageId": user_message["id"], "runId": run_id, "createdAt": user_message["createdAt"], "status": "queued", "eventSequence": 0}
 
     async def cancel_run(self, run_id: str) -> dict:
         self.get_run_row(run_id)

@@ -498,8 +498,8 @@ public sealed class DaemonClient
         return _http.GetFromJsonAsync<MessagePageDto>(path, JsonOptions, cancellationToken);
     }
 
-    public Task<MessagePostResult?> SendMessageAsync(string projectId, string chatId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default) =>
-        PostAsync<MessagePostResult>($"/projects/{projectId}/chats/{chatId}/messages", new { content, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
+    public Task<MessagePostResult?> SendMessageAsync(string projectId, string chatId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default, string? requestId = null) =>
+        PostAsync<MessagePostResult>($"/projects/{projectId}/chats/{chatId}/messages", new { content, requestId, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
 
     public Task<RunDto?> CancelRunAsync(string runId, CancellationToken cancellationToken = default) =>
         PostAsync<RunDto>($"/runs/{runId}/cancel", new { }, cancellationToken);

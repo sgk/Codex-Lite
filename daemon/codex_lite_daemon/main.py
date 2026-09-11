@@ -11,6 +11,7 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import uvicorn
 from starlette.applications import Starlette
@@ -67,6 +68,7 @@ def create_app(config: Config | None = None) -> Starlette:
     automations = AutomationService(db, projects, chats)
     runs.recover_stale_runs()
     use_app_server = cfg.runner_mode == "app-server"
+    automation_runner = SimpleNamespace(start_message_run=app_runs.submit_message) if use_app_server else runs
     remote_gateway = RemoteGateway(db, projects, chats, app_threads, runs, app_runs, app_settings, transcript_import, use_app_server)
     messages.set_insert_listener(remote_gateway.mark_catalog_changed)
     runs.events.set_lifecycle_listener(remote_gateway.mark_catalog_changed)
@@ -77,7 +79,7 @@ def create_app(config: Config | None = None) -> Starlette:
         scheduler_stop = asyncio.Event()
         scheduler_task: asyncio.Task | None = None
         try:
-            scheduler_task = asyncio.create_task(run_automation_scheduler(automations, app_runs if use_app_server else runs, scheduler_stop))
+            scheduler_task = asyncio.create_task(run_automation_scheduler(automations, automation_runner, scheduler_stop))
             yield
         finally:
             scheduler_stop.set()
@@ -87,6 +89,7 @@ def create_app(config: Config | None = None) -> Starlette:
                     await scheduler_task
                 except asyncio.CancelledError:
                     pass
+            await app_runs.close_submissions()
             await app_servers.close()
             await app_runs.flush_events()
             await runs.flush_events()
@@ -368,7 +371,7 @@ def create_app(config: Config | None = None) -> Starlette:
 
     @post("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}/run")
     async def run_automation_now(project_id: str, chat_id: str, automation_id: str) -> dict:
-        return await automations.run_now(project_id, chat_id, automation_id, app_runs if use_app_server else runs)
+        return await automations.run_now(project_id, chat_id, automation_id, automation_runner)
 
     @delete("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}", status_code=204)
     async def delete_automation(project_id: str, chat_id: str, automation_id: str) -> None:
@@ -403,7 +406,7 @@ def create_app(config: Config | None = None) -> Starlette:
     @post("/projects/{project_id}/chats/{chat_id}/messages")
     async def create_message(project_id: str, chat_id: str, body: dict) -> dict:
         if use_app_server:
-            result = await app_runs.start_message_run(project_id, chat_id, _required_str(body, "content", min_length=1), _attachments(body))
+            result = await app_runs.submit_message(project_id, chat_id, _required_str(body, "content", min_length=1), _attachments(body), _optional_str(body, "requestId"))
         else:
             result = runs.start_message_run(project_id, chat_id, _required_str(body, "content", min_length=1))
         return result
@@ -462,14 +465,15 @@ def create_app(config: Config | None = None) -> Starlette:
             chat_id = str(pending["chat_id"])
             try:
                 result = (
-                    await app_runs.start_message_run(project_id, chat_id, "つづけて")
+                    await app_runs.submit_message(project_id, chat_id, "つづけて")
                     if use_app_server
                     else runs.start_message_run(project_id, chat_id, "つづけて")
                 )
             except AppError as exc:
                 failed.append({"projectId": project_id, "chatId": chat_id, "code": exc.code})
                 continue
-            chats.clear_resume_on_start(chat_id)
+            if not use_app_server or result.get("status") != "queued":
+                chats.clear_resume_on_start(chat_id)
             resumed.append({"projectId": project_id, "chatId": chat_id, **result})
         return {"resumed": resumed, "failed": failed, "pendingCount": len(chats.list_resume_on_start())}
 

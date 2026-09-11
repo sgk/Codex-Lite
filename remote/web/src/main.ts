@@ -1244,6 +1244,17 @@ function reconcileOptimisticTaskStatus(): void {
     if (!item.taskId) continue;
     const task = tasks.find((candidate) => candidate.id === item.taskId);
     const status = task ? text(task.data().status) : "";
+    const result = task?.data().result;
+    if (isObject(result) && text(result.messageId) && text(result.createdAt)) {
+      const createdAt = text(result.createdAt);
+      if (item.createdAt !== createdAt || item.state !== "accepted") {
+        item.createdAt = createdAt;
+        item.state = "accepted";
+        changed = true;
+      }
+      // A failure after acceptance belongs to the run, not the send queue.
+      continue;
+    }
     if (["failed", "cancelled", "connection_lost"].includes(status) && item.state !== "failed") {
       item.state = "failed";
       changed = true;

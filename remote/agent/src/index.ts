@@ -26,6 +26,7 @@ import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon, type SseEvent } from "./daemon.js";
 import { appendProgressItem, isCountableProgressEvent, shouldFlushProgress, type RemoteProgressItem } from "./progress-sync.js";
 import { historyChunkId, historyChunks } from "./history-chunks.js";
+import { OrderedWriter } from "./ordered-writer.js";
 
 interface QueuedTask {
   operation: RemoteOperation;
@@ -157,6 +158,7 @@ async function processTask(taskRef: DocumentReference<DocumentData>, initial: Qu
     if (relaysCreatedRun) relayedRunIds.add(runId);
     const publicResult = initial.operation === "get_runtime" || initial.operation === "update_runtime" ? result : {
       ...(runId ? { runId } : {}),
+      ...(textField(result, "messageId") ? { messageId: textField(result, "messageId"), createdAt: textField(result, "createdAt") } : {}),
       ...(isObject(result.chat) ? { chat: { id: textField(result.chat, "id"), title: textField(result.chat, "title") } } : {}),
     };
     try {
@@ -237,7 +239,7 @@ async function taskPayload(_taskId: string, task: QueuedTask): Promise<RemoteTas
   return task.payload;
 }
 
-async function relayRun(taskRef: DocumentReference<DocumentData>, taskId: string, projectId: string, chatId: string, runId: string): Promise<void> {
+async function relayRun(taskRef: DocumentReference<DocumentData> | undefined, taskId: string, projectId: string, chatId: string, runId: string, afterSequence = 0): Promise<void> {
   const chatRef = doc(deviceRef, "chats", chatId);
   const startedAt = new Date().toISOString();
   let terminalStatus = "connection_lost";
@@ -251,6 +253,9 @@ async function relayRun(taskRef: DocumentReference<DocumentData>, taskId: string
   let lastActivityWriteAt = 0;
   let pendingOutput: SseEvent[] = [];
   let outputTimer: ReturnType<typeof setTimeout> | undefined;
+  const outputWriter = new OrderedWriter<SseEvent>(async event => {
+    if (taskRef) await writeEvent(taskRef, taskId, event);
+  });
   await setDoc(chatRef, {
     projectId,
     chatId,
@@ -261,11 +266,13 @@ async function relayRun(taskRef: DocumentReference<DocumentData>, taskId: string
     outputTimer = undefined;
     const events = pendingOutput;
     pendingOutput = [];
-    if (!events.length) return;
+    if (!events.length) return outputWriter.drain();
     const last = events[events.length - 1];
     const firstData = isObject(events[0].data) ? events[0].data : {};
     const text = events.map((item) => isObject(item.data) ? textField(item.data, "text") : "").join("");
-    await writeEvent(taskRef, taskId, {
+    // The timer and SSE consumer share one ordered writer. A terminal event
+    // must wait for a batch already removed from pendingOutput by the timer.
+    await outputWriter.write({
       sequence: last.sequence,
       event: "output",
       data: { ...firstData, text, fromSequence: events[0].sequence, toSequence: last.sequence },
@@ -288,7 +295,7 @@ async function relayRun(taskRef: DocumentReference<DocumentData>, taskId: string
     writtenProgressRevision = progressRevision;
     lastActivityWriteAt = now;
   };
-  for await (const event of daemon.events(runId)) {
+  for await (const event of daemon.events(runId, afterSequence)) {
     if (canMergeOutput(pendingOutput, event)) {
       pendingOutput.push(event);
       if (!outputTimer) outputTimer = setTimeout(() => void flushOutput().catch(reportBackgroundError), 750);
@@ -315,9 +322,9 @@ async function relayRun(taskRef: DocumentReference<DocumentData>, taskId: string
       outputTimer = setTimeout(() => void flushOutput().catch(reportBackgroundError), 750);
       continue;
     }
-    await writeEvent(taskRef, taskId, event);
+    if (taskRef) await writeEvent(taskRef, taskId, event);
     if (event.event === "approval") {
-      await updateDoc(taskRef, { status: "waiting_for_approval", updatedAt: serverTimestamp() });
+      if (taskRef) await updateDoc(taskRef, { status: "waiting_for_approval", updatedAt: serverTimestamp() });
       await updateDoc(chatRef, {
         activeRun: { id: runId, status: "waiting_for_approval", startedAt, activityCount, reasoningActivityCount, workActivityCount, progressItems },
       });
@@ -326,14 +333,14 @@ async function relayRun(taskRef: DocumentReference<DocumentData>, taskId: string
       terminalStatus = status === "cancelled" ? "cancelled" : status === "failed" ? "failed" : "completed";
     } else if (event.event === "error") {
       terminalStatus = "failed";
-    } else {
+    } else if (taskRef) {
       await updateDoc(taskRef, { status: "running", updatedAt: serverTimestamp() });
     }
   }
   await flushOutput();
   await flushActivityCount(true);
   await Promise.all([
-    updateDoc(taskRef, { status: terminalStatus, completedAt: serverTimestamp(), updatedAt: serverTimestamp() }),
+    ...(taskRef ? [updateDoc(taskRef, { status: terminalStatus, completedAt: serverTimestamp(), updatedAt: serverTimestamp() })] : []),
     updateDoc(chatRef, {
       activeRun: deleteField(),
       lastRunStatus: terminalStatus,
@@ -347,72 +354,12 @@ function reconcileDesktopRunWatchers(projects: CatalogProject[]): void {
     for (const chat of project.chats) {
       const runId = chat.activeRunId || "";
       if (!runId || relayedRunIds.has(runId) || desktopRunWatchers.has(runId)) continue;
-      const watcher = relayDesktopRun(project.id, chat.id, runId, chat.activeRunEventSequence ?? 0)
+      const watcher = relayRun(undefined, "", project.id, chat.id, runId, chat.activeRunEventSequence ?? 0)
         .catch(reportBackgroundError)
         .finally(() => desktopRunWatchers.delete(runId));
       desktopRunWatchers.set(runId, watcher);
     }
   }
-}
-
-async function relayDesktopRun(projectId: string, chatId: string, runId: string, afterSequence: number): Promise<void> {
-  const chatRef = doc(deviceRef, "chats", chatId);
-  const startedAt = new Date().toISOString();
-  let activityCount = 0;
-  let reasoningActivityCount = 0;
-  let workActivityCount = 0;
-  let progressItems: RemoteProgressItem[] = [];
-  let writtenActivityCount = 0;
-  let progressRevision = 0;
-  let writtenProgressRevision = 0;
-  let lastActivityWriteAt = 0;
-  let terminalStatus = "connection_lost";
-  await updateDoc(chatRef, {
-    activeRun: { id: runId, status: "running", startedAt, activityCount: 0, reasoningActivityCount: 0, workActivityCount: 0, progressItems: [] },
-  });
-  const flush = async (force = false) => {
-    const now = Date.now();
-    if (!shouldFlushProgress(
-      activityCount,
-      writtenActivityCount,
-      progressRevision,
-      writtenProgressRevision,
-      now - lastActivityWriteAt,
-      force,
-    )) return;
-    await updateDoc(chatRef, {
-      activeRun: { id: runId, status: "running", startedAt, activityCount, reasoningActivityCount, workActivityCount, progressItems },
-    });
-    writtenActivityCount = activityCount;
-    writtenProgressRevision = progressRevision;
-    lastActivityWriteAt = now;
-  };
-  for await (const event of daemon.events(runId, afterSequence)) {
-    if (event.event === "progress") {
-      const method = isObject(event.data) ? textField(event.data, "method") : "";
-      const nextProgressItems = appendProgressItem(progressItems, event);
-      if (nextProgressItems !== progressItems) {
-        progressItems = nextProgressItems;
-        progressRevision += 1;
-      }
-      if (isCountableProgressEvent(event)) {
-        activityCount += 1;
-        if (method.startsWith("item/reasoning/")) reasoningActivityCount += 1;
-        else workActivityCount += 1;
-      }
-      await flush();
-    } else if (event.event === "done") {
-      terminalStatus = isObject(event.data) ? textField(event.data, "status") || "completed" : "completed";
-    } else if (event.event === "error") {
-      terminalStatus = "failed";
-    }
-  }
-  await flush(true);
-  await updateDoc(chatRef, {
-    activeRun: deleteField(),
-    lastRunStatus: terminalStatus,
-    lastRunProgress: { id: runId, status: terminalStatus, startedAt, activityCount, reasoningActivityCount, workActivityCount, progressItems },
-  });
 }
 
 function canMergeOutput(pending: SseEvent[], incoming: SseEvent): boolean {

@@ -51,7 +51,13 @@ export function sortConversationTimeline<T extends { createdAt?: string; sourceO
     const rightTime = Date.parse(right.createdAt || "");
     const normalizedLeft = Number.isFinite(leftTime) ? leftTime : Number.MAX_SAFE_INTEGER;
     const normalizedRight = Number.isFinite(rightTime) ? rightTime : Number.MAX_SAFE_INTEGER;
-    return normalizedLeft - normalizedRight || left.sourceOrder - right.sourceOrder;
+    // Date.parse discards digits finer than milliseconds. Keep daemon ordering
+    // when an instruction and its response occur within the same millisecond.
+    const fraction = (value?: string): string =>
+      (value?.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/)?.[1] ?? "").padEnd(7, "0");
+    return normalizedLeft - normalizedRight
+      || fraction(left.createdAt).localeCompare(fraction(right.createdAt))
+      || left.sourceOrder - right.sourceOrder;
   });
 }
 

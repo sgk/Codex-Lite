@@ -44,7 +44,6 @@ public partial class MainWindow : Window
     private const double UnloadedHistoryIndicatorHeight = 64;
     private const string HistorySpacerMessageId = "local-history-spacer";
     private static readonly TimeSpan ExternalProcessingWindow = TimeSpan.FromMinutes(30);
-    private const int StreamingCharactersPerTick = 512;
     private static readonly TimeSpan StreamingTextInterval = TimeSpan.FromMilliseconds(120);
     private static readonly TimeSpan ReasoningProgressInterval = TimeSpan.FromMilliseconds(160);
     private const int ReasoningProgressDisplayLimit = 24000;
@@ -73,6 +72,7 @@ public partial class MainWindow : Window
         }
 
         public string ProjectId { get; }
+        public string RequestId { get; } = Guid.NewGuid().ToString("N");
         public string? ChatId { get; private set; }
         public string Model { get; }
         public string Content { get; }
@@ -165,8 +165,8 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, string> _runProgressTextByChat = new(StringComparer.Ordinal);
     private readonly Dictionary<string, IReadOnlyList<string>> _reasoningEffortsByModel = new(StringComparer.Ordinal);
     private readonly List<RecentModelReasoningChoiceDto> _recentModelReasoningChoices = new();
-    private readonly DispatcherTimer _streamingTextTimer = new() { Interval = StreamingTextInterval };
-    private readonly DispatcherTimer _reasoningProgressTimer = new() { Interval = ReasoningProgressInterval };
+    private readonly DispatcherTimer _streamingTextTimer = new(DispatcherPriority.Render) { Interval = StreamingTextInterval };
+    private readonly DispatcherTimer _reasoningProgressTimer = new(DispatcherPriority.Render) { Interval = ReasoningProgressInterval };
     private readonly DispatcherTimer _messageRefreshTimer = new() { Interval = TimeSpan.FromSeconds(3) };
     private readonly DispatcherTimer _uiHeartbeatTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     private readonly DispatcherTimer _daemonHealthTimer = new() { Interval = DaemonHealthCheckInterval };
@@ -199,6 +199,9 @@ public partial class MainWindow : Window
     private bool _wrapFileText;
     private readonly Dictionary<string, ActiveUiRun> _activeRunsByChat = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _lastRunEventSequenceByRun = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _streamOwners = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _eventTimesByRun = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _eventTimesByMessage = new(StringComparer.Ordinal);
     private readonly HashSet<string> _cancellingRunChatIds = new(StringComparer.Ordinal);
     private CancellationTokenSource? _usageCapacityCts;
     private DateTimeOffset _nextBackgroundMessagePollAt = DateTimeOffset.MinValue;
@@ -427,7 +430,8 @@ public partial class MainWindow : Window
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
             var daemonRuns = (await _client.ListActiveRunsAsync(_selectedProject?.Id, _selectedChat?.Id, timeout.Token))
-                .Where(run => run.Status.Equals("running", StringComparison.OrdinalIgnoreCase))
+                .Where(run => run.Status.Equals("running", StringComparison.OrdinalIgnoreCase)
+                    || run.Status.Equals("queued", StringComparison.OrdinalIgnoreCase))
                 .ToArray();
             var daemonRunIds = daemonRuns.Select(run => run.Id).ToHashSet(StringComparer.Ordinal);
 
@@ -532,173 +536,37 @@ public partial class MainWindow : Window
 
     private async Task TrackRecoveredRunAsync(RunDto run, long afterSequence, CancellationToken cancellationToken)
     {
-        BeginRunActivity(run.ChatId, "途中経過の配信へ再接続中...");
-        var terminalReceived = false;
-        var terminalSucceeded = false;
-        var currentAssistantMessageId = $"local-assistant-recovered-{Guid.NewGuid():N}";
-        var currentAgentMessageItemId = "";
-        var currentAssistantMessagePhase = "";
+        if (string.IsNullOrWhiteSpace(run.ProjectId)) return;
         try
         {
             foreach (var approval in run.PendingApprovals ?? [])
             {
-                var approvalData = JsonSerializer.Serialize(
-                    new
-                    {
-                        requestId = approval.RequestId,
-                        method = approval.Method,
-                        reason = approval.Reason,
-                        command = approval.Command,
-                        cwd = approval.Cwd,
-                    },
-                    _json);
-                await HandleApprovalEventAsync(run.ChatId, run.Id, approvalData, cancellationToken);
+                var data = JsonSerializer.Serialize(new
+                {
+                    requestId = approval.RequestId, method = approval.Method,
+                    reason = approval.Reason, command = approval.Command, cwd = approval.Cwd
+                }, _json);
+                await HandleApprovalEventAsync(run.ChatId, run.Id, data, cancellationToken);
             }
-            await foreach (var item in _client.StreamRunEventsAsync(run.Id, afterSequence, cancellationToken))
-            {
-                if (item.Sequence > 0)
-                {
-                    _lastRunEventSequenceByRun[run.Id] = item.Sequence;
-                }
-                if (item.Event == "progress")
-                {
-                    var progress = ExtractSseText(item.Data);
-                    var method = ExtractSseString(item.Data, "method");
-                    var details = ExtractSseString(item.Data, "details");
-                    if (IsReasoningDeltaProgress(method))
-                    {
-                        QueueReasoningProgress(run.ChatId, run.Id, method, ExtractReasoningDelta(details, progress));
-                        continue;
-                    }
-                    FlushReasoningProgress(run.Id);
-                    if (IsAssistantMessageBoundaryProgress(method))
-                    {
-                        FlushAssistantMessageText(currentAssistantMessageId);
-                        if (HasRealAssistantContent(currentAssistantMessageId))
-                        {
-                            MarkAssistantMessageCompleted(run.ChatId, currentAssistantMessageId);
-                            currentAssistantMessageId = $"local-assistant-boundary-{Guid.NewGuid():N}";
-                        }
-                        continue;
-                    }
-                    if (IsDisplayableProgress(progress) && !IsLowLevelDeltaProgress(method, progress))
-                    {
-                        ShowRunProgressForChat(run.ChatId, $"再接続済み | {progress}");
-                        if (_selectedChat?.Id == run.ChatId)
-                        {
-                            AddRunProgress(progress, ProgressCategory(method, progress));
-                        }
-                    }
-                    if (IsDisplayableProgress(progress) && ShouldShowInlineProgress(method, progress))
-                    {
-                        FlushAssistantMessageText(currentAssistantMessageId);
-                        if (HasRealAssistantContent(currentAssistantMessageId))
-                        {
-                            MarkAssistantMessageCompleted(run.ChatId, currentAssistantMessageId);
-                        }
-                        else
-                        {
-                            RemoveAssistantPlaceholder(currentAssistantMessageId);
-                        }
-                        AddInlineProgressMessage(run.ChatId, run.Id, method, progress, details);
-                        currentAssistantMessageId = $"local-assistant-progress-{Guid.NewGuid():N}";
-                    }
-                }
-                else if (item.Event == "output")
-                {
-                    ShowRunProgressForChat(run.ChatId, "再接続済み | 応答を受信中");
-                    var text = ExtractSseText(item.Data);
-                    var agentMessageItemId = ExtractSseString(item.Data, "messageId");
-                    var assistantMessagePhase = ExtractSseString(item.Data, "phase");
-                    if (!string.IsNullOrWhiteSpace(assistantMessagePhase)
-                        && !string.IsNullOrWhiteSpace(agentMessageItemId)
-                        && !agentMessageItemId.Equals(currentAgentMessageItemId, StringComparison.Ordinal))
-                    {
-                        FlushAssistantMessageText(currentAssistantMessageId);
-                        if (HasRealAssistantContent(currentAssistantMessageId))
-                        {
-                            MarkAssistantMessageCompleted(run.ChatId, currentAssistantMessageId);
-                            currentAssistantMessageId = NewAssistantMessageIdForPhase(assistantMessagePhase);
-                        }
-                        currentAgentMessageItemId = agentMessageItemId;
-                    }
-                    if (!string.IsNullOrWhiteSpace(assistantMessagePhase))
-                    {
-                        currentAssistantMessagePhase = assistantMessagePhase;
-                    }
-                    AppendOrUpdateAssistantMessage(
-                        run.ChatId,
-                        currentAssistantMessageId,
-                        run.Id,
-                        text,
-                        MessageKindForPhase(currentAssistantMessagePhase));
-                }
-                else if (item.Event == "approval")
-                {
-                    await HandleApprovalEventAsync(run.ChatId, run.Id, item.Data, cancellationToken);
-                }
-                else if (item.Event is "done" or "error")
-                {
-                    FlushReasoningProgress(run.Id);
-                    FlushAssistantMessageText(currentAssistantMessageId);
-                    if (item.Event == "error")
-                    {
-                        AppendOrUpdateAssistantMessage(
-                            run.ChatId,
-                            currentAssistantMessageId,
-                            run.Id,
-                            ExtractSseText(item.Data));
-                        FlushAssistantMessageText(currentAssistantMessageId);
-                    }
-                    MarkAssistantMessageCompleted(run.ChatId, currentAssistantMessageId);
-                    terminalReceived = true;
-                    terminalSucceeded = item.Event == "done"
-                        && ExtractSseString(item.Data, "status").Equals("succeeded", StringComparison.OrdinalIgnoreCase);
-                    StatusText.Text = item.Event == "done" ? "応答完了 | 再接続済み" : "応答エラー | 再接続済み";
-                    break;
-                }
-            }
+            await StreamRunAsync(run.Id, run.ProjectId, run.ChatId,
+                $"local-assistant-{run.Id}", DateTimeOffset.Now, cancellationToken, afterSequence);
         }
-        catch (OperationCanceledException)
-        {
-        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (Exception ex)
         {
-            WritePerformanceLog(
-                "recovered-run-stream-error",
-                $"chatId={LogText(run.ChatId)} runId={LogText(run.Id)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
-            ShowRunProgressForChat(run.ChatId, $"途中経過の配信切断 | {ShortError(ex)}");
+            WritePerformanceLog("recovered-stream-error", $"runId={LogText(run.Id)} message={LogText(ex.Message)}");
+            ShowRunProgressForChat(run.ChatId, $"途中経過の復元エラー | {ShortError(ex)}");
         }
         finally
         {
-            if (_activeRunsByChat.TryGetValue(run.ChatId, out var activeRun) && activeRun.RunId == run.Id)
+            if (!_streamOwners.Contains(run.Id)
+                && _activeRunsByChat.TryGetValue(run.ChatId, out var active)
+                && active.Cancellation.Token == cancellationToken)
             {
                 _activeRunsByChat.Remove(run.ChatId);
-                activeRun.Cancellation.Dispose();
-            }
-            EndRunActivity(run.ChatId);
-            UpdateChatRunningIndicator(run.ChatId);
-            UpdateCommandButtonState();
-            FlushReasoningProgress(run.Id, remove: true);
-            if (terminalReceived && terminalSucceeded && !string.IsNullOrWhiteSpace(run.ProjectId))
-            {
-                var conclusionSynchronized = await ReconcileTerminalRunConclusionAsync(run.ProjectId, run.ChatId, run.Id);
-                if (!conclusionSynchronized)
-                {
-                    AddTerminalRunNotice(
-                        run.ProjectId,
-                        run.ChatId,
-                        run.Id,
-                        "応答は完了しましたが、保存済みの結論を取得できませんでした。");
-                }
-            }
-            else if (terminalReceived && _selectedChat?.Id == run.ChatId)
-            {
-                await RefreshMessagesAsync(forceReload: true);
-            }
-            if (terminalReceived)
-            {
-                _lastRunEventSequenceByRun.Remove(run.Id);
+                active.Cancellation.Dispose();
+                EndRunActivity(run.ChatId);
+                UpdateCommandButtonState();
             }
         }
     }
@@ -706,6 +574,9 @@ public partial class MainWindow : Window
     private async Task HandleApprovalEventAsync(string chatId, string runId, string data, CancellationToken cancellationToken)
     {
         var requestId = ExtractSseString(data, "requestId");
+        var run = await _client.GetRunAsync(runId, cancellationToken);
+        if (run?.PendingApprovals?.Any(item => item.RequestId == requestId) != true)
+            return; // Replayed approvals may already have been resolved.
         var method = ExtractSseString(data, "method");
         var reason = ExtractSseString(data, "reason");
         var command = ExtractSseString(data, "command");
@@ -5358,7 +5229,11 @@ public partial class MainWindow : Window
                     : $"automation not started | {result.Automation.LastError}";
                 return;
             }
-            ReplaceMessageById(chat.Id, localMessageId, localPromptMessage with { Id = result.Run.MessageId, RunId = result.Run.RunId });
+            ReplaceMessageById(chat.Id, localMessageId, localPromptMessage with
+            {
+                Id = result.Run.MessageId, RunId = result.Run.RunId,
+                CreatedAt = result.Run.CreatedAt ?? throw new InvalidOperationException("送信受付に保存時刻がありません。")
+            });
             ReplaceMessageById(chat.Id, assistantMessageId, localWaitingMessage with { RunId = result.Run.RunId });
             _savedMessageVerticalOffset = double.MaxValue;
             _activeRunsByChat[chat.Id] = new ActiveUiRun(result.Run.RunId, project.Id, chat.Id, runCts);
@@ -7514,7 +7389,7 @@ public partial class MainWindow : Window
             MessagePostResult? result;
             using (EnterUiPhase("SendCurrentMessage/PostMessage"))
             {
-                result = await _client.SendMessageAsync(project.Id, chat.Id, content, attachments, runToken);
+                result = await _client.SendMessageAsync(project.Id, chat.Id, content, attachments, runToken, submission.RequestId);
             }
             if (result is not null)
             {
@@ -7527,7 +7402,7 @@ public partial class MainWindow : Window
                         "user",
                         content,
                         result.RunId,
-                        DateTimeOffset.UtcNow.ToString("O"),
+                        result.CreatedAt ?? throw new InvalidOperationException("送信受付に保存時刻がありません。"),
                         "instruction",
                         attachments),
                         scrollToEnd: true);
@@ -7741,7 +7616,7 @@ public partial class MainWindow : Window
                 "user",
                 content,
                 runId,
-                DateTimeOffset.UtcNow.ToString("O"),
+                result.CreatedAt ?? throw new InvalidOperationException("追加指示の受付に保存時刻がありません。"),
                 "instruction",
                 attachments),
                 scrollToEnd: true);
@@ -7763,8 +7638,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task StreamRunAsync(string runId, string projectId, string chatId, string assistantMessageId, DateTimeOffset sendStartedAt, CancellationToken cancellationToken)
+    private async Task StreamRunAsync(string runId, string projectId, string chatId, string assistantMessageId, DateTimeOffset sendStartedAt, CancellationToken cancellationToken, long afterSequence = 0)
     {
+        if (!_streamOwners.Add(runId)) return;
+        if (_lastRunEventSequenceByRun.TryGetValue(runId, out var lastProcessed))
+            afterSequence = Math.Max(afterSequence, lastProcessed);
         using var phase = EnterUiPhase("StreamRun");
         BeginRunActivity(chatId, "応答待ち...");
         var currentAssistantMessageId = assistantMessageId;
@@ -7779,6 +7657,7 @@ public partial class MainWindow : Window
         var receivedOutput = false;
         var receivedOutputChars = 0;
         var completed = false;
+        var receivedTerminal = false;
         var reconnectAfterStreamLoss = false;
         RunDto? terminalRunForReplay = null;
         heartbeat.Tick += (_, _) =>
@@ -7798,45 +7677,26 @@ public partial class MainWindow : Window
         heartbeat.Start();
         try
         {
-            await foreach (var item in _client.StreamRunEventsAsync(runId, cancellationToken: cancellationToken))
+            await foreach (var item in _client.StreamRunEventsAsync(runId, afterSequence, cancellationToken))
             {
                 if (item.Sequence > 0)
                 {
-                    _lastRunEventSequenceByRun[runId] = item.Sequence;
+                    if (_lastRunEventSequenceByRun.TryGetValue(runId, out var processedSequence)
+                        && item.Sequence <= processedSequence) continue;
                 }
                 using var eventPhase = EnterUiPhase($"StreamRun/Event/{item.Event}");
+                var occurredAt = ExtractSseString(item.Data, "occurredAt");
+                if (!string.IsNullOrWhiteSpace(occurredAt)) _eventTimesByRun[runId] = occurredAt;
+                // A replay may already have thousands of buffered events. Allow
+                // paint and input between events instead of starving UI timers.
+                if (item.Sequence % 32 == 0)
+                    await System.Windows.Threading.Dispatcher.Yield(DispatcherPriority.Background);
                 lastEventAt = DateTimeOffset.Now;
                 lastEventName = item.Event;
                 if (item.Event == "approval")
                 {
                     FlushReasoningProgress(runId);
-                    var requestId = ExtractSseString(item.Data, "requestId");
-                    var method = ExtractSseString(item.Data, "method");
-                    var reason = ExtractSseString(item.Data, "reason");
-                    var command = ExtractSseString(item.Data, "command");
-                    var cwd = ExtractSseString(item.Data, "cwd");
-                    WritePerformanceLog(
-                        "approval-request",
-                        $"runId={LogText(runId)} requestId={LogText(requestId)} method={LogText(method)}");
-                    ShowRunProgressForChat(chatId, "承認待ち");
-                    var result = System.Windows.MessageBox.Show(
-                        this,
-                        ApprovalPromptText(method, reason, command, cwd),
-                        "Codexの承認要求",
-                        MessageBoxButton.YesNoCancel,
-                        MessageBoxImage.Question,
-                        MessageBoxResult.Cancel);
-                    var decision = result switch
-                    {
-                        MessageBoxResult.Yes => "accept",
-                        MessageBoxResult.No => "decline",
-                        _ => "cancel",
-                    };
-                    await _client.ResolveRunApprovalAsync(runId, requestId, decision, cancellationToken);
-                    WritePerformanceLog(
-                        "approval-response",
-                        $"runId={LogText(runId)} requestId={LogText(requestId)} decision={LogText(decision)}");
-                    ShowRunProgressForChat(chatId, decision == "accept" ? "承認済み" : "承認しませんでした");
+                    await HandleApprovalEventAsync(chatId, runId, item.Data, cancellationToken);
                 }
                 else if (item.Event == "output")
                 {
@@ -7844,16 +7704,16 @@ public partial class MainWindow : Window
                     var text = ExtractSseText(item.Data);
                     var agentMessageItemId = ExtractSseString(item.Data, "messageId");
                     var assistantMessagePhase = ExtractSseString(item.Data, "phase");
-                    if (!string.IsNullOrWhiteSpace(assistantMessagePhase)
-                        && !string.IsNullOrWhiteSpace(agentMessageItemId)
+                    if (!string.IsNullOrWhiteSpace(agentMessageItemId)
                         && !agentMessageItemId.Equals(currentAgentMessageItemId, StringComparison.Ordinal))
                     {
                         FlushAssistantMessageText(currentAssistantMessageId);
                         if (HasRealAssistantContent(currentAssistantMessageId))
                         {
                             MarkAssistantMessageCompleted(chatId, currentAssistantMessageId);
-                            currentAssistantMessageId = NewAssistantMessageIdForPhase(assistantMessagePhase);
                         }
+                        RemoveAssistantPlaceholder(currentAssistantMessageId);
+                        currentAssistantMessageId = $"local-assistant-{runId}-{agentMessageItemId}";
                         currentAgentMessageItemId = agentMessageItemId;
                     }
                     if (!string.IsNullOrWhiteSpace(assistantMessagePhase))
@@ -7885,6 +7745,7 @@ public partial class MainWindow : Window
                     if (IsReasoningDeltaProgress(progressMethod))
                     {
                         QueueReasoningProgress(chatId, runId, progressMethod, ExtractReasoningDelta(progressDetails, progress));
+                        _lastRunEventSequenceByRun[runId] = item.Sequence;
                         continue;
                     }
                     FlushReasoningProgress(runId);
@@ -7905,6 +7766,7 @@ public partial class MainWindow : Window
                             MarkAssistantMessageCompleted(chatId, currentAssistantMessageId);
                             currentAssistantMessageId = $"local-assistant-boundary-{Guid.NewGuid():N}";
                         }
+                        _lastRunEventSequenceByRun[runId] = item.Sequence;
                         continue;
                     }
                     var isDisplayableProgress = IsDisplayableProgress(progress);
@@ -7933,6 +7795,7 @@ public partial class MainWindow : Window
                 }
                 if (item.Event is "done" or "error")
                 {
+                    receivedTerminal = true;
                     FlushReasoningProgress(runId);
                     WritePerformanceLog(
                         "stream-terminal",
@@ -7967,7 +7830,10 @@ public partial class MainWindow : Window
                     _lastRunEventSequenceByRun.Remove(runId);
                     break;
                 }
+                _lastRunEventSequenceByRun[runId] = item.Sequence;
             }
+            if (!receivedTerminal && !cancellationToken.IsCancellationRequested)
+                throw new IOException("途中経過の配信が完了通知なしで終了しました。");
             if (completed && !receivedOutput)
             {
                 ReplaceMessageContentIfWaiting(chatId, currentAssistantMessageId, "応答のストリーム出力なしで完了しました。");
@@ -7979,7 +7845,7 @@ public partial class MainWindow : Window
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                 var daemonRun = await _client.GetRunAsync(runId, timeout.Token);
-                reconnectAfterStreamLoss = daemonRun?.Status.Equals("running", StringComparison.OrdinalIgnoreCase) == true;
+                reconnectAfterStreamLoss = daemonRun?.Status is "running" or "queued";
                 if (!reconnectAfterStreamLoss
                     && daemonRun?.TerminalReason?.Equals("daemon_restarted", StringComparison.Ordinal) == true)
                 {
@@ -8020,7 +7886,14 @@ public partial class MainWindow : Window
         finally
         {
             heartbeat.Stop();
+            _streamOwners.Remove(runId);
+            FlushAssistantMessageText(currentAssistantMessageId);
             FlushReasoningProgress(runId, remove: true);
+            if (_streamOwners.Count == 0 && _streamingText.Count == 0)
+            {
+                _eventTimesByRun.Clear();
+                _eventTimesByMessage.Clear();
+            }
             if (_activeRunsByChat.TryGetValue(chatId, out var activeRun) && activeRun.RunId == runId)
             {
                 _activeRunsByChat.Remove(chatId);
@@ -8039,8 +7912,8 @@ public partial class MainWindow : Window
             var replayCts = new CancellationTokenSource();
             _activeRunsByChat[chatId] = new ActiveUiRun(runId, replayProjectId, chatId, replayCts);
             UpdateChatRunningIndicator(chatId);
-            var afterSequence = _lastRunEventSequenceByRun.TryGetValue(runId, out var lastSequence) ? lastSequence : 0;
-            await TrackRecoveredRunAsync(terminalRunForReplay, afterSequence, replayCts.Token);
+            var replaySequence = _lastRunEventSequenceByRun.TryGetValue(runId, out var lastSequence) ? lastSequence : 0;
+            await TrackRecoveredRunAsync(terminalRunForReplay with { ProjectId = replayProjectId }, replaySequence, replayCts.Token);
         }
     }
 
@@ -8148,11 +8021,28 @@ public partial class MainWindow : Window
 
     private void AppendMessage(MessageDto message, bool scrollToEnd)
     {
-        InsertMessageInChronologicalOrder(message);
-        if (scrollToEnd)
+        if (message.Id.StartsWith("local-", StringComparison.Ordinal) && message.RunId is not null
+            && _eventTimesByRun.TryGetValue(message.RunId, out var eventTime))
+        {
+            _eventTimesByMessage.TryAdd(message.Id, eventTime);
+            message = message with { CreatedAt = _eventTimesByMessage[message.Id] };
+        }
+        var messages = MessagesForChat(message.ChatId);
+        if (messages is null) return;
+        InsertMessageInChronologicalOrder(messages, message);
+        if (scrollToEnd && _selectedChat?.Id == message.ChatId)
         {
             ScrollMessagesToEnd();
         }
+    }
+
+    private ObservableCollection<MessageDto>? MessagesForChat(string chatId)
+    {
+        if (_selectedChat?.Id == chatId) return _messages;
+        var projectId = ProjectIdForChat(chatId);
+        return projectId is not null
+            && _chatHistoryCache.TryGetValue(ChatHistoryCacheKey(projectId, chatId), out var entry)
+            ? entry.Messages : null;
     }
 
     private void AppendMessageForChat(string projectId, string chatId, MessageDto message, bool scrollToEnd)
@@ -8255,27 +8145,27 @@ public partial class MainWindow : Window
 
     private void AddInlineProgressMessage(string chatId, string runId, string method, string content, string details)
     {
-        if (string.IsNullOrWhiteSpace(content) || _selectedChat?.Id != chatId)
+        var messages = MessagesForChat(chatId);
+        if (string.IsNullOrWhiteSpace(content) || messages is null)
         {
             return;
         }
-        var shouldFollow = IsMessagesScrolledNearEnd();
+        var shouldFollow = _selectedChat?.Id == chatId && IsMessagesScrolledNearEnd();
         var detailLine = InlineProgressDetailLine(method, content, details);
         if (IsLowLevelDeltaProgress(method, content))
         {
-            for (var i = _messages.Count - 1; i >= 0; i--)
+            for (var i = messages.Count - 1; i >= 0; i--)
             {
-                var message = _messages[i];
+                var message = messages[i];
                 if (!message.Role.Equals("status", StringComparison.OrdinalIgnoreCase))
                 {
                     break;
                 }
                 if (message.RunId == runId)
                 {
-                    _messages[i] = message with
+                    messages[i] = message with
                     {
-                        ActivityDetails = AppendActivityDetail(message.ActivityDetails, detailLine),
-                        CreatedAt = DateTimeOffset.UtcNow.ToString("O")
+                        ActivityDetails = AppendActivityDetail(message.ActivityDetails, detailLine)
                     };
                     if (shouldFollow)
                     {
@@ -8309,6 +8199,8 @@ public partial class MainWindow : Window
             _reasoningProgressByRun[runId] = state;
         }
         state.Method = method;
+        if (state.CreatedAt is null && _eventTimesByRun.TryGetValue(runId, out var eventTime))
+            state.CreatedAt = eventTime;
         state.Pending.Append(delta);
         if (!_reasoningProgressTimer.IsEnabled)
         {
@@ -8361,26 +8253,22 @@ public partial class MainWindow : Window
 
     private void UpsertReasoningProgressMessage(ReasoningProgressState state)
     {
-        if (_selectedChat?.Id != state.ChatId)
+        var messages = MessagesForChat(state.ChatId);
+        if (messages is null)
         {
             return;
         }
-        var shouldFollow = IsMessagesScrolledNearEnd();
+        var shouldFollow = _selectedChat?.Id == state.ChatId && IsMessagesScrolledNearEnd();
         var detail = state.Displayed.ToString();
-        for (var i = _messages.Count - 1; i >= 0; i--)
+        for (var i = messages.Count - 1; i >= 0; i--)
         {
-            var message = _messages[i];
-            if (!message.Role.Equals("status", StringComparison.OrdinalIgnoreCase))
+            var message = messages[i];
+            if (message.Id == state.MessageId)
             {
-                break;
-            }
-            if (message.RunId == state.RunId)
-            {
-                _messages[i] = message with
+                messages[i] = message with
                 {
                     Content = string.IsNullOrWhiteSpace(state.Method) ? "思考中" : state.Method,
-                    ActivityDetails = detail,
-                    CreatedAt = DateTimeOffset.UtcNow.ToString("O")
+                    ActivityDetails = detail
                 };
                 if (shouldFollow)
                 {
@@ -8389,9 +8277,10 @@ public partial class MainWindow : Window
                 return;
             }
         }
+        if (state.CreatedAt is not null) _eventTimesByMessage.TryAdd(state.MessageId, state.CreatedAt);
         AppendMessage(
             new MessageDto(
-                $"local-reasoning-progress-{Guid.NewGuid():N}",
+                state.MessageId,
                 state.ChatId,
                 "status",
                 string.IsNullOrWhiteSpace(state.Method) ? "思考中" : state.Method,
@@ -8453,7 +8342,8 @@ public partial class MainWindow : Window
 
     private bool HasRealAssistantContent(string messageId)
     {
-        var message = _messages.FirstOrDefault(item => item.Id == messageId);
+        var message = _chatHistoryCache.Values.SelectMany(entry => entry.Messages)
+            .Concat(_messages).FirstOrDefault(item => item.Id == messageId);
         if (message is null)
         {
             return false;
@@ -8464,14 +8354,10 @@ public partial class MainWindow : Window
 
     private void RemoveAssistantPlaceholder(string messageId)
     {
-        var message = _messages.FirstOrDefault(item => item.Id == messageId);
-        if (message is null)
+        foreach (var messages in _chatHistoryCache.Values.Select(entry => entry.Messages).Append(_messages).Distinct())
         {
-            return;
-        }
-        if (message.Kind == "waiting")
-        {
-            _messages.Remove(message);
+            var message = messages.FirstOrDefault(item => item.Id == messageId && item.Kind == "waiting");
+            if (message is not null) messages.Remove(message);
         }
     }
 
@@ -8604,6 +8490,8 @@ public partial class MainWindow : Window
 
     private void QueueAssistantMessageDelta(string chatId, string messageId, string runId, string delta, string? messageKind)
     {
+        if (_eventTimesByRun.TryGetValue(runId, out var eventTime))
+            _eventTimesByMessage.TryAdd(messageId, eventTime);
         if (!_streamingText.TryGetValue(messageId, out var state))
         {
             state = new StreamingTextState(runId, chatId);
@@ -8633,7 +8521,7 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            var count = Math.Min(StreamingCharactersPerTick, state.Pending.Length);
+            var count = state.Pending.Length;
             var next = state.Pending.ToString(0, count);
             state.Pending.Remove(0, count);
             AppendAssistantMessageTextNow(state.ChatId, messageId, state.RunId, next, state.MessageKind);
@@ -8672,15 +8560,16 @@ public partial class MainWindow : Window
     {
         using var phase = EnterUiPhase("AppendAssistantMessageText");
         MarkChatUnreadIfConversationNotVisible(chatId);
-        if (_selectedChat?.Id != chatId)
+        var messages = MessagesForChat(chatId);
+        if (messages is null)
         {
             return;
         }
-        var shouldFollow = IsMessagesScrolledNearEnd();
+        var shouldFollow = _selectedChat?.Id == chatId && IsMessagesScrolledNearEnd();
         var index = -1;
-        for (var i = 0; i < _messages.Count; i++)
+        for (var i = 0; i < messages.Count; i++)
         {
-            if (_messages[i].Id == messageId)
+            if (messages[i].Id == messageId)
             {
                 index = i;
                 break;
@@ -8699,14 +8588,14 @@ public partial class MainWindow : Window
                 scrollToEnd: shouldFollow);
             return;
         }
-        var current = _messages[index];
+        var current = messages[index];
         var isPlaceholder = current.Kind == "waiting";
         var content = isPlaceholder ? text : current.Content + text;
-        _messages[index] = current with
+        messages[index] = current with
         {
             Content = content,
             Kind = isPlaceholder ? messageKind ?? MessageKindForAssistantMessageId(messageId) : current.Kind,
-            CreatedAt = isPlaceholder ? DateTimeOffset.UtcNow.ToString("O") : current.CreatedAt
+            CreatedAt = isPlaceholder && _eventTimesByMessage.TryGetValue(messageId, out var eventTime) ? eventTime : current.CreatedAt
         };
         if (shouldFollow)
         {
@@ -8745,7 +8634,8 @@ public partial class MainWindow : Window
         {
             if (_messages[i].Id == messageId)
             {
-                _messages[i] = _messages[i] with { CreatedAt = DateTimeOffset.UtcNow.ToString("O") };
+                // Completion is not a new message. Keep its authoritative
+                // event timestamp, including fractional seconds.
                 return;
             }
         }
@@ -9969,6 +9859,8 @@ public sealed class StreamingTextState(string runId, string chatId)
 
 public sealed class ReasoningProgressState(string runId, string chatId)
 {
+    public string MessageId { get; } = $"local-reasoning-progress-{Guid.NewGuid():N}";
+    public string? CreatedAt { get; set; }
     public string RunId { get; } = runId;
 
     public string ChatId { get; } = chatId;
