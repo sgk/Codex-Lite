@@ -898,6 +898,7 @@ public partial class MainWindow : Window
         }
 
         _isRemoteAgentConnecting = true;
+        WritePerformanceLog("remote-auto-reconnect-start", "savedSession=checking");
         try
         {
             for (var attempt = 1; attempt <= 3 && !_isClosing; attempt++)
@@ -908,6 +909,7 @@ public partial class MainWindow : Window
                     if (session is null || _isClosing)
                     {
                         _nextRemoteReconnectAt = DateTimeOffset.MaxValue;
+                        WritePerformanceLog("remote-auto-reconnect-no-session", "savedSession=missing");
                         RemoteSyncDetailText.Text = "保存済みのRemote認証がありません。初回認証後は自動接続されます。";
                         return;
                     }
@@ -919,6 +921,7 @@ public partial class MainWindow : Window
                     }
                     await _remoteAgent.StartAsync(_wslDistroName, session.AccessToken);
                     _nextRemoteReconnectAt = DateTimeOffset.MinValue;
+                    WritePerformanceLog("remote-auto-reconnect-started", "agent=running");
                     StartRemoteAuthRefreshLoop();
                     if (!_isClosing)
                     {
