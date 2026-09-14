@@ -4409,37 +4409,7 @@ public partial class MainWindow : Window
 
     private static IEnumerable<MessageDto> OrderMessages(IEnumerable<MessageDto> messages)
     {
-        var ordered = messages.OrderBy(MessageCreatedAt).ThenBy(message => message.Id, StringComparer.Ordinal).ToList();
-        KeepRunActivityBeforeConclusion(ordered);
-        return ordered;
-    }
-
-    private static void KeepRunActivityBeforeConclusion(IList<MessageDto> messages)
-    {
-        var conclusions = new Dictionary<string, int>(StringComparer.Ordinal);
-        for (var index = 0; index < messages.Count; index++)
-        {
-            var message = messages[index];
-            if (string.IsNullOrWhiteSpace(message.RunId)) continue;
-            if (message.Kind.Equals("conclusion", StringComparison.OrdinalIgnoreCase))
-            {
-                conclusions.TryAdd(message.RunId, index);
-                continue;
-            }
-            if (!message.Role.Equals("status", StringComparison.OrdinalIgnoreCase)
-                && !(message.Role.Equals("assistant", StringComparison.OrdinalIgnoreCase)
-                    && message.Kind.Equals("work", StringComparison.OrdinalIgnoreCase))) continue;
-            if (!conclusions.TryGetValue(message.RunId, out var conclusionIndex)) continue;
-            // Display time can be later than the persisted final answer, e.g.
-            // when reasoning is flushed after completion or replayed at restart.
-            messages.RemoveAt(index);
-            messages.Insert(conclusionIndex, message);
-            foreach (var runId in conclusions.Keys.ToArray())
-            {
-                if (conclusions[runId] >= conclusionIndex)
-                    conclusions[runId]++;
-            }
-        }
+        return messages.OrderBy(MessageCreatedAt).ThenBy(message => message.Id, StringComparer.Ordinal);
     }
 
     private static DateTimeOffset MessageCreatedAt(MessageDto message)
@@ -7967,7 +7937,6 @@ public partial class MainWindow : Window
         {
             InsertMessageInChronologicalOrder(entry.Messages, conclusion);
         }
-        KeepRunActivityBeforeConclusion(entry.Messages);
         entry.TotalCount = Math.Max(entry.TotalCount, entry.Messages.Count(IsRealHistoryMessage));
         if (shouldFollow)
         {
@@ -8016,7 +7985,6 @@ public partial class MainWindow : Window
             index++;
         }
         messages.Insert(index, message);
-        KeepRunActivityBeforeConclusion(messages);
     }
 
     private void AppendMessage(MessageDto message, bool scrollToEnd)
@@ -8123,7 +8091,6 @@ public partial class MainWindow : Window
             }
         }
         _messages.Insert(insertIndex, message);
-        KeepRunActivityBeforeConclusion(_messages);
     }
 
     private static bool IsChronologicalMessage(MessageDto message)
