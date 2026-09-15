@@ -23,10 +23,10 @@ import type { RemoteOperation, RemoteTaskPayload } from "../../shared/src/types.
 import { catalogRetryDecision, cloudCatalogSnapshot, diffCatalog, prioritizeCatalogChanges, type CatalogProject } from "./catalog-sync.js";
 import { loadAgentConfig } from "./config.js";
 import { firebaseGoogleAccessToken } from "./credentials.js";
-import { LocalDaemon, type SseEvent } from "./daemon.js";
-import { appendProgressItem, isCountableProgressEvent, shouldFlushProgress, type RemoteProgressItem } from "./progress-sync.js";
+import { LocalDaemon } from "./daemon.js";
+import { appendProgressItem, isCountableProgressEvent, type RemoteProgressItem } from "./progress-sync.js";
 import { historyChunkId, historyChunks } from "./history-chunks.js";
-import { OrderedWriter } from "./ordered-writer.js";
+import { changedProgressItems, progressItemKey, timelineDocumentId, timelineItemBatches, TIMELINE_FLUSH_INTERVAL_MS } from "./timeline-sync.js";
 
 interface QueuedTask {
   operation: RemoteOperation;
@@ -175,7 +175,7 @@ async function processTask(taskRef: DocumentReference<DocumentData>, initial: Qu
       const projectId = textField(prepared.payload, "projectId");
       const chatId = textField(prepared.payload, "chatId") || (isObject(result.chat) ? textField(result.chat, "id") : "");
       if (!projectId || !chatId) throw new Error("実行中の会話をクラウドへ関連付けられませんでした。");
-      try { await relayRun(taskRef, taskId, projectId, chatId, runId); }
+      try { await relayRun(taskRef, projectId, chatId, runId); }
       finally { relayedRunIds.delete(runId); }
     } else {
       await updateDoc(taskRef, { status: "completed", completedAt: serverTimestamp(), updatedAt: serverTimestamp() });
@@ -239,112 +239,100 @@ async function taskPayload(_taskId: string, task: QueuedTask): Promise<RemoteTas
   return task.payload;
 }
 
-async function relayRun(taskRef: DocumentReference<DocumentData> | undefined, taskId: string, projectId: string, chatId: string, runId: string, afterSequence = 0): Promise<void> {
+async function relayRun(taskRef: DocumentReference<DocumentData> | undefined, projectId: string, chatId: string, runId: string, afterSequence = 0): Promise<void> {
   const chatRef = doc(deviceRef, "chats", chatId);
+  const timelineRef = collection(deviceRef, "timelineEvents");
   const startedAt = new Date().toISOString();
   let terminalStatus = "connection_lost";
   let activityCount = 0;
   let reasoningActivityCount = 0;
   let workActivityCount = 0;
+  let projectedStatus = "running";
   let progressItems: RemoteProgressItem[] = [];
-  let writtenActivityCount = 0;
-  let progressRevision = 0;
-  let writtenProgressRevision = 0;
-  let lastActivityWriteAt = 0;
-  let pendingOutput: SseEvent[] = [];
-  let outputTimer: ReturnType<typeof setTimeout> | undefined;
-  const outputWriter = new OrderedWriter<SseEvent>(async event => {
-    if (taskRef) await writeEvent(taskRef, taskId, event);
-  });
+  const pendingProgress = new Map<string, RemoteProgressItem>();
+  let lastSequence = afterSequence;
+  let lastTimelineWriteAt = 0;
   await setDoc(chatRef, {
     projectId,
     chatId,
-    activeRun: { id: runId, status: "running", startedAt, activityCount: 0, reasoningActivityCount: 0, workActivityCount: 0, progressItems: [] },
+    activeRun: { id: runId, status: "running", startedAt, activityCount: 0, reasoningActivityCount: 0, workActivityCount: 0, lastSequence: afterSequence },
+    lastRunProgress: deleteField(),
   }, { merge: true });
-  const flushOutput = async () => {
-    if (outputTimer) clearTimeout(outputTimer);
-    outputTimer = undefined;
-    const events = pendingOutput;
-    pendingOutput = [];
-    if (!events.length) return outputWriter.drain();
-    const last = events[events.length - 1];
-    const firstData = isObject(events[0].data) ? events[0].data : {};
-    const text = events.map((item) => isObject(item.data) ? textField(item.data, "text") : "").join("");
-    // The timer and SSE consumer share one ordered writer. A terminal event
-    // must wait for a batch already removed from pendingOutput by the timer.
-    await outputWriter.write({
-      sequence: last.sequence,
-      event: "output",
-      data: { ...firstData, text, fromSequence: events[0].sequence, toSequence: last.sequence },
-    });
-  };
-  const flushActivityCount = async (force = false) => {
+  const flushTimeline = async (force = false) => {
     const now = Date.now();
-    if (!shouldFlushProgress(
-      activityCount,
-      writtenActivityCount,
-      progressRevision,
-      writtenProgressRevision,
-      now - lastActivityWriteAt,
-      force,
-    )) return;
-    await updateDoc(chatRef, {
-      activeRun: { id: runId, status: "running", startedAt, activityCount, reasoningActivityCount, workActivityCount, progressItems },
-    });
-    writtenActivityCount = activityCount;
-    writtenProgressRevision = progressRevision;
-    lastActivityWriteAt = now;
+    if (!pendingProgress.size || (!force && lastTimelineWriteAt > 0 && now - lastTimelineWriteAt < TIMELINE_FLUSH_INTERVAL_MS)) return;
+    const items = [...pendingProgress.values()];
+    pendingProgress.clear();
+    for (const batch of timelineItemBatches(items)) {
+      const firstSequence = Math.min(...batch.map((item) => item.firstSequence));
+      const sequence = Math.max(...batch.map((item) => item.sequence));
+      await setDoc(doc(timelineRef, timelineDocumentId(runId, batch)), {
+        deviceId,
+        projectId,
+        chatId,
+        runId,
+        firstSequence,
+        sequence,
+        activityCount,
+        reasoningActivityCount,
+        workActivityCount,
+        createdAt: batch[0]?.createdAt || startedAt,
+        items: batch,
+        writtenAt: serverTimestamp(),
+      });
+    }
+    lastTimelineWriteAt = now;
   };
   for await (const event of daemon.events(runId, afterSequence)) {
-    if (canMergeOutput(pendingOutput, event)) {
-      pendingOutput.push(event);
-      if (!outputTimer) outputTimer = setTimeout(() => void flushOutput().catch(reportBackgroundError), 750);
-      continue;
-    }
-    await flushOutput();
+    lastSequence = Math.max(lastSequence, event.sequence);
     if (event.event === "progress") {
       const method = isObject(event.data) ? textField(event.data, "method") : "";
       const nextProgressItems = appendProgressItem(progressItems, event);
-      if (nextProgressItems !== progressItems) {
-        progressItems = nextProgressItems;
-        progressRevision += 1;
-      }
+      for (const item of changedProgressItems(progressItems, nextProgressItems)) pendingProgress.set(progressItemKey(item), item);
+      progressItems = nextProgressItems;
       if (isCountableProgressEvent(event)) {
         activityCount += 1;
         if (method.startsWith("item/reasoning/")) reasoningActivityCount += 1;
         else workActivityCount += 1;
       }
-      await flushActivityCount();
+      await flushTimeline();
+      if (method === "approval/resolved" && projectedStatus === "waiting_for_approval") {
+        projectedStatus = "running";
+        if (taskRef) await updateDoc(taskRef, { status: "running", approval: deleteField(), updatedAt: serverTimestamp() });
+        await updateDoc(chatRef, {
+          activeRun: { id: runId, status: "running", startedAt, activityCount, reasoningActivityCount, workActivityCount, lastSequence },
+        });
+      }
       continue;
     }
-    if (event.event === "output") {
-      pendingOutput.push(event);
-      outputTimer = setTimeout(() => void flushOutput().catch(reportBackgroundError), 750);
-      continue;
-    }
-    if (taskRef) await writeEvent(taskRef, taskId, event);
     if (event.event === "approval") {
-      if (taskRef) await updateDoc(taskRef, { status: "waiting_for_approval", updatedAt: serverTimestamp() });
+      projectedStatus = "waiting_for_approval";
+      const approval = isObject(event.data) ? {
+        runId,
+        requestId: textField(event.data, "requestId"),
+        reason: textField(event.data, "reason"),
+        command: textField(event.data, "command"),
+      } : { runId, requestId: "", reason: "", command: "" };
+      if (taskRef) await updateDoc(taskRef, { status: "waiting_for_approval", approval, updatedAt: serverTimestamp() });
+      await flushTimeline(true);
       await updateDoc(chatRef, {
-        activeRun: { id: runId, status: "waiting_for_approval", startedAt, activityCount, reasoningActivityCount, workActivityCount, progressItems },
+        activeRun: { id: runId, status: "waiting_for_approval", startedAt, activityCount, reasoningActivityCount, workActivityCount, lastSequence },
       });
     } else if (event.event === "done") {
       const status = isObject(event.data) ? textField(event.data, "status") : "";
       terminalStatus = status === "cancelled" ? "cancelled" : status === "failed" ? "failed" : "completed";
     } else if (event.event === "error") {
       terminalStatus = "failed";
-    } else if (taskRef) {
-      await updateDoc(taskRef, { status: "running", updatedAt: serverTimestamp() });
     }
   }
-  await flushOutput();
-  await flushActivityCount(true);
+  await flushTimeline(true);
   await Promise.all([
-    ...(taskRef ? [updateDoc(taskRef, { status: terminalStatus, completedAt: serverTimestamp(), updatedAt: serverTimestamp() })] : []),
+    ...(taskRef ? [updateDoc(taskRef, { status: terminalStatus, approval: deleteField(), completedAt: serverTimestamp(), updatedAt: serverTimestamp() })] : []),
     updateDoc(chatRef, {
       activeRun: deleteField(),
       lastRunStatus: terminalStatus,
-      lastRunProgress: { id: runId, status: terminalStatus, startedAt, activityCount, reasoningActivityCount, workActivityCount, progressItems },
+      lastRun: { id: runId, status: terminalStatus, startedAt, completedAt: new Date().toISOString(), activityCount, reasoningActivityCount, workActivityCount, lastSequence },
+      lastRunProgress: deleteField(),
     }),
   ]);
 }
@@ -354,34 +342,12 @@ function reconcileDesktopRunWatchers(projects: CatalogProject[]): void {
     for (const chat of project.chats) {
       const runId = chat.activeRunId || "";
       if (!runId || relayedRunIds.has(runId) || desktopRunWatchers.has(runId)) continue;
-      const watcher = relayRun(undefined, "", project.id, chat.id, runId, chat.activeRunEventSequence ?? 0)
+      const watcher = relayRun(undefined, project.id, chat.id, runId, chat.activeRunEventSequence ?? 0)
         .catch(reportBackgroundError)
         .finally(() => desktopRunWatchers.delete(runId));
       desktopRunWatchers.set(runId, watcher);
     }
   }
-}
-
-function canMergeOutput(pending: SseEvent[], incoming: SseEvent): boolean {
-  if (incoming.event !== "output" || !isObject(incoming.data) || !textField(incoming.data, "text")) return false;
-  if (!pending.length) return true;
-  const previous = pending[pending.length - 1];
-  if (!isObject(previous.data)) return false;
-  return textField(previous.data, "messageId") === textField(incoming.data, "messageId")
-    && textField(previous.data, "phase") === textField(incoming.data, "phase")
-    && textField(previous.data, "stream") === textField(incoming.data, "stream");
-}
-
-async function writeEvent(taskRef: DocumentReference<DocumentData>, taskId: string, event: SseEvent): Promise<void> {
-  const sequence = Math.max(0, event.sequence);
-  const eventRef = doc(collection(taskRef, "events"), String(sequence).padStart(12, "0"));
-  const fields: Record<string, unknown> = {
-    sequence,
-    type: event.event,
-    createdAt: serverTimestamp(),
-  };
-  fields.payload = event.data;
-  await setDoc(eventRef, fields);
 }
 
 async function syncCatalog(): Promise<void> {

@@ -66,7 +66,7 @@ const elements = {
 let user: User | null = null;
 let deviceUnsubscribe: Unsubscribe | undefined;
 let taskUnsubscribe: Unsubscribe | undefined;
-let eventUnsubscribe: Unsubscribe | undefined;
+let timelineUnsubscribe: Unsubscribe | undefined;
 let historyUnsubscribe: Unsubscribe | undefined;
 let tasks: Array<QueryDocumentSnapshot<DocumentData>> = [];
 let devices: Array<QueryDocumentSnapshot<DocumentData>> = [];
@@ -86,10 +86,8 @@ let selectedHistoryKey = "";
 let selectedHistorySignature = "";
 let selectedHistoryEntries: HistoryEntry[] = [];
 let selectedHistoryChunkDocs: Array<QueryDocumentSnapshot<DocumentData>> = [];
-const retainedProgressByRun = new Map<string, Record<string, unknown>[]>();
+let timelineEvents: Array<QueryDocumentSnapshot<DocumentData>> = [];
 let historyScrollVersion = 0;
-let activeTaskId = "";
-let activeTaskEvents: Array<QueryDocumentSnapshot<DocumentData>> = [];
 let activeApproval: { runId: string; requestId: string; summary: string } | undefined;
 let pendingCreatedChat: { taskId: string; deviceId: string; projectId: string; optimisticId: string } | undefined;
 let pendingCancelRunId = "";
@@ -297,11 +295,10 @@ function deviceOnline(item: QueryDocumentSnapshot<DocumentData>): boolean {
 }
 
 function subscribeDeviceContents(): void {
-  taskUnsubscribe?.(); eventUnsubscribe?.();
+  taskUnsubscribe?.(); timelineUnsubscribe?.();
   renderedTreeSignature = "";
   renderedConversationSignature = "";
-  activeTaskId = "";
-  activeTaskEvents = [];
+  timelineEvents = [];
   activeApproval = undefined;
   pendingCreatedChat = undefined;
   subscribedDeviceId = elements.device.value;
@@ -319,6 +316,11 @@ function subscribeDeviceContents(): void {
     reconcilePendingCancel();
     reconcileOptimisticTaskStatus();
     reconcileCreatedChatSelection();
+    renderedConversationSignature = "";
+    renderConversationHeader();
+  }, showError);
+  timelineUnsubscribe = onSnapshot(collection(deviceRef, "timelineEvents"), (snapshot) => {
+    timelineEvents = snapshot.docs;
     renderedConversationSignature = "";
     renderConversationHeader();
   }, showError);
@@ -733,7 +735,7 @@ function updateChatReadStates(deviceId: string, chats: Array<QueryDocumentSnapsh
   }
   for (const chat of chats) {
     const key = chatReadKey(deviceId, chat.id);
-    const version = completedRunVersion(chat.data().lastRunProgress);
+    const version = completedRunVersion(chat.data().lastRun);
     const previous = chatReadStates.get(key);
     const visible = document.visibilityState === "visible" && deviceId === elements.device.value && chat.id === elements.chat.value;
     if (!previous) {
@@ -1290,10 +1292,6 @@ function reconcileOptimisticTaskStatus(): void {
 function renderRunProgress(): void {
   const task = visibleActiveTask();
   if (!task) {
-    eventUnsubscribe?.();
-    eventUnsubscribe = undefined;
-    activeTaskId = "";
-    activeTaskEvents = [];
     activeApproval = undefined;
     const desktopRun = selectedDesktopRun();
     if (desktopRun) renderDesktopRunProgress(desktopRun);
@@ -1304,22 +1302,24 @@ function renderRunProgress(): void {
     }
     return;
   }
-  if (task.id !== activeTaskId) {
-    eventUnsubscribe?.();
-    activeTaskId = task.id;
-    activeTaskEvents = [];
-    activeApproval = undefined;
-    eventUnsubscribe = onSnapshot(collection(task.ref, "events"), (snapshot) => {
-      activeTaskEvents = snapshot.docs;
-      renderActiveTask(task);
-    }, showError);
-  }
   renderActiveTask(task);
 }
 
 function selectedDesktopRun(): Record<string, unknown> | undefined {
   const chat = selectedChats(elements.project.value).find((item) => item.id === elements.chat.value);
-  return chat && isObject(chat.data().activeRun) && text(chat.data().activeRun.id) ? chat.data().activeRun : undefined;
+  if (!chat || !isObject(chat.data().activeRun) || !text(chat.data().activeRun.id)) return undefined;
+  const activeRun = chat.data().activeRun as Record<string, unknown>;
+  const runId = text(activeRun.id);
+  const latest = timelineEvents
+    .filter((event) => text(event.data().runId) === runId)
+    .sort((left, right) => number(right.data().sequence) - number(left.data().sequence))[0];
+  return latest ? {
+    ...activeRun,
+    activityCount: number(latest.data().activityCount),
+    reasoningActivityCount: number(latest.data().reasoningActivityCount),
+    workActivityCount: number(latest.data().workActivityCount),
+    lastSequence: number(latest.data().sequence),
+  } : activeRun;
 }
 
 function selectedActiveRunId(): string {
@@ -1330,48 +1330,31 @@ function selectedActiveRunId(): string {
 }
 
 function selectedLiveProgressItems(): Record<string, unknown>[] {
-  const task = selectedProgressTask();
   const chat = selectedChats(elements.project.value).find((item) => item.id === elements.chat.value);
+  if (!chat) return [];
   const persistedRunIds = selectedPersistedProgressRunIds();
-  const runs: Record<string, unknown>[] = [];
-  const completed = chat && isObject(chat.data().lastRunProgress) ? chat.data().lastRunProgress : undefined;
-  if (completed && shouldKeepCompletedProgress(text(completed.id), persistedRunIds)) runs.push(completed);
-  const active = selectedDesktopRun();
-  if (active && !runs.some((run) => text(run.id) === text(active.id))) runs.push(active);
-  if (task) {
-    const taskRun = { id: taskRunId(task.data()), startedAt: timestamp(task.data().startedAt) ? new Date(timestamp(task.data().startedAt)).toISOString() : "", progressItems: task.data().progressItems };
-    if (text(taskRun.id) && !runs.some((run) => text(run.id) === text(taskRun.id))) runs.push(taskRun);
+  const runIds = new Set<string>();
+  const activeRunId = text(selectedDesktopRun()?.id);
+  const completedRunId = isObject(chat.data().lastRun) ? text(chat.data().lastRun.id) : "";
+  const task = visibleActiveTask();
+  const taskId = task ? taskRunId(task.data()) : "";
+  for (const runId of [activeRunId, completedRunId, taskId]) {
+    if (shouldKeepCompletedProgress(runId, persistedRunIds)) runIds.add(runId);
   }
-  const retainedRunIds = new Set(runs.map((run) => text(run.id)).filter(Boolean));
-  for (const runId of [...retainedProgressByRun.keys()]) {
-    if (!retainedRunIds.has(runId)) retainedProgressByRun.delete(runId);
+  const documents = timelineEvents
+    .filter((event) => text(event.data().projectId) === elements.project.value
+      && text(event.data().chatId) === elements.chat.value
+      && runIds.has(text(event.data().runId)))
+    .sort((left, right) => number(left.data().sequence) - number(right.data().sequence));
+  let items: Record<string, unknown>[] = [];
+  for (const event of documents) {
+    const incoming = Array.isArray(event.data().items) ? event.data().items.filter(isObject) : [];
+    items = mergeProgressWindow(items, incoming);
   }
-  return runs.sort((left, right) => text(left.startedAt).localeCompare(text(right.startedAt))).flatMap((run) => {
-    const source = run.progressItems;
-    const runId = text(run.id);
-    const incoming = Array.isArray(source) ? source.filter(isObject) : [];
-    const retained = mergeProgressWindow(retainedProgressByRun.get(runId) ?? [], incoming);
-    retainedProgressByRun.set(runId, retained);
-    return retained.map((item) => ({
-      ...item,
-      createdAt: text(item.createdAt) || text(run.startedAt),
-      displayKey: `live:${runId}:${number(item.firstSequence)}`,
-    }));
-  });
-}
-
-function selectedProgressTask(): QueryDocumentSnapshot<DocumentData> | undefined {
-  const active = visibleActiveTask();
-  if (active) return active;
-  const projectId = elements.project.value;
-  const chatId = elements.chat.value;
-  if (!projectId || !chatId) return undefined;
-  const persistedRunIds = selectedPersistedProgressRunIds();
-  return tasks.find((task) => {
-    const data = task.data();
-    if (taskProjectId(data) !== projectId || taskChatId(data) !== chatId || !Array.isArray(data.progressItems) || !data.progressItems.length) return false;
-    return shouldKeepCompletedProgress(taskRunId(data), persistedRunIds);
-  });
+  return items.map((item) => ({
+    ...item,
+    displayKey: `live:${text(item.kind)}:${number(item.firstSequence)}`,
+  }));
 }
 
 function selectedPersistedProgressRunIds(): string[] {
@@ -1420,20 +1403,13 @@ function renderActiveTask(task: QueryDocumentSnapshot<DocumentData>): void {
   elements.runProgressText.prepend(spinner());
   elements.cancelRun.hidden = isCancelTask || pendingCancelRunId === runId || !runId || !["queued", "claimed", "running", "waiting_for_approval"].includes(status);
 
-  activeApproval = undefined;
-  for (const event of [...activeTaskEvents].sort((a, b) => Number(b.data().sequence) - Number(a.data().sequence))) {
-    const eventData = event.data();
-    if (text(eventData.type) !== "approval" || !isObject(eventData.payload)) continue;
-    const requestId = text(eventData.payload.requestId);
-    if (requestId && runId) {
-      activeApproval = {
-        runId,
-        requestId,
-        summary: approvalSummary(text(eventData.payload.reason), text(eventData.payload.command)),
-      };
-      break;
-    }
-  }
+  const approval = isObject(data.approval) ? data.approval : undefined;
+  const requestId = approval ? text(approval.requestId) : "";
+  activeApproval = requestId && runId ? {
+    runId,
+    requestId,
+    summary: approvalSummary(text(approval?.reason), text(approval?.command)),
+  } : undefined;
   elements.approvalActions.hidden = !activeApproval || status !== "waiting_for_approval";
   elements.approvalSummary.textContent = activeApproval?.summary || "この操作の承認が必要です。";
 }
@@ -1525,16 +1501,15 @@ function statusLabel(status: string): string {
 }
 
 function stopSubscriptions(): void {
-  deviceUnsubscribe?.(); taskUnsubscribe?.(); eventUnsubscribe?.(); historyUnsubscribe?.();
+  deviceUnsubscribe?.(); taskUnsubscribe?.(); timelineUnsubscribe?.(); historyUnsubscribe?.();
   for (const unsubscribe of projectUnsubscribes.values()) unsubscribe();
   for (const unsubscribe of chatUnsubscribes.values()) unsubscribe();
   projectUnsubscribes.clear();
   chatUnsubscribes.clear();
-  deviceUnsubscribe = taskUnsubscribe = eventUnsubscribe = historyUnsubscribe = undefined;
+  deviceUnsubscribe = taskUnsubscribe = timelineUnsubscribe = historyUnsubscribe = undefined;
   subscribedDeviceId = "";
   renderedDeviceSignature = "";
-  activeTaskId = "";
-  activeTaskEvents = [];
+  timelineEvents = [];
   activeApproval = undefined;
   pendingCreatedChat = undefined;
   pendingCancelRunId = "";
@@ -1558,7 +1533,6 @@ function stopSubscriptions(): void {
   selectedHistorySignature = "";
   selectedHistoryEntries = [];
   selectedHistoryChunkDocs = [];
-  retainedProgressByRun.clear();
   historyScrollVersion += 1;
   composerDraftContext = "";
   elements.content.value = "";

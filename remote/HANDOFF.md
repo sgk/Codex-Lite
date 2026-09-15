@@ -64,8 +64,8 @@ codex app-server
 - `~/.local/share/codex-lite/daemon-endpoint.json` から実行中 daemon を検出する。
 - daemon が見つからない場合、`scripts/run-daemon.sh` から必要時に起動する。
 - 許可済み操作だけを localhost の daemon 専用 API へ渡す。
-- daemon の SSE イベントを Firestore へ転送する。
-- 同じ出力項目の連続 delta を最大約 750 ms 単位にまとめる。
+- daemon の SSE 進捗を表示用項目へ変換し、全チャット共通の `timelineEvents` へ5秒単位の差分チャンクとして転送する。
+- チャットの `activeRun` は開始・承認待ち・終了だけ更新し、進捗配列の反復上書きには使わない。
 - heartbeat とプロジェクト／チャット一覧の同期。Windows側から選択中のチャット、選択中のプロジェクト、プロジェクトツリー順を受け取り、catalogとFirestoreのsyncOrderへ反映する。
 - Firebase ログイン情報は対話入力、または無人起動用環境変数から受け取る。OS 保護領域との統合は未実装。
 
@@ -100,7 +100,7 @@ users/{uid}/devices/{deviceId}
 users/{uid}/devices/{deviceId}/projects/{projectId}
 users/{uid}/devices/{deviceId}/chats/{chatId}
 users/{uid}/devices/{deviceId}/tasks/{taskId}
-users/{uid}/devices/{deviceId}/tasks/{taskId}/events/{eventId}
+users/{uid}/devices/{deviceId}/timelineEvents/{eventId}
 ```
 
 - `firestore.rules`、`firestore.indexes.json`、`firebase.json` を追加済み。
