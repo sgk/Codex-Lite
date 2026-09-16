@@ -90,7 +90,21 @@ let activeApproval: { runId: string; requestId: string; summary: string } | unde
 let pendingCreatedChat: { taskId: string; deviceId: string; projectId: string; optimisticId: string } | undefined;
 let pendingCancelRunId = "";
 let pendingCancelTaskId = "";
-let optimisticInstructions: Array<{ id: string; taskId?: string; deviceId: string; projectId: string; chatId?: string; content: string; attachmentCount: number; createdAt: string; baselineCount: number; state: "queued" | "sending" | "accepted" | "failed" }> = [];
+interface OptimisticInstruction {
+  id: string;
+  taskId?: string;
+  deviceId: string;
+  projectId: string;
+  chatId?: string;
+  content: string;
+  attachmentCount: number;
+  createdAt: string;
+  baselineCount: number;
+  state: "queued" | "sending" | "accepted" | "failed";
+  operation: RemoteOperation;
+  payload: RemoteTaskPayload;
+}
+let optimisticInstructions: OptimisticInstruction[] = [];
 let pendingAttachments: Array<RemoteAttachment & { previewUrl?: string }> = [];
 let composerFileDragDepth = 0;
 let runtimeKey = "";
@@ -921,7 +935,20 @@ function renderSendQueue(items = selectedOptimisticInstructions()): void {
     const attachments = document.createElement("span");
     attachments.className = "send-queue-state";
     attachments.textContent = item.attachmentCount ? `添付 ${item.attachmentCount}件` : "";
-    row.append(state, content, attachments);
+    const actions = document.createElement("span");
+    actions.className = "send-queue-actions";
+    if (item.state === "failed") {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "再送";
+      retry.addEventListener("click", () => { void retryOptimisticInstruction(item); });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "削除";
+      remove.addEventListener("click", () => { deleteOptimisticInstruction(item); });
+      actions.append(retry, remove);
+    }
+    row.append(state, content, attachments, actions);
     return row;
   }));
   elements.sendQueue.hidden = items.length === 0;
@@ -968,7 +995,14 @@ async function sendInstruction(): Promise<void> {
   const projectId = elements.project.value;
   const chatId = operation === "create_chat" ? undefined : elements.chat.value;
   const wireAttachments = pendingAttachments.map(({ previewUrl: _previewUrl, ...attachment }) => attachment);
-  const optimistic: (typeof optimisticInstructions)[number] = {
+  const payload: RemoteTaskPayload = {
+    projectId,
+    ...(operation === "create_chat" ? { title: titleFromFirstInstruction(content) } : { chatId }),
+    ...(operation === "steer_run" ? { runId: activeRunId } : {}),
+    content,
+    ...(wireAttachments.length ? { attachments: wireAttachments } : {}),
+  };
+  const optimistic: OptimisticInstruction = {
     id: crypto.randomUUID(),
     deviceId,
     projectId,
@@ -978,6 +1012,8 @@ async function sendInstruction(): Promise<void> {
     createdAt: new Date().toISOString(),
     baselineCount: chatId ? syncedInstructionCount(deviceId, projectId, chatId, content) : 0,
     state: "queued" as const,
+    operation,
+    payload,
   };
   optimisticInstructions.push(optimistic);
   elements.content.value = "";
@@ -988,13 +1024,6 @@ async function sendInstruction(): Promise<void> {
   elements.send.disabled = true;
   clearError();
   try {
-    const payload: RemoteTaskPayload = {
-      projectId,
-      ...(operation === "create_chat" ? { title: titleFromFirstInstruction(content) } : { chatId }),
-      ...(operation === "steer_run" ? { runId: activeRunId } : {}),
-      content,
-      ...(wireAttachments.length ? { attachments: wireAttachments } : {}),
-    };
     const taskId = await createTask(operation, payload);
     optimistic.taskId = taskId;
     optimistic.state = "sending";
@@ -1017,6 +1046,42 @@ async function sendInstruction(): Promise<void> {
     showError(error);
   }
   finally { elements.send.disabled = false; }
+}
+
+async function retryOptimisticInstruction(item: OptimisticInstruction): Promise<void> {
+  if (item.state !== "failed" || item.deviceId !== elements.device.value) return;
+  item.state = "queued";
+  item.taskId = undefined;
+  renderedConversationSignature = "";
+  renderConversationHeader();
+  clearError();
+  try {
+    const taskId = await createTask(item.operation, item.payload);
+    item.taskId = taskId;
+    item.state = "sending";
+    if (item.operation === "create_chat") {
+      pendingCreatedChat = {
+        taskId,
+        deviceId: item.deviceId,
+        projectId: item.projectId,
+        optimisticId: item.id,
+      };
+    }
+    reconcileOptimisticTaskStatus();
+  } catch (error) {
+    item.state = "failed";
+    showError(error);
+  }
+  renderedConversationSignature = "";
+  renderConversationHeader();
+}
+
+function deleteOptimisticInstruction(item: OptimisticInstruction): void {
+  if (item.state !== "failed") return;
+  optimisticInstructions = optimisticInstructions.filter((candidate) => candidate !== item);
+  if (pendingCreatedChat?.optimisticId === item.id) pendingCreatedChat = undefined;
+  renderedConversationSignature = "";
+  renderConversationHeader();
 }
 
 async function createTaskAndWait(operation: RemoteOperation, payload: RemoteTaskPayload, timeoutMs = 25_000): Promise<Record<string, unknown>> {

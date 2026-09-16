@@ -70,11 +70,13 @@ input:focus, textarea:focus { border-color: #84adff; box-shadow: 0 0 0 3px #dbea
 .history { display: flex; flex-direction: column; gap: 12px; padding: 8px 0 20px; }
 .send-queue { display: flex; max-height: 150px; flex: 0 0 auto; flex-direction: column; gap: 6px; overflow-y: auto; padding: 8px 26px 2px; border-top: 1px solid #eef0f3; }
 .send-queue[hidden] { display: none; }
-.send-queue-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid #e7c56b; border-radius: 7px; color: #3f3a2a; background: #fff8e7; }
+.send-queue-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid #e7c56b; border-radius: 7px; color: #3f3a2a; background: #fff8e7; }
 .send-queue-state { color: #8a6500; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .send-queue-content { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .send-queue-item.failed { border-color: #fda29b; background: #fff1f0; }
 .send-queue-item.failed .send-queue-state { color: #b42318; }
+.send-queue-actions { display: flex; gap: 5px; }
+.send-queue-actions button { padding: 5px 9px; font-size: 12px; }
 .usage-panel { width: min(560px, 100%); margin: 42px auto 18px; }
 .runtime-loading { display: flex; width: max-content; margin: 0 auto 14px; align-items: center; gap: 7px; color: #667085; font-size: 12px; }
 .runtime-loading .spinner { margin-right: 0; }

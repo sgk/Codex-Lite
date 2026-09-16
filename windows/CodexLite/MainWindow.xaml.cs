@@ -77,6 +77,7 @@ public partial class MainWindow : Window
         public string Model { get; }
         public string Content { get; }
         public IReadOnlyList<MessageAttachmentDto> Attachments { get; }
+        public string? Operation { get; private set; }
         public string State { get; private set; } = "queued";
         public string StateLabel => State switch
         {
@@ -107,6 +108,12 @@ public partial class MainWindow : Window
             State = state;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(State)));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StateLabel)));
+        }
+
+        public string ChooseOperation(bool hasActiveRun)
+        {
+            Operation ??= hasActiveRun ? "steer" : "send";
+            return Operation;
         }
     }
     private sealed record RemoteSyncProgress(
@@ -7071,7 +7078,8 @@ public partial class MainWindow : Window
                     }
                     submission.SetState("sending");
                     StatusText.Text = $"送信キューを処理中 | 残り {_queuedComposerSubmissions.Count}件";
-                    var accepted = SelectedActiveRun() is not null
+                    var operation = submission.ChooseOperation(SelectedActiveRun() is not null);
+                    var accepted = operation == "steer"
                         ? await SteerCurrentRunAsync(submission)
                         : await SendCurrentMessageAsync(submission);
                     if (!accepted)
@@ -7122,6 +7130,36 @@ public partial class MainWindow : Window
         _queuedComposerSubmissions.Remove(submission);
         RefreshVisibleComposerQueue();
         RefreshSendTransportReadiness();
+        UpdateCommandButtonState();
+        UpdateProjectRunningIndicators();
+    }
+
+    private void RetryComposerSubmission_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: QueuedComposerSubmission submission }
+            || !_queuedComposerSubmissions.Contains(submission)
+            || !string.Equals(submission.State, "failed", StringComparison.Ordinal))
+        {
+            return;
+        }
+        submission.SetState("queued");
+        StatusText.Text = "再送待ち";
+        _sendReadinessTimer.Start();
+        UpdateCommandButtonState();
+        UpdateProjectRunningIndicators();
+        _ = ProcessComposerQueueAsync();
+    }
+
+    private void DeleteComposerSubmission_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: QueuedComposerSubmission submission }
+            || !_queuedComposerSubmissions.Contains(submission)
+            || !string.Equals(submission.State, "failed", StringComparison.Ordinal))
+        {
+            return;
+        }
+        RemoveQueuedComposerSubmission(submission);
+        StatusText.Text = "送信エラーの項目を削除しました";
     }
 
     private void AssignNewChatQueue(string projectId, string chatId)
@@ -7353,7 +7391,7 @@ public partial class MainWindow : Window
         startHeartbeat.Start();
         BeginRunActivity(chat.Id, "応答を開始中...");
         ShowPendingRunProgressForChat(chat.Id, "開始待ち");
-        var runStarted = false;
+        var runAccepted = false;
         try
         {
             MessagePostResult? result;
@@ -7363,7 +7401,9 @@ public partial class MainWindow : Window
             }
             if (result is not null)
             {
+                runAccepted = true;
                 RemoveQueuedComposerSubmission(submission);
+                var alreadyTracked = ActiveRunForChat(chat.Id)?.RunId == result.RunId;
                 using (EnterUiPhase("SendCurrentMessage/AppendLocalMessages"))
                 {
                     AppendMessageForChat(project.Id, chat.Id, new MessageDto(
@@ -7376,26 +7416,35 @@ public partial class MainWindow : Window
                         "instruction",
                         attachments),
                         scrollToEnd: true);
-                    AppendMessageForChat(project.Id, chat.Id, new MessageDto(
-                        assistantMessageId,
-                        chat.Id,
-                        "assistant",
-                        StartingResponseText,
-                        null,
-                        DateTimeOffset.UtcNow.ToString("O"),
-                        "waiting"),
-                        scrollToEnd: true);
+                    if (!alreadyTracked)
+                    {
+                        AppendMessageForChat(project.Id, chat.Id, new MessageDto(
+                            assistantMessageId,
+                            chat.Id,
+                            "assistant",
+                            StartingResponseText,
+                            null,
+                            DateTimeOffset.UtcNow.ToString("O"),
+                            "waiting"),
+                            scrollToEnd: true);
+                    }
                 }
                 WritePerformanceLog("send-run-started", $"runId={LogText(result.RunId)} messageId={LogText(result.MessageId)}");
                 var startElapsed = DateTimeOffset.Now - sendStartedAt;
                 startHeartbeat.Stop();
                 StatusText.Text = "応答中";
-                _activeRunsByChat[chat.Id] = new ActiveUiRun(result.RunId, project.Id, chat.Id, runCts);
                 ShowRunProgressForChat(chat.Id, $"実行中 | started after {startElapsed.TotalSeconds:F1}s");
-                runStarted = true;
                 EndRunActivity(chat.Id);
                 UpdateCommandButtonState();
-                _ = ContinueAcceptedRunAsync(result.RunId, project.Id, chat.Id, assistantMessageId, sendStartedAt, runToken);
+                if (alreadyTracked)
+                {
+                    runCts.Dispose();
+                }
+                else
+                {
+                    _activeRunsByChat[chat.Id] = new ActiveUiRun(result.RunId, project.Id, chat.Id, runCts);
+                    _ = ContinueAcceptedRunAsync(result.RunId, project.Id, chat.Id, assistantMessageId, sendStartedAt, runToken);
+                }
             }
             else
             {
@@ -7404,8 +7453,8 @@ public partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
-            WritePerformanceLog("send-cancelled", $"runStarted={runStarted}");
-            if (!runStarted)
+            WritePerformanceLog("send-cancelled", $"runAccepted={runAccepted}");
+            if (!runAccepted)
             {
                 submission.SetState("failed");
             }
@@ -7424,7 +7473,7 @@ public partial class MainWindow : Window
         finally
         {
             startHeartbeat.Stop();
-            if (!runStarted)
+            if (!runAccepted)
             {
                 EndRunActivity(chat.Id);
                 runCts.Dispose();
@@ -7432,7 +7481,7 @@ public partial class MainWindow : Window
             }
             UpdateCommandButtonState();
         }
-        return runStarted;
+        return runAccepted;
     }
 
     private async Task ContinueAcceptedRunAsync(

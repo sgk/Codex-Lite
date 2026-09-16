@@ -967,10 +967,25 @@
                                             <ColumnDefinition Width="Auto"/>
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="1" Text="{Binding StateLabel}" Foreground="#8A6500" FontWeight="SemiBold" Margin="0,0,10,0" VerticalAlignment="Center"/>
                                         <TextBlock Grid.Column="2" Text="{Binding Content}" Foreground="#3F3A2A" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                                         <TextBlock Grid.Column="3" Text="{Binding AttachmentLabel}" Foreground="#8A6500" FontSize="11" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                                        <StackPanel Grid.Column="4" Orientation="Horizontal" Margin="10,0,0,0">
+                                            <StackPanel.Style>
+                                                <Style TargetType="{x:Type StackPanel}">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding State}" Value="failed">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </StackPanel.Style>
+                                            <Button Content="再送" Click="RetryComposerSubmission_Click" MinWidth="48" Height="24" Margin="0,0,5,0"/>
+                                            <Button Content="削除" Click="DeleteComposerSubmission_Click" MinWidth="48" Height="24"/>
+                                        </StackPanel>
                                     </Grid>
                                 </Border>
                             </DataTemplate>
@@ -1278,6 +1293,7 @@
                                             <ColumnDefinition Width="Auto"/>
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="1"
                                                    Text="{Binding StateLabel}"
@@ -1297,6 +1313,20 @@
                                                    FontSize="11"
                                                    Margin="10,0,0,0"
                                                    VerticalAlignment="Center"/>
+                                        <StackPanel Grid.Column="4" Orientation="Horizontal" Margin="10,0,0,0">
+                                            <StackPanel.Style>
+                                                <Style TargetType="{x:Type StackPanel}">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding State}" Value="failed">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </StackPanel.Style>
+                                            <Button Content="再送" Click="RetryComposerSubmission_Click" MinWidth="48" Height="24" Margin="0,0,5,0"/>
+                                            <Button Content="削除" Click="DeleteComposerSubmission_Click" MinWidth="48" Height="24"/>
+                                        </StackPanel>
                                     </Grid>
                                 </Border>
                             </DataTemplate>
