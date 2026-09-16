@@ -129,20 +129,14 @@ test("owner can read and write selected-chat history chunks", async () => {
   await assertFails(getDoc(doc(other, "users/alice/devices/home/historyChunks/chunk-1")));
 });
 
-test("owner can use the shared timeline collection but not the removed per-task event route", async () => {
+test("removed progress event routes are unavailable", async () => {
   const owner = allowedContext().firestore();
-  const other = allowedContext("bob", "bob@allowed.example").firestore();
-  const event = doc(owner, "users/alice/devices/home/timelineEvents/event-1");
-  await assertSucceeds(setDoc(event, {
+  await assertFails(setDoc(doc(owner, "users/alice/devices/home/timelineEvents/event-1"), {
     projectId: "project-1",
     chatId: "chat-1",
     runId: "run-1",
-    firstSequence: 1,
-    sequence: 2,
-    items: [{ firstSequence: 1, sequence: 2, kind: "reasoning", text: "考え中" }],
+    sequence: 1,
   }));
-  await assertSucceeds(getDoc(event));
-  await assertFails(getDoc(doc(other, "users/alice/devices/home/timelineEvents/event-1")));
   await assertFails(setDoc(doc(owner, "users/alice/devices/home/tasks/task-1/events/event-1"), { type: "progress" }));
 });
 

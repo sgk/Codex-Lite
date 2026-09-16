@@ -24,9 +24,8 @@ import { catalogRetryDecision, cloudCatalogSnapshot, diffCatalog, prioritizeCata
 import { loadAgentConfig } from "./config.js";
 import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon } from "./daemon.js";
-import { appendProgressItem, isCountableProgressEvent, type RemoteProgressItem } from "./progress-sync.js";
+import { isCountableProgressEvent } from "./progress-sync.js";
 import { historyChunkId, historyChunks } from "./history-chunks.js";
-import { changedProgressItems, progressItemKey, timelineDocumentId, timelineItemBatches, TIMELINE_FLUSH_INTERVAL_MS } from "./timeline-sync.js";
 
 interface QueuedTask {
   operation: RemoteOperation;
@@ -50,6 +49,7 @@ let catalogSyncFailures = 0;
 let heartbeatRunning = false;
 const relayedRunIds = new Set<string>();
 const desktopRunWatchers = new Map<string, Promise<void>>();
+const ACTIVE_RUN_PROGRESS_INTERVAL_MS = 30_000;
 await daemon.connect();
 const deviceId = config.deviceId;
 const deviceRef = doc(db, "users", uid, "devices", deviceId);
@@ -241,67 +241,47 @@ async function taskPayload(_taskId: string, task: QueuedTask): Promise<RemoteTas
 
 async function relayRun(taskRef: DocumentReference<DocumentData> | undefined, projectId: string, chatId: string, runId: string, afterSequence = 0): Promise<void> {
   const chatRef = doc(deviceRef, "chats", chatId);
-  const timelineRef = collection(deviceRef, "timelineEvents");
   const startedAt = new Date().toISOString();
   let terminalStatus = "connection_lost";
   let activityCount = 0;
-  let reasoningActivityCount = 0;
   let workActivityCount = 0;
   let projectedStatus = "running";
-  let progressItems: RemoteProgressItem[] = [];
-  const pendingProgress = new Map<string, RemoteProgressItem>();
   let lastSequence = afterSequence;
-  let lastTimelineWriteAt = 0;
+  let lastProgressWriteAt = Date.now();
+  let progressChanged = false;
   await setDoc(chatRef, {
     projectId,
     chatId,
-    activeRun: { id: runId, status: "running", startedAt, activityCount: 0, reasoningActivityCount: 0, workActivityCount: 0, lastSequence: afterSequence },
+    activeRun: { id: runId, status: "running", startedAt, activityCount: 0, workActivityCount: 0, lastSequence: afterSequence, lastActivityAt: startedAt },
     lastRunProgress: deleteField(),
   }, { merge: true });
-  const flushTimeline = async (force = false) => {
+  const flushRunProgress = async (lastActivityAt = new Date().toISOString()) => {
     const now = Date.now();
-    if (!pendingProgress.size || (!force && lastTimelineWriteAt > 0 && now - lastTimelineWriteAt < TIMELINE_FLUSH_INTERVAL_MS)) return;
-    const items = [...pendingProgress.values()];
-    pendingProgress.clear();
-    for (const batch of timelineItemBatches(items)) {
-      const firstSequence = Math.min(...batch.map((item) => item.firstSequence));
-      const sequence = Math.max(...batch.map((item) => item.sequence));
-      await setDoc(doc(timelineRef, timelineDocumentId(runId, batch)), {
-        deviceId,
-        projectId,
-        chatId,
-        runId,
-        firstSequence,
-        sequence,
-        activityCount,
-        reasoningActivityCount,
-        workActivityCount,
-        createdAt: batch[0]?.createdAt || startedAt,
-        items: batch,
-        writtenAt: serverTimestamp(),
-      });
-    }
-    lastTimelineWriteAt = now;
+    if (!progressChanged || now - lastProgressWriteAt < ACTIVE_RUN_PROGRESS_INTERVAL_MS) return;
+    await updateDoc(chatRef, {
+      activeRun: { id: runId, status: projectedStatus, startedAt, activityCount, workActivityCount, lastSequence, lastActivityAt },
+    });
+    progressChanged = false;
+    lastProgressWriteAt = now;
   };
   for await (const event of daemon.events(runId, afterSequence)) {
     lastSequence = Math.max(lastSequence, event.sequence);
     if (event.event === "progress") {
       const method = isObject(event.data) ? textField(event.data, "method") : "";
-      const nextProgressItems = appendProgressItem(progressItems, event);
-      for (const item of changedProgressItems(progressItems, nextProgressItems)) pendingProgress.set(progressItemKey(item), item);
-      progressItems = nextProgressItems;
       if (isCountableProgressEvent(event)) {
         activityCount += 1;
-        if (method.startsWith("item/reasoning/")) reasoningActivityCount += 1;
-        else workActivityCount += 1;
+        workActivityCount += 1;
+        progressChanged = true;
       }
-      await flushTimeline();
+      await flushRunProgress(event.observedAt || new Date().toISOString());
       if (method === "approval/resolved" && projectedStatus === "waiting_for_approval") {
         projectedStatus = "running";
         if (taskRef) await updateDoc(taskRef, { status: "running", approval: deleteField(), updatedAt: serverTimestamp() });
         await updateDoc(chatRef, {
-          activeRun: { id: runId, status: "running", startedAt, activityCount, reasoningActivityCount, workActivityCount, lastSequence },
+          activeRun: { id: runId, status: "running", startedAt, activityCount, workActivityCount, lastSequence, lastActivityAt: event.observedAt || new Date().toISOString() },
         });
+        lastProgressWriteAt = Date.now();
+        progressChanged = false;
       }
       continue;
     }
@@ -314,10 +294,11 @@ async function relayRun(taskRef: DocumentReference<DocumentData> | undefined, pr
         command: textField(event.data, "command"),
       } : { runId, requestId: "", reason: "", command: "" };
       if (taskRef) await updateDoc(taskRef, { status: "waiting_for_approval", approval, updatedAt: serverTimestamp() });
-      await flushTimeline(true);
       await updateDoc(chatRef, {
-        activeRun: { id: runId, status: "waiting_for_approval", startedAt, activityCount, reasoningActivityCount, workActivityCount, lastSequence },
+        activeRun: { id: runId, status: "waiting_for_approval", startedAt, activityCount, workActivityCount, lastSequence, lastActivityAt: event.observedAt || new Date().toISOString() },
       });
+      lastProgressWriteAt = Date.now();
+      progressChanged = false;
     } else if (event.event === "done") {
       const status = isObject(event.data) ? textField(event.data, "status") : "";
       terminalStatus = status === "cancelled" ? "cancelled" : status === "failed" ? "failed" : "completed";
@@ -325,13 +306,12 @@ async function relayRun(taskRef: DocumentReference<DocumentData> | undefined, pr
       terminalStatus = "failed";
     }
   }
-  await flushTimeline(true);
   await Promise.all([
     ...(taskRef ? [updateDoc(taskRef, { status: terminalStatus, approval: deleteField(), completedAt: serverTimestamp(), updatedAt: serverTimestamp() })] : []),
     updateDoc(chatRef, {
       activeRun: deleteField(),
       lastRunStatus: terminalStatus,
-      lastRun: { id: runId, status: terminalStatus, startedAt, completedAt: new Date().toISOString(), activityCount, reasoningActivityCount, workActivityCount, lastSequence },
+      lastRun: { id: runId, status: terminalStatus, startedAt, completedAt: new Date().toISOString(), activityCount, workActivityCount, lastSequence },
       lastRunProgress: deleteField(),
     }),
   ]);

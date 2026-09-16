@@ -89,7 +89,7 @@ Agentは既に動いているdaemonを `~/.local/share/codex-lite/daemon-endpoin
 
 - 初期版は1利用者を想定し、WebとAgentは同じFirebase Authentication利用者でログインする。
 - Agent用の個別credential発行と端末単位の失効は未実装。
-- 既存チャット履歴は文書上限より小さい安定チャンクへ分割して同期する。実行中のツール・思考進捗は全チャット共通の `timelineEvents` へ5秒単位の差分チャンクとして同期し、会話履歴へ表示する。実行終了後はdaemonに保存されたRun進捗の履歴投影へ切り替える。
+- 既存チャット履歴は文書上限より小さい安定チャンクへ分割して同期する。実行中はチャット文書へ稼働状態と完成作業の累計件数だけを低頻度で同期する。完成したcommentaryと最終回答は履歴へ同期し、reasoningやツール詳細はクラウドへ保存しない。
 - Cloud Run functionsによる登録・ペアリング処理は未実装。
 - Firestoreイベントの保持期間と自動削除は未設定。
 - Firebase EmulatorによるRulesの自動テストは追加済み。実Firebase環境でのE2E確認は未実施。

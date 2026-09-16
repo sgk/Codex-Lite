@@ -378,7 +378,7 @@ def _remote_history(messages: list[dict[str, Any]], project_path: str) -> list[d
     candidates: list[dict[str, Any]] = []
     for message in messages:
         role = str(message.get("role") or "").lower()
-        if role not in {"user", "assistant", "status"}:
+        if role not in {"user", "assistant"}:
             continue
         kind = str(message.get("kind") or "")
         if role == "assistant" and kind not in {"work", "conclusion"}:
@@ -386,10 +386,7 @@ def _remote_history(messages: list[dict[str, Any]], project_path: str) -> list[d
         content = _without_inline_images(
             _redact_remote_text(str(message.get("content") or ""), project_path)
         ).strip()
-        activity_details = _without_inline_images(
-            _redact_remote_text(str(message.get("activityDetails") or ""), project_path)
-        ).strip()
-        if not content and not activity_details:
+        if not content:
             continue
         candidate = {
             "id": str(message.get("id") or ""),
@@ -398,10 +395,6 @@ def _remote_history(messages: list[dict[str, Any]], project_path: str) -> list[d
             "createdAt": str(message.get("createdAt") or ""),
             "kind": kind or ("instruction" if role == "user" else "conclusion"),
         }
-        if role == "status":
-            candidate["runId"] = str(message.get("runId") or "")
-            candidate["activityKind"] = "reasoning" if message.get("activityKind") == "reasoning" else "work"
-            candidate["activityDetails"] = activity_details
         candidates.append(candidate)
     return candidates
 

@@ -15,7 +15,7 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 import type { FirebasePublicConfig, RemoteAttachment, RemoteOperation, RemoteTaskPayload } from "../../shared/src/types.js";
-import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, mergeProgressWindow, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldKeepCompletedProgress, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection } from "./conversation-behavior.js";
+import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection } from "./conversation-behavior.js";
 import { renderMarkdown } from "./markdown.js";
 
 const buildInfo = document.getElementById("build-info");
@@ -66,7 +66,6 @@ const elements = {
 let user: User | null = null;
 let deviceUnsubscribe: Unsubscribe | undefined;
 let taskUnsubscribe: Unsubscribe | undefined;
-let timelineUnsubscribe: Unsubscribe | undefined;
 let historyUnsubscribe: Unsubscribe | undefined;
 let tasks: Array<QueryDocumentSnapshot<DocumentData>> = [];
 let devices: Array<QueryDocumentSnapshot<DocumentData>> = [];
@@ -86,14 +85,12 @@ let selectedHistoryKey = "";
 let selectedHistorySignature = "";
 let selectedHistoryEntries: HistoryEntry[] = [];
 let selectedHistoryChunkDocs: Array<QueryDocumentSnapshot<DocumentData>> = [];
-let timelineEvents: Array<QueryDocumentSnapshot<DocumentData>> = [];
 let historyScrollVersion = 0;
 let activeApproval: { runId: string; requestId: string; summary: string } | undefined;
 let pendingCreatedChat: { taskId: string; deviceId: string; projectId: string; optimisticId: string } | undefined;
 let pendingCancelRunId = "";
 let pendingCancelTaskId = "";
 let optimisticInstructions: Array<{ id: string; taskId?: string; deviceId: string; projectId: string; chatId?: string; content: string; attachmentCount: number; createdAt: string; baselineCount: number; state: "queued" | "sending" | "accepted" | "failed" }> = [];
-const expandedProgressIds = new Set<string>();
 let pendingAttachments: Array<RemoteAttachment & { previewUrl?: string }> = [];
 let composerFileDragDepth = 0;
 let runtimeKey = "";
@@ -295,10 +292,9 @@ function deviceOnline(item: QueryDocumentSnapshot<DocumentData>): boolean {
 }
 
 function subscribeDeviceContents(): void {
-  taskUnsubscribe?.(); timelineUnsubscribe?.();
+  taskUnsubscribe?.();
   renderedTreeSignature = "";
   renderedConversationSignature = "";
-  timelineEvents = [];
   activeApproval = undefined;
   pendingCreatedChat = undefined;
   subscribedDeviceId = elements.device.value;
@@ -316,11 +312,6 @@ function subscribeDeviceContents(): void {
     reconcilePendingCancel();
     reconcileOptimisticTaskStatus();
     reconcileCreatedChatSelection();
-    renderedConversationSignature = "";
-    renderConversationHeader();
-  }, showError);
-  timelineUnsubscribe = onSnapshot(collection(deviceRef, "timelineEvents"), (snapshot) => {
-    timelineEvents = snapshot.docs;
     renderedConversationSignature = "";
     renderConversationHeader();
   }, showError);
@@ -842,12 +833,10 @@ function renderConversationHeader(): void {
   const optimistic = selectedOptimisticInstructions();
   const accepted = optimistic.filter((item) => item.state === "accepted");
   const queued = optimistic.filter((item) => item.state !== "accepted");
-  const liveProgress = selectedLiveProgressItems();
   const conversationSelection = `${elements.device.value}:${elements.project.value}:${elements.chat.value}`;
-  const conversationSignature = `${elements.device.value}:${elements.project.value}:${elements.chat.value}:${selectedHistorySignature}:${chat ? `${text(chat.data().historyRevision)}:${number(chat.data().historyItemCount)}` : ""}:${accepted.map((item) => item.id).join(",")}:${progressSignature(liveProgress)}`;
+  const conversationSignature = `${elements.device.value}:${elements.project.value}:${elements.chat.value}:${selectedHistorySignature}:${chat ? `${text(chat.data().historyRevision)}:${number(chat.data().historyItemCount)}` : ""}:${accepted.map((item) => item.id).join(",")}`;
   if (conversationSignature !== renderedConversationSignature) {
     const selectionChanged = conversationSelection !== renderedConversationSelection;
-    if (selectionChanged) expandedProgressIds.clear();
     const previousOffset = elements.conversationBody.scrollTop;
     const position = historyUpdatePosition(selectionChanged, isConversationHistoryNearEnd(), historyFollowingEnd);
     renderedConversationSelection = conversationSelection;
@@ -863,53 +852,36 @@ function renderConversationHistory(): void {
   elements.history.replaceChildren();
   const chat = selectedChats(elements.project.value).find((item) => item.id === elements.chat.value);
   const accepted = selectedOptimisticInstructions().filter((item) => item.state === "accepted");
-  const liveProgress = selectedLiveProgressItems();
   if (!chat) {
-    if (!accepted.length && !liveProgress.length) elements.history.append(paragraph(
+    if (!accepted.length) elements.history.append(paragraph(
       elements.project.value ? "メッセージを入力して、新しいチャットを開始できます。" : "左のツリーからチャットを選択してください。",
       "empty muted",
     ));
-    appendConversationTimeline([], accepted, liveProgress);
+    appendConversationTimeline([], accepted);
     return;
   }
   const entries = selectedHistoryEntries;
-  if (!entries.length && !accepted.length && !liveProgress.length) {
+  if (!entries.length && !accepted.length) {
     elements.history.append(paragraph("このチャットの履歴はまだ同期されていません。", "empty muted"));
     return;
   }
-  appendConversationTimeline(entries, accepted, liveProgress);
+  appendConversationTimeline(entries, accepted);
 }
 
 function appendConversationTimeline(
   entries: HistoryEntry[],
   accepted: (typeof optimisticInstructions),
-  liveProgress: Record<string, unknown>[],
 ): void {
   const timeline = sortConversationTimeline([
     ...entries.map((value, sourceOrder) => ({ type: "history" as const, value, createdAt: value.createdAt, sourceOrder })),
     ...accepted.map((value, index) => ({ type: "optimistic" as const, value, createdAt: value.createdAt, sourceOrder: entries.length + index })),
-    ...liveProgress.map((value, index) => ({ type: "progress" as const, value, createdAt: text(value.createdAt), sourceOrder: entries.length + accepted.length + index })),
   ]);
   for (const item of timeline) {
     if (item.type === "optimistic") {
       appendAcceptedInstruction(item.value);
       continue;
     }
-    if (item.type === "progress") {
-      appendLiveProgressItem(item.value);
-      continue;
-    }
     const entry = item.value;
-    if (entry.role === "status") {
-      appendStatusHistoryItem(
-        entry.activityKind === "reasoning" ? "reasoning" : "work",
-        entry.content,
-        text(entry.activityDetails),
-        entry.createdAt,
-        `history:${text(entry.id)}`,
-      );
-      continue;
-    }
     const kind = historyKind(entry);
     const message = div(`message ${entry.role} ${kind}`);
     const meta = document.createElement("div");
@@ -933,58 +905,6 @@ function appendAcceptedInstruction(item: (typeof optimisticInstructions)[number]
   bubble.className = "message-bubble";
   renderMarkdown(bubble, item.content);
   message.append(meta, bubble);
-  elements.history.append(message);
-}
-
-function appendLiveProgressItem(item: Record<string, unknown>): void {
-  appendStatusHistoryItem(
-    text(item.kind) === "reasoning" ? "reasoning" : "work",
-    text(item.text),
-    text(item.details),
-    text(item.createdAt),
-    text(item.displayKey),
-  );
-}
-
-function appendStatusHistoryItem(kind: "reasoning" | "work", summary: string, details: string, createdAt = "", itemKey = ""): void {
-  const content = details.trim() || summary.trim();
-  if (!content) return;
-  const message = div(`message status ${kind}`);
-  const disclosure = document.createElement("details");
-  disclosure.className = "status-disclosure";
-  disclosure.open = Boolean(itemKey && expandedProgressIds.has(itemKey));
-  if (itemKey) disclosure.addEventListener("toggle", () => {
-    if (disclosure.open) expandedProgressIds.add(itemKey);
-    else expandedProgressIds.delete(itemKey);
-  });
-  const toggle = document.createElement("summary");
-  toggle.className = "message-meta status-summary";
-  const bubble = document.createElement("div");
-  bubble.className = "message-bubble";
-  const cleanSummary = summary.trim();
-  const compactSummary = (!/^[A-Za-z][A-Za-z0-9_./-]*$/.test(cleanSummary) ? cleanSummary : "") || content.split("\n", 1)[0];
-  const shortSummary = compactSummary.length > 140 ? `${compactSummary.slice(0, 137)}...` : compactSummary;
-  const summaryRow = document.createElement("span");
-  summaryRow.className = "status-summary-row";
-  const summaryLabel = document.createElement("span");
-  summaryLabel.className = "status-summary-label";
-  summaryLabel.textContent = `Codex · ${kind === "reasoning" ? "思考" : "作業"}${shortSummary ? ` — ${shortSummary}` : ""}`;
-  const summaryTime = document.createElement("time");
-  summaryTime.className = "status-summary-time";
-  summaryTime.dateTime = createdAt;
-  summaryTime.textContent = createdAt ? formatDate(createdAt) : "時刻未取得";
-  summaryRow.append(summaryLabel, summaryTime);
-  toggle.append(summaryRow);
-  if (details.trim() && cleanSummary && cleanSummary !== details.trim() && !/^[A-Za-z][A-Za-z0-9_./-]*$/.test(cleanSummary)) {
-    const heading = document.createElement("strong");
-    heading.textContent = cleanSummary;
-    bubble.append(heading);
-  }
-  const body = document.createElement("div");
-  body.textContent = content;
-  bubble.append(body);
-  disclosure.append(toggle, bubble);
-  message.append(disclosure);
   elements.history.append(message);
 }
 
@@ -1308,18 +1228,7 @@ function renderRunProgress(): void {
 function selectedDesktopRun(): Record<string, unknown> | undefined {
   const chat = selectedChats(elements.project.value).find((item) => item.id === elements.chat.value);
   if (!chat || !isObject(chat.data().activeRun) || !text(chat.data().activeRun.id)) return undefined;
-  const activeRun = chat.data().activeRun as Record<string, unknown>;
-  const runId = text(activeRun.id);
-  const latest = timelineEvents
-    .filter((event) => text(event.data().runId) === runId)
-    .sort((left, right) => number(right.data().sequence) - number(left.data().sequence))[0];
-  return latest ? {
-    ...activeRun,
-    activityCount: number(latest.data().activityCount),
-    reasoningActivityCount: number(latest.data().reasoningActivityCount),
-    workActivityCount: number(latest.data().workActivityCount),
-    lastSequence: number(latest.data().sequence),
-  } : activeRun;
+  return chat.data().activeRun as Record<string, unknown>;
 }
 
 function selectedActiveRunId(): string {
@@ -1329,51 +1238,8 @@ function selectedActiveRunId(): string {
   return task ? taskRunId(task.data()) : "";
 }
 
-function selectedLiveProgressItems(): Record<string, unknown>[] {
-  const chat = selectedChats(elements.project.value).find((item) => item.id === elements.chat.value);
-  if (!chat) return [];
-  const persistedRunIds = selectedPersistedProgressRunIds();
-  const runIds = new Set<string>();
-  const activeRunId = text(selectedDesktopRun()?.id);
-  const completedRunId = isObject(chat.data().lastRun) ? text(chat.data().lastRun.id) : "";
-  const task = visibleActiveTask();
-  const taskId = task ? taskRunId(task.data()) : "";
-  for (const runId of [activeRunId, completedRunId, taskId]) {
-    if (shouldKeepCompletedProgress(runId, persistedRunIds)) runIds.add(runId);
-  }
-  const documents = timelineEvents
-    .filter((event) => text(event.data().projectId) === elements.project.value
-      && text(event.data().chatId) === elements.chat.value
-      && runIds.has(text(event.data().runId)))
-    .sort((left, right) => number(left.data().sequence) - number(right.data().sequence));
-  let items: Record<string, unknown>[] = [];
-  for (const event of documents) {
-    const incoming = Array.isArray(event.data().items) ? event.data().items.filter(isObject) : [];
-    items = mergeProgressWindow(items, incoming);
-  }
-  return items.map((item) => ({
-    ...item,
-    displayKey: `live:${text(item.kind)}:${number(item.firstSequence)}`,
-  }));
-}
-
-function selectedPersistedProgressRunIds(): string[] {
-  return selectedHistoryEntries.filter((entry) => entry.role === "status").map((entry) => text(entry.runId)).filter(Boolean);
-}
-
-function progressSignature(items: Record<string, unknown>[]): string {
-  return items.map((item) => [
-    number(item.firstSequence),
-    number(item.sequence),
-    text(item.kind),
-    text(item.createdAt),
-    text(item.text).length,
-    text(item.details).length,
-  ].join(":")).join(",");
-}
-
 function renderDesktopRunProgress(run: Record<string, unknown>): void {
-  const activity = activityCountLabel(number(run.reasoningActivityCount), number(run.workActivityCount));
+  const activity = activityCountLabel(number(run.activityCount));
   const cancelling = pendingCancelRunId === text(run.id);
   elements.runProgress.hidden = false;
   elements.runProgressText.textContent = cancelling
@@ -1390,10 +1256,7 @@ function renderActiveTask(task: QueryDocumentSnapshot<DocumentData>): void {
   const runId = taskRunId(data);
   const isCancelTask = text(data.operation) === "cancel_run";
   const cloudRun = selectedDesktopRun();
-  const activity = activityCountLabel(
-    number(cloudRun?.reasoningActivityCount ?? data.reasoningActivityCount),
-    number(cloudRun?.workActivityCount ?? data.workActivityCount),
-  );
+  const activity = activityCountLabel(number(cloudRun?.activityCount ?? data.activityCount));
   const activityDetail = activity ? ` / ${activity}` : "";
   const cancelling = isCancelTask || pendingCancelRunId === runId;
   elements.runProgress.hidden = false;
@@ -1501,21 +1364,19 @@ function statusLabel(status: string): string {
 }
 
 function stopSubscriptions(): void {
-  deviceUnsubscribe?.(); taskUnsubscribe?.(); timelineUnsubscribe?.(); historyUnsubscribe?.();
+  deviceUnsubscribe?.(); taskUnsubscribe?.(); historyUnsubscribe?.();
   for (const unsubscribe of projectUnsubscribes.values()) unsubscribe();
   for (const unsubscribe of chatUnsubscribes.values()) unsubscribe();
   projectUnsubscribes.clear();
   chatUnsubscribes.clear();
-  deviceUnsubscribe = taskUnsubscribe = timelineUnsubscribe = historyUnsubscribe = undefined;
+  deviceUnsubscribe = taskUnsubscribe = historyUnsubscribe = undefined;
   subscribedDeviceId = "";
   renderedDeviceSignature = "";
-  timelineEvents = [];
   activeApproval = undefined;
   pendingCreatedChat = undefined;
   pendingCancelRunId = "";
   pendingCancelTaskId = "";
   optimisticInstructions = [];
-  expandedProgressIds.clear();
   runtimeKey = "";
   reasoningByModel = {};
   clearPendingAttachments();
@@ -1746,16 +1607,15 @@ function isObject(value: unknown): value is Record<string, unknown> { return typ
 function isArchived(value: DocumentData): boolean {
   return value.archived === true || value.archivedAt != null || value.deleted === true || value.deletedAt != null || value.status === "archived" || value.status === "deleted";
 }
-type HistoryEntry = { id?: unknown; role: "user" | "assistant" | "status"; content: string; createdAt?: string; kind?: unknown; runId?: unknown; activityKind?: unknown; activityDetails?: unknown };
+type HistoryEntry = { id?: unknown; role: "user" | "assistant"; content: string; createdAt?: string; kind?: unknown };
 
 function isHistoryEntry(value: unknown): value is HistoryEntry {
   return isObject(value)
-    && (value.role === "user" || value.role === "assistant" || value.role === "status")
+    && (value.role === "user" || value.role === "assistant")
     && typeof value.content === "string";
 }
-function historyKind(value: { role: "user" | "assistant" | "status"; kind?: unknown }): "instruction" | "work" | "conclusion" {
+function historyKind(value: { role: "user" | "assistant"; kind?: unknown }): "instruction" | "work" | "conclusion" {
   if (value.role === "user") return "instruction";
-  if (value.role === "status") return "work";
   return value.kind === "work" ? "work" : "conclusion";
 }
 function historyKindLabel(kind: "instruction" | "work" | "conclusion"): string {

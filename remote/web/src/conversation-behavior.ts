@@ -24,23 +24,6 @@ export function historyChunksAreComplete(expectedHashes: string[], actualChunks:
   return ordered.every((chunk, index) => chunk.index === index && chunk.hash === expectedHashes[index]);
 }
 
-export function mergeProgressWindow(
-  retained: Record<string, unknown>[],
-  incoming: Record<string, unknown>[],
-): Record<string, unknown>[] {
-  const merged = new Map<string, Record<string, unknown>>();
-  for (const item of [...retained, ...incoming]) {
-    const firstSequence = typeof item.firstSequence === "number" ? item.firstSequence : 0;
-    const kind = typeof item.kind === "string" ? item.kind : "work";
-    merged.set(`${firstSequence}:${kind}`, item);
-  }
-  return [...merged.values()].sort((left, right) => {
-    const leftSequence = typeof left.firstSequence === "number" ? left.firstSequence : 0;
-    const rightSequence = typeof right.firstSequence === "number" ? right.firstSequence : 0;
-    return leftSequence - rightSequence;
-  });
-}
-
 export function historyUpdatePosition(selectionChanged: boolean, wasNearEnd: boolean, endFollowPending = false): "end" | "preserve" {
   return selectionChanged || wasNearEnd || endFollowPending ? "end" : "preserve";
 }
@@ -140,21 +123,13 @@ export function composerDraftContextKey(deviceId: string, projectId: string, cha
   return deviceId && projectId ? JSON.stringify([deviceId, projectId, chatId || "@new-chat"]) : "";
 }
 
-export function shouldKeepCompletedProgress(runId: string, persistedRunIds: string[]): boolean {
-  return Boolean(runId) && !persistedRunIds.includes(runId);
-}
-
 export function isSupportedImageMimeType(type: string): boolean {
   return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(type.toLowerCase());
 }
 
-export function activityCountLabel(reasoningCount: number, workCount: number): string {
-  const reasoning = Math.max(0, Math.trunc(reasoningCount));
-  const work = Math.max(0, Math.trunc(workCount));
-  const total = reasoning + work;
-  if (!total) return "";
-  const details = [reasoning ? `思考 ${reasoning}` : "", work ? `作業 ${work}` : ""].filter(Boolean).join("・");
-  return `進行 ${total}件（${details}）`;
+export function activityCountLabel(activityCount: number): string {
+  const count = Math.max(0, Math.trunc(activityCount));
+  return count ? `進行 ${count}件` : "";
 }
 
 export function completedRunVersion(lastRunProgress: unknown): string {

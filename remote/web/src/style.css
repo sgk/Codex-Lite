@@ -100,23 +100,12 @@ input:focus, textarea:focus { border-color: #84adff; box-shadow: 0 0 0 3px #dbea
 .message { display: flex; max-width: 82%; flex-direction: column; gap: 4px; }
 .message.user { align-self: flex-end; align-items: flex-end; }
 .message.assistant { align-self: flex-start; align-items: flex-start; }
-.message.status { align-self: flex-start; align-items: flex-start; max-width: 92%; }
-.message.status .status-disclosure { max-width: 100%; }
-.message.status .status-summary { cursor: pointer; list-style-position: outside; line-height: 1.45; overflow-wrap: anywhere; }
-.message.status .status-summary::marker { color: #667085; }
-.status-summary-row { display: inline-flex; max-width: calc(100% - 16px); min-width: 0; align-items: baseline; gap: 10px; vertical-align: top; }
-.status-summary-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-summary-time { flex: 0 0 auto; color: #667085; white-space: nowrap; }
 .message-meta { color: #667085; font-size: 11px; }
 .message-bubble { max-width: 100%; padding: 10px 12px; border-radius: 10px; overflow-wrap: anywhere; font-size: 14px; line-height: 1.6; }
 .message.user .message-bubble { color: #123b7a; background: #eaf2ff; }
 .message.assistant .message-bubble { border: 1px solid #e4e7ec; color: #344054; background: #f8fafc; }
 .message.assistant.work .message-bubble { border-color: #e7c56b; color: #3f3a2a; background: #fff8e7; }
 .message.assistant.conclusion .message-bubble { border-color: #9bc89a; background: #f7fff8; }
-.message.status .message-bubble { margin-top: 5px; border: 1px solid #d6dce5; color: #475467; background: #f8fafc; white-space: pre-wrap; }
-.message.status .message-bubble > strong { display: block; margin-bottom: 5px; color: #344054; font-size: 12px; }
-.message.status.reasoning .message-bubble { border-color: #d6c7f7; color: #6941c6; background: #faf8ff; }
-.message.status.work .message-bubble { border-color: #e7c56b; color: #3f3a2a; background: #fff8e7; }
 .message.optimistic { opacity: .72; }
 .message.optimistic.failed { opacity: 1; }
 .message.optimistic.failed .message-meta { color: #b42318; }

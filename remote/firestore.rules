@@ -71,10 +71,6 @@ service cloud.firestore {
           allow read, write: if signedInAs(uid);
         }
 
-        match /timelineEvents/{eventId} {
-          allow read, write: if signedInAs(uid);
-        }
-
         match /tasks/{taskId} {
           allow read: if signedInAs(uid);
           allow create: if signedInAs(uid) && validTaskCreate();

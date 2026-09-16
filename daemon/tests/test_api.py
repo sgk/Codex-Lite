@@ -1340,15 +1340,16 @@ def test_remote_history_is_complete_and_redacted() -> None:
             {"role": "system", "content": "internal"},
             {"role": "assistant", "kind": "analysis", "content": "private reasoning"},
             {"id": "u1", "role": "user", "content": "read /home/sgk/project", "createdAt": "2026-08-28T00:00:00Z"},
+            {"id": "w1", "role": "assistant", "kind": "work", "content": "調査します", "createdAt": "2026-08-28T00:00:00.250Z"},
             {"id": "s1", "role": "status", "kind": "status", "content": "コマンドを実行しました", "activityDetails": "npm test\npassed", "activityKind": "work", "runId": "run-1", "createdAt": "2026-08-28T00:00:00.500Z"},
             {"id": "a1", "role": "assistant", "kind": "conclusion", "content": "Authorization: Bearer abcdefghijklmnop", "createdAt": "2026-08-28T00:00:01Z"},
         ],
         "/home/sgk/project",
     )
-    assert [item["id"] for item in history] == ["u1", "s1", "a1"]
+    assert [item["id"] for item in history] == ["u1", "w1", "a1"]
     assert history[0]["content"] == "read <local-project>"
-    assert history[1]["activityDetails"] == "npm test\npassed"
-    assert history[1]["activityKind"] == "work"
+    assert history[1]["content"] == "調査します"
+    assert history[1]["kind"] == "work"
     assert history[2]["content"] == "Authorization=<redacted>"
 
     many = _remote_history([
@@ -1362,8 +1363,7 @@ def test_remote_history_is_complete_and_redacted() -> None:
         }
         for index in range(100)
     ], "")
-    assert len(many) == 100
-    assert len(many[0]["activityDetails"]) == 13_000
+    assert many == []
 
 
 def test_remote_history_excludes_inline_image_data() -> None:
@@ -1389,9 +1389,7 @@ def test_remote_history_excludes_inline_image_data() -> None:
         "",
     )
 
-    assert [item["id"] for item in history] == ["image-status"]
-    assert history[0]["content"] == "画像を確認しました"
-    assert history[0]["activityDetails"] == ""
+    assert history == []
     assert "data:image/" not in str(history)
 
 
@@ -3367,7 +3365,7 @@ async def test_app_server_agent_message_boundary_is_published(linux_tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_app_server_agent_message_output_keeps_item_phase_and_stores_final_only(linux_tmp_path: Path) -> None:
+async def test_app_server_agent_message_output_keeps_item_phase_and_stores_completed_messages(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
     cfg = make_test_config(linux_tmp_path)
@@ -3389,6 +3387,7 @@ async def test_app_server_agent_message_output_keeps_item_phase_and_stores_final
     await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "comment_1", "type": "agentMessage", "text": "", "phase": "commentary"}}))
     await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "comment_1", "delta": "調査します。"}))
     await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "comment_1", "type": "agentMessage", "text": "調査します。", "phase": "commentary"}}))
+    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "comment_2", "type": "agentMessage", "text": "修正します。", "phase": "commentary"}}))
     await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "", "phase": "final_answer"}}))
     await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "final_1", "delta": "結論です。"}))
     await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "結論です。", "phase": "final_answer"}}))
@@ -3401,10 +3400,13 @@ async def test_app_server_agent_message_output_keeps_item_phase_and_stores_final
             break
 
     assert any('"messageId": "comment_1"' in event and '"phase": "commentary"' in event and "調査します。" in event for event in events)
+    assert any('"messageId": "comment_2"' in event and '"phase": "commentary"' in event and "修正します。" in event for event in events)
     assert any('"messageId": "final_1"' in event and '"phase": "final_answer"' in event and "結論です。" in event for event in events)
     stored_messages = messages.list_messages(project_id, chat_id)
     assert [(message["role"], message["content"], message["kind"]) for message in stored_messages] == [
         ("user", "hello", "instruction"),
+        ("assistant", "調査します。", "work"),
+        ("assistant", "修正します。", "work"),
         ("assistant", "結論です。", "conclusion"),
     ]
     db.close()
@@ -3450,6 +3452,7 @@ async def test_app_server_agent_message_phase_can_arrive_only_with_raw_response_
     stored_messages = messages.list_messages(project_id, chat_id)
     assert [(message["role"], message["content"], message["kind"]) for message in stored_messages] == [
         ("user", "hello", "instruction"),
+        ("assistant", "調査します。", "work"),
         ("assistant", "結論です。", "conclusion"),
     ]
     db.close()

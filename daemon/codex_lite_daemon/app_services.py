@@ -1153,6 +1153,8 @@ class AppServerRunService:
         run.revision += 1
         self._record_run_activity(run_id, run, force=True)
         final_answer_parts_by_item: dict[str, list[str]] = {}
+        agent_message_parts_by_item: dict[str, list[str]] = {}
+        completed_agent_message_ids: set[str] = set()
         agent_message_phases: dict[str, str] = {}
         pending_agent_message_parts: dict[str, list[str]] = {}
         reasoning_buffers: dict[tuple[str, str], list[str]] = {}
@@ -1189,6 +1191,8 @@ class AppServerRunService:
         async def publish_agent_output(item_id: str, delta: str, phase: str) -> None:
             if not delta:
                 return
+            if item_id:
+                agent_message_parts_by_item.setdefault(item_id, []).append(delta)
             if phase == "final_answer":
                 final_answer_parts_by_item.setdefault(item_id, []).append(delta)
             await self.events.publish(
@@ -1211,11 +1215,24 @@ class AppServerRunService:
             for item_id in list(pending_agent_message_parts):
                 await flush_pending_agent_output(item_id, agent_message_phases.get(item_id, ""))
 
-        async def publish_raw_agent_output(raw_item: dict[str, Any], phase: str) -> bool:
+        async def publish_completed_agent_message(item_id: str, phase: str) -> None:
+            if not item_id or item_id in completed_agent_message_ids:
+                return
+            content = "".join(agent_message_parts_by_item.get(item_id, []))
+            if not content.strip():
+                return
+            completed_agent_message_ids.add(item_id)
+            # Commentary is a user-visible, completed message (the orange
+            # "work" card), not transient reasoning. Persist it at its item
+            # boundary so Remote can sync it without waiting for the turn.
+            if phase == "commentary" and not run.adopted:
+                self.messages.insert_message(run.chat_id, "assistant", content, run_id=run_id, kind="work")
+
+        async def publish_raw_agent_output(raw_item: dict[str, Any], phase: str) -> str:
             raw_item_id = _raw_agent_message_item_id(raw_item)
             raw_text = _raw_agent_message_text(raw_item)
             if not raw_text:
-                return False
+                return ""
             for pending_item_id, parts in list(pending_agent_message_parts.items()):
                 pending_text = "".join(parts)
                 if not pending_text.startswith(raw_text):
@@ -1228,8 +1245,8 @@ class AppServerRunService:
                 output_item_id = raw_item_id or f"{pending_item_id}-raw-{len(agent_message_phases) + 1}"
                 agent_message_phases[output_item_id] = phase
                 await publish_agent_output(output_item_id, raw_text, phase)
-                return True
-            return False
+                return output_item_id
+            return ""
 
         def final_answer_text() -> str:
             if not final_answer_parts_by_item:
@@ -1387,7 +1404,9 @@ class AppServerRunService:
                 if raw_item is not None:
                     phase = _raw_agent_message_phase(raw_item)
                     if phase:
-                        await publish_raw_agent_output(raw_item, phase)
+                        completed_item_id = await publish_raw_agent_output(raw_item, phase)
+                        if completed_item_id:
+                            await publish_completed_agent_message(completed_item_id, phase)
                     continue
                 agent_item = _agent_message_item(notification)
                 if agent_item is not None:
@@ -1406,6 +1425,15 @@ class AppServerRunService:
                     if item_id and phase:
                         agent_message_phases[item_id] = phase
                         await flush_pending_agent_output(item_id, phase)
+                        if notification.method == "item/completed":
+                            completed_text = agent_item.get("text")
+                            if (
+                                isinstance(completed_text, str)
+                                and completed_text
+                                and not agent_message_parts_by_item.get(item_id)
+                            ):
+                                await publish_agent_output(item_id, completed_text, phase)
+                            await publish_completed_agent_message(item_id, phase)
                     if phase:
                         boundary = "completed" if notification.method == "item/completed" else "started"
                         await self.events.publish(
