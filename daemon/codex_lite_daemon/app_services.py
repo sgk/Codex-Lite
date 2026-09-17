@@ -19,6 +19,7 @@ from .app_server import SERVER_REQUEST_ID_KEY, AppServerClient, AppServerNotific
 from .deepseek import DEEPSEEK_PROVIDER, model_provider_for_model, read_deepseek_balance
 from .db import Database
 from .errors import AppError
+from .dynamic_tools import CodexLiteDynamicTools
 from .provider_context import PROVIDER_CONTEXT_PREFIX
 from .run_service import EventHub
 from .services import ChatService, MessageService, ProjectService
@@ -52,13 +53,14 @@ class AppServerRuntimeSettings:
 
 
 class AppServerThreadService:
-    def __init__(self, projects: ProjectService, chats: ChatService, messages: MessageService, transcripts: TranscriptImportService, app_server: AppServerClient, settings: AppServerRuntimeSettings) -> None:
+    def __init__(self, projects: ProjectService, chats: ChatService, messages: MessageService, transcripts: TranscriptImportService, app_server: AppServerClient, settings: AppServerRuntimeSettings, dynamic_tools: CodexLiteDynamicTools | None = None) -> None:
         self.projects = projects
         self.chats = chats
         self.messages = messages
         self.transcripts = transcripts
         self.app_server = app_server
         self.settings = settings
+        self.dynamic_tools = dynamic_tools
 
     async def list_chats(self, project_id: str, sync: bool = False) -> list[dict]:
         project = self.projects.get_project_row(project_id)
@@ -79,6 +81,7 @@ class AppServerThreadService:
             provider = model_provider_for_model(runtime_settings.model)
             if provider == DEEPSEEK_PROVIDER:
                 start_params["modelProvider"] = provider
+        _add_dynamic_tools(start_params, self.dynamic_tools)
         response = await app_server.request("thread/start", start_params)
         thread = response["thread"]
         await _apply_codex_lite_thread_settings(app_server, thread["id"], runtime_settings)
@@ -288,6 +291,7 @@ class AppServerThreadService:
             start_params["model"] = settings.model
             if provider == DEEPSEEK_PROVIDER:
                 start_params["modelProvider"] = provider
+        _add_dynamic_tools(start_params, self.dynamic_tools)
         response = await app_server.request("thread/start", start_params)
         thread = response.get("thread") or {}
         thread_id = thread.get("id")
@@ -420,6 +424,13 @@ def _runtime_settings_values(settings: AppServerRuntimeSettings) -> dict[str, st
     }
 
 
+def _add_dynamic_tools(params: dict[str, Any], dynamic_tools: CodexLiteDynamicTools | None) -> None:
+    if dynamic_tools is None:
+        return
+    params["dynamicTools"] = dynamic_tools.specs
+    params["developerInstructions"] = dynamic_tools.developer_instructions
+
+
 def _latest_provider(provider_threads: list[dict]) -> str | None:
     if not provider_threads:
         return None
@@ -467,7 +478,7 @@ async def _request_running_app_server(app_server: Any, method: str, params: dict
 
 
 class AppServerRunService:
-    def __init__(self, projects: ProjectService, threads: AppServerThreadService, messages: MessageService, app_server: AppServerClient, max_concurrent_runs: int, settings: AppServerRuntimeSettings, db: Database | None = None) -> None:
+    def __init__(self, projects: ProjectService, threads: AppServerThreadService, messages: MessageService, app_server: AppServerClient, max_concurrent_runs: int, settings: AppServerRuntimeSettings, db: Database | None = None, dynamic_tools: CodexLiteDynamicTools | None = None) -> None:
         self.projects = projects
         self.threads = threads
         self.chats = threads.chats
@@ -476,6 +487,7 @@ class AppServerRunService:
         self.max_concurrent_runs = max_concurrent_runs
         self.settings = settings
         self.db = db
+        self.dynamic_tools = dynamic_tools
         self.runs: dict[str, AppServerActiveRun] = {}
         self.events = EventHub(db)
         self._runtime_reconcile_locks: dict[str, asyncio.Lock] = {}
@@ -708,6 +720,7 @@ class AppServerRunService:
                 provider = model_provider_for_model(settings.model)
                 if provider == DEEPSEEK_PROVIDER:
                     resume_params["modelProvider"] = provider
+            _add_dynamic_tools(resume_params, self.dynamic_tools)
             await app_server.request("thread/resume", resume_params, timeout=120)
 
     def get_run(self, run_id: str) -> dict:
@@ -1348,6 +1361,24 @@ class AppServerRunService:
                 if SERVER_REQUEST_ID_KEY in notification.params:
                     raw_request_id = notification.params[SERVER_REQUEST_ID_KEY]
                     request_id = str(raw_request_id)
+                    if notification.method == "item/tool/call" and self.dynamic_tools is not None:
+                        execution = await self.dynamic_tools.execute(
+                            str(notification.params.get("tool") or ""),
+                            notification.params.get("arguments"),
+                            run.chat_id,
+                            run.thread_id,
+                            app_server,
+                        )
+                        await app_server.respond_server_request(raw_request_id, execution.response)
+                        await self.events.publish(
+                            run_id,
+                            "progress",
+                            {
+                                "method": f"item/tool/call/{notification.params.get('tool') or 'unknown'}",
+                                "summary": execution.summary,
+                            },
+                        )
+                        continue
                     if notification.method not in APPROVAL_REQUEST_METHODS:
                         rejecter = getattr(app_server, "reject_server_request", None)
                         message = f"Unsupported app-server request: {notification.method}"

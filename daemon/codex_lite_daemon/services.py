@@ -414,6 +414,33 @@ class ChatService:
         self.db.execute("UPDATE chats SET title = ?, title_override_at = ?, updated_at = ? WHERE id = ?", (clean_title, now, now, chat_id))
         return self.get_chat(project_id, chat_id)
 
+    def set_automatic_title(self, project_id: str, chat_id: str, title: str) -> bool:
+        self.get_chat_row(project_id, chat_id)
+        clean_title = _clean_title(title, allow_default=False)
+        if not clean_title:
+            raise AppError("validation_error", "Chat title must not be empty.")
+        now = utc_now()
+        cursor = self.db.execute(
+            """
+            UPDATE chats
+            SET title = ?, auto_title_set_at = ?, updated_at = ?
+            WHERE id = ? AND project_id = ?
+              AND title_override_at IS NULL AND auto_title_set_at IS NULL
+            """,
+            (clean_title, now, now, chat_id, project_id),
+        )
+        return bool(cursor.rowcount)
+
+    def clear_automatic_title(self, project_id: str, chat_id: str, previous_title: str) -> None:
+        self.db.execute(
+            """
+            UPDATE chats
+            SET title = ?, auto_title_set_at = NULL, updated_at = ?
+            WHERE id = ? AND project_id = ? AND title_override_at IS NULL
+            """,
+            (_clean_title(previous_title), utc_now(), chat_id, project_id),
+        )
+
     def update_chat_session_id(self, project_id: str, chat_id: str, codex_session_id: str) -> dict:
         self.get_chat_row(project_id, chat_id)
         self.db.execute("UPDATE chats SET codex_session_id = ?, updated_at = ? WHERE id = ?", (codex_session_id, utc_now(), chat_id))

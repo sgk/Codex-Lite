@@ -26,6 +26,7 @@ from .config import Config, load_config
 from .codex_state import CodexStateService
 from .deepseek import deepseek_model_ids, deepseek_reasoning_efforts, model_provider_for_model
 from .db import Database
+from .dynamic_tools import CodexLiteDynamicTools
 from .errors import AppError
 from .file_service import FileService
 from .process_env import codex_process_env
@@ -62,10 +63,11 @@ def create_app(config: Config | None = None) -> Starlette:
     transcript_import = TranscriptImportService(cfg, projects, chats, codex_state)
     app_settings = _load_app_settings(cfg)
     chats.seed_model_reasoning_history(app_settings.model, app_settings.reasoning_effort)
-    app_threads = AppServerThreadService(projects, chats, messages, transcript_import, app_servers, app_settings)
-    app_runs = AppServerRunService(projects, app_threads, messages, app_servers, cfg.max_concurrent_runs, app_settings, db=db)
-    app_usage = AppServerUsageService(app_servers)
     automations = AutomationService(db, projects, chats)
+    dynamic_tools = CodexLiteDynamicTools(chats, automations)
+    app_threads = AppServerThreadService(projects, chats, messages, transcript_import, app_servers, app_settings, dynamic_tools=dynamic_tools)
+    app_runs = AppServerRunService(projects, app_threads, messages, app_servers, cfg.max_concurrent_runs, app_settings, db=db, dynamic_tools=dynamic_tools)
+    app_usage = AppServerUsageService(app_servers)
     runs.recover_stale_runs()
     use_app_server = cfg.runner_mode == "app-server"
     automation_runner = SimpleNamespace(start_message_run=app_runs.submit_message) if use_app_server else runs

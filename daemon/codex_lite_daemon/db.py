@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS chats (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   title TEXT NOT NULL,
   title_override_at TEXT,
+  auto_title_set_at TEXT,
   codex_session_id TEXT,
   transcript_path TEXT,
   created_at TEXT NOT NULL,
@@ -175,6 +176,8 @@ class Database:
                 self._conn.execute("ALTER TABLE chats ADD COLUMN transcript_path TEXT")
             if "title_override_at" not in columns:
                 self._conn.execute("ALTER TABLE chats ADD COLUMN title_override_at TEXT")
+            if "auto_title_set_at" not in columns:
+                self._conn.execute("ALTER TABLE chats ADD COLUMN auto_title_set_at TEXT")
             if "can_continue" not in columns:
                 self._conn.execute("ALTER TABLE chats ADD COLUMN can_continue INTEGER NOT NULL DEFAULT 1")
             if "continue_disabled_reason" not in columns:

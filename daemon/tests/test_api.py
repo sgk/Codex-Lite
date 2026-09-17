@@ -18,6 +18,7 @@ from codex_lite_daemon.automation_service import AutomationService, _run_due_aut
 from codex_lite_daemon.codex_state import CodexStateService
 from codex_lite_daemon.config import Config, default_config
 from codex_lite_daemon.db import Database
+from codex_lite_daemon.dynamic_tools import CREATE_AUTOMATION_TOOL, SET_TITLE_TOOL, CodexLiteDynamicTools
 from codex_lite_daemon.errors import AppError
 from codex_lite_daemon.main import _attachment_path_to_wsl, _model_list_out, create_app, message_page
 from codex_lite_daemon.remote_gateway import _remote_attachments, _remote_history
@@ -100,6 +101,93 @@ def make_test_config(tmp_path: Path) -> Config:
 
 def make_runtime_settings(permission_profile: str = ":danger-full-access", approval_policy: str = "never", model: str = "", reasoning_effort: str = "", approvals_reviewer: str = "user") -> AppServerRuntimeSettings:
     return AppServerRuntimeSettings(permission_profile=permission_profile, approval_policy=approval_policy, model=model, reasoning_effort=reasoning_effort, approvals_reviewer=approvals_reviewer)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_tools_set_title_once_and_create_automation(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    db = Database(cfg.database_path)
+    db.migrate()
+    try:
+        projects = ProjectService(db, cfg)
+        chats = ChatService(db, projects)
+        automations = AutomationService(db, projects, chats)
+        project_id = projects.create_project(str(project_dir))["id"]
+        chat_id = chats.create_chat(project_id, "APIのエラーを調査して修正してください")["id"]
+        app_server = RecordingAppServer()
+        tools = CodexLiteDynamicTools(chats, automations)
+
+        renamed = await tools.execute(SET_TITLE_TOOL, {"title": "APIエラーの修正"}, chat_id, "thread_1", app_server)
+        assert renamed.response["success"] is True
+        assert chats.get_chat(project_id, chat_id)["title"] == "APIエラーの修正"
+        assert app_server.requests == [("thread/name/set", {"threadId": "thread_1", "name": "APIエラーの修正"})]
+
+        duplicate = await tools.execute(SET_TITLE_TOOL, {"title": "別タイトル"}, chat_id, "thread_1", app_server)
+        assert duplicate.response["success"] is True
+        assert chats.get_chat(project_id, chat_id)["title"] == "APIエラーの修正"
+        assert len(app_server.requests) == 1
+
+        manual_chat_id = chats.create_chat(project_id, "仮タイトル")["id"]
+        chats.update_chat(project_id, manual_chat_id, "利用者が付けたタイトル")
+        protected = await tools.execute(SET_TITLE_TOOL, {"title": "自動タイトル"}, manual_chat_id, "thread_2", app_server)
+        assert protected.response["success"] is True
+        assert chats.get_chat(project_id, manual_chat_id)["title"] == "利用者が付けたタイトル"
+        assert len(app_server.requests) == 1
+
+        created = await tools.execute(
+            CREATE_AUTOMATION_TOOL,
+            {
+                "name": "毎朝の確認",
+                "prompt": "テスト結果を確認してください。",
+                "schedule_kind": "daily_time",
+                "schedule_value": 570,
+                "enabled": True,
+            },
+            chat_id,
+            "thread_1",
+            app_server,
+        )
+        assert created.response["success"] is True
+        stored = automations.list_automations(project_id, chat_id)
+        assert [(item["name"], item["scheduleKind"], item["intervalMinutes"]) for item in stored] == [("毎朝の確認", "daily_time", 570)]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_thread_start_registers_codex_lite_dynamic_tools(linux_tmp_path: Path) -> None:
+    class StartingAppServer(RecordingAppServer):
+        async def request(self, method: str, params: dict) -> dict:
+            self.requests.append((method, params))
+            if method == "thread/start":
+                return {"thread": {"id": "thread_1", "sessionId": "thread_1", "createdAt": 1789628737, "updatedAt": 1789628737}}
+            return {}
+
+    cfg = make_test_config(linux_tmp_path)
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    db = Database(cfg.database_path)
+    db.migrate()
+    try:
+        projects = ProjectService(db, cfg)
+        chats = ChatService(db, projects)
+        messages = MessageService(db, chats)
+        automations = AutomationService(db, projects, chats)
+        project_id = projects.create_project(str(project_dir))["id"]
+        app_server = StartingAppServer()
+        transcripts = TranscriptImportService(cfg, projects, chats)
+        tools = CodexLiteDynamicTools(chats, automations)
+        service = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings(), dynamic_tools=tools)  # type: ignore[arg-type]
+
+        await service.create_chat(project_id, "仮タイトル")
+
+        start_params = app_server.requests[0][1]
+        assert start_params["developerInstructions"] == tools.developer_instructions
+        assert {item["name"] for item in start_params["dynamicTools"]} >= {SET_TITLE_TOOL, CREATE_AUTOMATION_TOOL}
+    finally:
+        db.close()
 
 
 def test_codex_runner_prefers_explicit_path_then_wsl_login_path(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3001,6 +3089,71 @@ async def test_app_server_command_approval_is_streamed_and_resolved(linux_tmp_pa
     )
     await asyncio.sleep(0)
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_app_server_dynamic_tool_call_creates_automation_and_responds(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    automations = AutomationService(db, projects, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = TurnStartAppServer()
+    dynamic_tools = CodexLiteDynamicTools(chats, automations)
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings(), dynamic_tools=dynamic_tools)  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings(), dynamic_tools=dynamic_tools)  # type: ignore[arg-type]
+
+    try:
+        project_id = projects.create_project(str(project_dir))["id"]
+        chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+        result = await runs.start_message_run(project_id, chat_id, "毎朝9時30分にテスト結果を確認して")
+        await app_server.subscribers[-1].put(
+            AppServerNotification(
+                "item/tool/call",
+                {
+                    "threadId": "thread_1",
+                    "turnId": "turn_1",
+                    "callId": "call_1",
+                    "tool": CREATE_AUTOMATION_TOOL,
+                    "arguments": {
+                        "name": "毎朝のテスト確認",
+                        "prompt": "テスト結果を確認してください。",
+                        "schedule_kind": "daily_time",
+                        "schedule_value": 570,
+                        "enabled": True,
+                    },
+                    SERVER_REQUEST_ID_KEY: 72,
+                },
+            )
+        )
+
+        events = []
+        async for event in runs.stream_events(result["runId"]):
+            events.append(event)
+            if f"item/tool/call/{CREATE_AUTOMATION_TOOL}" in event:
+                break
+
+        assert app_server.server_rejections == []
+        assert app_server.server_responses[0][0] == 72
+        assert app_server.server_responses[0][1]["success"] is True
+        assert [(item["name"], item["scheduleKind"], item["intervalMinutes"]) for item in automations.list_automations(project_id, chat_id)] == [
+            ("毎朝のテスト確認", "daily_time", 570)
+        ]
+
+        await app_server.subscribers[-1].put(
+            AppServerNotification(
+                "turn/completed",
+                {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "completed"}},
+            )
+        )
+        await asyncio.sleep(0)
+    finally:
+        db.close()
 
 
 @pytest.mark.asyncio
