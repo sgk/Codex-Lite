@@ -246,6 +246,8 @@ public partial class MainWindow : Window
     private bool _isSavingAutomation;
     private bool _isRunningAutomationNow;
     private bool _isLoadingAutomationSelection;
+    private bool _isEditingAutomation;
+    private AutomationDto? _automationEditorTarget;
     private bool _isComposerTextCompositionActive;
     private bool _isPreparingSend;
     private bool _isCheckingDaemonHealth;
@@ -263,7 +265,6 @@ public partial class MainWindow : Window
     private bool _isLoadingRuntimeSettings;
     private bool _isApplyingRuntimeSetting;
     private string _composerHistoryDraft = "";
-    private int _automationDraftCounter;
     private int? _composerHistoryIndex;
     private string? _composerHistoryContextChatId;
     private int _daemonHealthFailureCount;
@@ -4836,6 +4837,7 @@ public partial class MainWindow : Window
             {
                 _automations.Add(item);
             }
+            SetChatHasAutomation(chat.Id, _automations.Count > 0);
         }
         catch (Exception ex)
         {
@@ -4859,6 +4861,10 @@ public partial class MainWindow : Window
         {
             return;
         }
+        if (ReferenceEquals(sender, AutomationIntervalBox))
+        {
+            UpdateAutomationScheduleEditor();
+        }
         UpdateAutomationButtonState();
     }
 
@@ -4878,6 +4884,15 @@ public partial class MainWindow : Window
         UpdateAutomationScheduleEditor();
     }
 
+    private void AutomationScheduleKind_Changed(object sender, RoutedEventArgs e)
+    {
+        UpdateAutomationScheduleEditor();
+        if (!_isLoadingAutomationSelection)
+        {
+            UpdateAutomationButtonState();
+        }
+    }
+
     private void AutomationScheduleInput_Changed(object sender, SelectionChangedEventArgs e)
     {
         UpdateAutomationScheduleEditor();
@@ -4889,78 +4904,88 @@ public partial class MainWindow : Window
 
     private void UpdateAutomationScheduleEditor()
     {
-        if (AutomationIntervalPanel is null)
+        if (AutomationIntervalBox is null
+            || AutomationMinuteBox is null
+            || AutomationHourBox is null
+            || AutomationDailyMinuteBox is null
+            || AutomationIntervalRadio is null
+            || AutomationHourlyRadio is null
+            || AutomationDailyRadio is null
+            || AutomationScheduleSummaryText is null)
         {
             return;
         }
         var kind = AutomationScheduleKind();
-        AutomationIntervalPanel.Visibility = kind == "interval_minutes" ? Visibility.Visible : Visibility.Collapsed;
-        AutomationHourlyPanel.Visibility = kind == "hourly_minute" ? Visibility.Visible : Visibility.Collapsed;
-        AutomationDailyPanel.Visibility = kind == "daily_time" ? Visibility.Visible : Visibility.Collapsed;
-        AutomationScheduleHelpText.Text = kind switch
+        AutomationIntervalBox.IsEnabled = kind == "interval_minutes";
+        AutomationMinuteBox.IsEnabled = kind == "hourly_minute";
+        AutomationHourBox.IsEnabled = kind == "daily_time";
+        AutomationDailyMinuteBox.IsEnabled = kind == "daily_time";
+        AutomationScheduleSummaryText.Text = kind switch
         {
-            "hourly_minute" => "例: 15を選ぶと、毎時15分に実行します。",
-            "daily_time" => "選んだ時刻に毎日実行します（このPCのローカル時刻）。",
-            _ => "指定した分数ごとに実行します（1分以上）。"
+            "hourly_minute" when AutomationMinuteBox.SelectedItem is int minute => $"毎時 {minute:D2} 分に実行します。",
+            "daily_time" when AutomationHourBox.SelectedItem is int hour && AutomationDailyMinuteBox.SelectedItem is int dailyMinute
+                => $"毎日 {hour:D2}:{dailyMinute:D2} に実行します（このPCの時刻）。",
+            _ when int.TryParse(AutomationIntervalBox.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var interval) && interval >= 1
+                => $"{interval}分ごとに実行します。",
+            _ => "1分以上の間隔を入力してください。"
         };
     }
 
     private string AutomationScheduleKind()
     {
-        return (AutomationScheduleKindBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "interval_minutes";
+        if (AutomationDailyRadio.IsChecked == true) return "daily_time";
+        if (AutomationHourlyRadio.IsChecked == true) return "hourly_minute";
+        return "interval_minutes";
     }
 
     private void SelectAutomationScheduleKind(string scheduleKind)
     {
-        AutomationScheduleKindBox.SelectedItem = AutomationScheduleKindBox.Items
-            .OfType<ComboBoxItem>()
-            .FirstOrDefault(item => string.Equals(item.Tag as string, scheduleKind, StringComparison.Ordinal))
-            ?? AutomationScheduleKindBox.Items[0];
+        AutomationIntervalRadio.IsChecked = scheduleKind == "interval_minutes";
+        AutomationHourlyRadio.IsChecked = scheduleKind == "hourly_minute";
+        AutomationDailyRadio.IsChecked = scheduleKind == "daily_time";
     }
 
     private void AutomationsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (AutomationsGrid.SelectedItem is AutomationDto automation)
+        if (_isEditingAutomation)
         {
-            _isLoadingAutomationSelection = true;
-            try
-            {
-                AutomationNameBox.Text = automation.Name;
-                SelectAutomationScheduleKind(automation.ScheduleKind);
-                if (automation.ScheduleKind == "hourly_minute")
-                {
-                    AutomationMinuteBox.SelectedItem = automation.IntervalMinutes;
-                }
-                else if (automation.ScheduleKind == "daily_time")
-                {
-                    AutomationHourBox.SelectedItem = automation.IntervalMinutes / 60;
-                    AutomationDailyMinuteBox.SelectedItem = automation.IntervalMinutes % 60;
-                }
-                else
-                {
-                    AutomationIntervalBox.Text = automation.IntervalMinutes.ToString(CultureInfo.InvariantCulture);
-                }
-                AutomationEnabledBox.IsChecked = automation.Enabled;
-                AutomationPromptBox.Text = automation.Prompt;
-                UpdateAutomationScheduleEditor();
-            }
-            finally
-            {
-                _isLoadingAutomationSelection = false;
-            }
+            return;
         }
-        else
-        {
-            ClearAutomationEditor();
-        }
+        ShowSelectedAutomationDetails();
         UpdateAutomationButtonState();
+    }
+
+    private void ShowSelectedAutomationDetails()
+    {
+        if (AutomationsGrid.SelectedItem is not AutomationDto automation)
+        {
+            AutomationEmptyPanel.Visibility = Visibility.Visible;
+            AutomationDetailsPanel.Visibility = Visibility.Collapsed;
+            AutomationEditorPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+        AutomationDetailsNameText.Text = automation.Name;
+        AutomationDetailsStateText.Text = automation.DisplayState;
+        AutomationDetailsScheduleText.Text = automation.DisplaySchedule;
+        AutomationDetailsNextRunText.Text = $"次回実行: {automation.DisplayNextRunAt}";
+        AutomationDetailsLastRunText.Text = $"最終実行: {automation.DisplayLastRunAt}";
+        AutomationDetailsErrorText.Text = string.IsNullOrWhiteSpace(automation.LastError) ? "" : $"最終エラー: {automation.LastError}";
+        AutomationDetailsPromptText.Text = automation.Prompt;
+        ToggleAutomationButton.Content = automation.Enabled ? "無効にする" : "有効にする";
+        AutomationEmptyPanel.Visibility = Visibility.Collapsed;
+        AutomationDetailsPanel.Visibility = Visibility.Visible;
+        AutomationEditorPanel.Visibility = Visibility.Collapsed;
     }
 
     private void ClearAutomationContext()
     {
+        _isEditingAutomation = false;
+        _automationEditorTarget = null;
         AutomationsGrid.SelectedItem = null;
+        AutomationsGrid.IsEnabled = true;
         _automations.Clear();
         ClearAutomationEditor();
+        ShowSelectedAutomationDetails();
         UpdateAutomationButtonState();
     }
 
@@ -4987,7 +5012,15 @@ public partial class MainWindow : Window
 
     private void UpdateAutomationButtonState()
     {
-        if (CreateAutomationButton is null)
+        if (CreateAutomationButton is null
+            || RefreshAutomationsButton is null
+            || EditAutomationButton is null
+            || SaveAutomationButton is null
+            || CancelAutomationEditButton is null
+            || RunAutomationNowButton is null
+            || ToggleAutomationButton is null
+            || DeleteAutomationButton is null
+            || AutomationEditorPanel is null)
         {
             return;
         }
@@ -5000,25 +5033,27 @@ public partial class MainWindow : Window
             && hasValidSchedule;
         var selectedAutomation = AutomationsGrid.SelectedItem as AutomationDto;
         var hasSelection = selectedAutomation is not null;
-        var isDraft = selectedAutomation?.IsDraft == true;
-        var hasChanges = selectedAutomation is not null && AutomationEditorHasChanges(selectedAutomation, scheduleKind, scheduleValue);
+        var hasChanges = _isEditingAutomation && (_automationEditorTarget is null
+            || AutomationEditorHasChanges(_automationEditorTarget, scheduleKind, scheduleValue));
         var busy = _isRefreshingAutomations || _isSavingAutomation || _isRunningAutomationNow;
 
         RefreshAutomationsButton.IsEnabled = hasChat && !busy;
-        CreateAutomationButton.IsEnabled = hasChat && canContinue && !busy;
-        SaveAutomationButton.IsEnabled = hasChat && canContinue && hasSelection && hasInput && hasChanges && !busy;
-        RunAutomationNowButton.IsEnabled = hasChat && canContinue && !isDraft && selectedAutomation?.Enabled == true && selectedAutomation.Running == false && !busy;
-        ToggleAutomationButton.IsEnabled = hasChat && hasSelection && !isDraft && selectedAutomation?.Running == false && !busy;
-        DeleteAutomationButton.IsEnabled = hasChat && hasSelection && selectedAutomation?.Running == false && !busy;
-        AutomationEditorPanel.IsEnabled = hasChat && canContinue && hasSelection && !busy;
+        CreateAutomationButton.IsEnabled = hasChat && canContinue && !_isEditingAutomation && !busy;
+        EditAutomationButton.IsEnabled = hasChat && canContinue && hasSelection && !_isEditingAutomation && !busy;
+        SaveAutomationButton.IsEnabled = hasChat && canContinue && _isEditingAutomation && hasInput && hasChanges && !busy;
+        CancelAutomationEditButton.IsEnabled = _isEditingAutomation && !_isSavingAutomation;
+        RunAutomationNowButton.IsEnabled = hasChat && canContinue && selectedAutomation?.Enabled == true && selectedAutomation.Running == false && !_isEditingAutomation && !busy;
+        ToggleAutomationButton.IsEnabled = hasChat && hasSelection && selectedAutomation?.Running == false && !_isEditingAutomation && !busy;
+        DeleteAutomationButton.IsEnabled = hasChat && hasSelection && selectedAutomation?.Running == false && !_isEditingAutomation && !busy;
+        AutomationEditorPanel.IsEnabled = hasChat && canContinue && _isEditingAutomation && !busy;
 
         CreateAutomationButton.ToolTip = !hasChat
             ? "チャットを選択してください"
             : !canContinue
                 ? "このチャットでは継続できないため作成できません"
                 : null;
-        SaveAutomationButton.ToolTip = !hasSelection
-            ? "オートメーションを選択してください"
+        SaveAutomationButton.ToolTip = !_isEditingAutomation
+            ? "編集または新規作成を開始してください"
             : !canContinue
                 ? "このチャットでは継続できないため保存できません"
                 : !hasInput
@@ -5028,8 +5063,6 @@ public partial class MainWindow : Window
                         : null;
         RunAutomationNowButton.ToolTip = !hasSelection
             ? "オートメーションを選択してください"
-            : isDraft
-                ? "保存前のオートメーションは実行できません"
             : selectedAutomation?.Enabled != true
                 ? "無効なオートメーションは実行できません"
                 : selectedAutomation.Running
@@ -5043,29 +5076,65 @@ public partial class MainWindow : Window
         {
             return;
         }
-        var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
-        var draft = new AutomationDto(
-            $"local-automation-draft-{++_automationDraftCounter}",
-            _selectedProject.Id,
-            chat.Id,
-            "",
-            "",
-            "interval_minutes",
-            60,
-            true,
-            false,
-            null,
-            null,
-            null,
-            now,
-            now);
-        _automations.Add(draft);
-        AutomationsGrid.SelectedItem = draft;
-        AutomationsGrid.ScrollIntoView(draft);
-        StatusText.Text = "automation draft created";
+        BeginAutomationEdit(null);
+        StatusText.Text = "新しいオートメーションを編集中";
     }
 
-    private async Task CreateAutomationFromEditorAsync(ProjectDto project, ChatDto chat, AutomationDto? draft)
+    private void EditAutomation_Click(object sender, RoutedEventArgs e)
+    {
+        if (AutomationsGrid.SelectedItem is AutomationDto automation)
+        {
+            BeginAutomationEdit(automation);
+        }
+    }
+
+    private void BeginAutomationEdit(AutomationDto? automation)
+    {
+        _isEditingAutomation = true;
+        _automationEditorTarget = automation;
+        _isLoadingAutomationSelection = true;
+        try
+        {
+            AutomationEditorTitleText.Text = automation is null ? "新しいオートメーション" : "オートメーションを編集";
+            AutomationNameBox.Text = automation?.Name ?? "";
+            SelectAutomationScheduleKind(automation?.ScheduleKind ?? "interval_minutes");
+            AutomationIntervalBox.Text = (automation is { ScheduleKind: "interval_minutes" } ? automation.IntervalMinutes : 60).ToString(CultureInfo.InvariantCulture);
+            AutomationMinuteBox.SelectedItem = automation is { ScheduleKind: "hourly_minute" } ? automation.IntervalMinutes : 0;
+            AutomationHourBox.SelectedItem = automation is { ScheduleKind: "daily_time" } ? automation.IntervalMinutes / 60 : 9;
+            AutomationDailyMinuteBox.SelectedItem = automation is { ScheduleKind: "daily_time" } ? automation.IntervalMinutes % 60 : 0;
+            AutomationEnabledBox.IsChecked = automation?.Enabled ?? true;
+            AutomationPromptBox.Text = automation?.Prompt ?? "";
+            UpdateAutomationScheduleEditor();
+        }
+        finally
+        {
+            _isLoadingAutomationSelection = false;
+        }
+        AutomationsGrid.IsEnabled = false;
+        AutomationEmptyPanel.Visibility = Visibility.Collapsed;
+        AutomationDetailsPanel.Visibility = Visibility.Collapsed;
+        AutomationEditorPanel.Visibility = Visibility.Visible;
+        UpdateAutomationButtonState();
+        AutomationNameBox.Focus();
+    }
+
+    private void CancelAutomationEdit_Click(object sender, RoutedEventArgs e)
+    {
+        EndAutomationEdit();
+        StatusText.Text = "編集をキャンセルしました";
+    }
+
+    private void EndAutomationEdit()
+    {
+        _isEditingAutomation = false;
+        _automationEditorTarget = null;
+        AutomationsGrid.IsEnabled = true;
+        ClearAutomationEditor();
+        ShowSelectedAutomationDetails();
+        UpdateAutomationButtonState();
+    }
+
+    private async Task CreateAutomationFromEditorAsync(ProjectDto project, ChatDto chat)
     {
         if (!TryReadAutomationEditor(out var name, out var prompt, out var scheduleKind, out var scheduleValue))
         {
@@ -5076,14 +5145,12 @@ public partial class MainWindow : Window
             var created = await _client.CreateAutomationAsync(project.Id, chat.Id, name, prompt, scheduleKind, scheduleValue, AutomationEnabledBox.IsChecked == true);
             if (created is not null)
             {
-                if (draft is not null)
-                {
-                    _automations.Remove(draft);
-                }
                 _automations.Add(created);
                 AutomationsGrid.SelectedItem = created;
+                SetChatHasAutomation(chat.Id, true);
+                EndAutomationEdit();
             }
-            StatusText.Text = "automation created";
+            StatusText.Text = "オートメーションを作成しました";
             UpdateAutomationButtonState();
         }
         catch (Exception ex)
@@ -5118,7 +5185,7 @@ public partial class MainWindow : Window
 
     private async void SaveAutomation_Click(object sender, RoutedEventArgs e)
     {
-        if (_selectedProject is not ProjectDto project || _selectedChat is not ChatDto chat || AutomationsGrid.SelectedItem is not AutomationDto automation)
+        if (_selectedProject is not ProjectDto project || _selectedChat is not ChatDto chat || !_isEditingAutomation)
         {
             return;
         }
@@ -5130,17 +5197,18 @@ public partial class MainWindow : Window
         UpdateAutomationButtonState();
         try
         {
-            if (automation.IsDraft)
+            if (_automationEditorTarget is null)
             {
-                await CreateAutomationFromEditorAsync(project, chat, automation);
+                await CreateAutomationFromEditorAsync(project, chat);
                 return;
             }
-            var updated = await _client.UpdateAutomationAsync(project.Id, chat.Id, automation.Id, name, prompt, scheduleKind, scheduleValue, AutomationEnabledBox.IsChecked == true);
+            var updated = await _client.UpdateAutomationAsync(project.Id, chat.Id, _automationEditorTarget.Id, name, prompt, scheduleKind, scheduleValue, AutomationEnabledBox.IsChecked == true);
             if (updated is not null)
             {
                 ReplaceAutomation(updated);
+                EndAutomationEdit();
             }
-            StatusText.Text = "automation saved";
+            StatusText.Text = "オートメーションを保存しました";
         }
         catch (Exception ex)
         {
@@ -5245,13 +5313,6 @@ public partial class MainWindow : Window
         {
             return;
         }
-        if (automation.IsDraft)
-        {
-            _automations.Remove(automation);
-            ClearDeletedAutomationSelection();
-            StatusText.Text = "automation draft deleted";
-            return;
-        }
         if (System.Windows.MessageBox.Show(this, $"「{automation.Name}」を削除しますか？", "オートメーション削除", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK)
         {
             return;
@@ -5261,7 +5322,8 @@ public partial class MainWindow : Window
             await _client.DeleteAutomationAsync(project.Id, chat.Id, automation.Id);
             _automations.Remove(automation);
             ClearDeletedAutomationSelection();
-            StatusText.Text = "automation deleted";
+            SetChatHasAutomation(chat.Id, _automations.Count > 0);
+            StatusText.Text = "オートメーションを削除しました";
         }
         catch (Exception ex)
         {
@@ -5274,6 +5336,7 @@ public partial class MainWindow : Window
     {
         AutomationsGrid.SelectedItem = null;
         ClearAutomationEditor();
+        ShowSelectedAutomationDetails();
         UpdateAutomationButtonState();
     }
 
@@ -5287,10 +5350,12 @@ public partial class MainWindow : Window
             }
             _automations[index] = updated;
             AutomationsGrid.SelectedItem = updated;
+            ShowSelectedAutomationDetails();
             return;
         }
         _automations.Add(updated);
         AutomationsGrid.SelectedItem = updated;
+        ShowSelectedAutomationDetails();
         UpdateAutomationButtonState();
     }
 
@@ -5341,10 +5406,6 @@ public partial class MainWindow : Window
 
     private bool AutomationEditorHasChanges(AutomationDto automation, string scheduleKind, int scheduleValue)
     {
-        if (automation.IsDraft)
-        {
-            return true;
-        }
         return CleanAutomationName(AutomationNameBox.Text) != automation.Name
             || CleanAutomationPrompt(AutomationPromptBox.Text) != automation.Prompt
             || scheduleKind != automation.ScheduleKind
@@ -6055,6 +6116,19 @@ public partial class MainWindow : Window
             return _selectedProject?.Id;
         }
         return FindChatItem(chatId)?.Project.Id;
+    }
+
+    private void SetChatHasAutomation(string chatId, bool hasAutomation)
+    {
+        if (FindChatItem(chatId) is not { } item)
+        {
+            return;
+        }
+        item.SetHasAutomation(hasAutomation);
+        if (_selectedChat?.Id == chatId)
+        {
+            _selectedChat = item.Chat;
+        }
     }
 
     private void SetChatUnloadedHistoryIndicator(string projectId, string chatId, bool hasUnloadedHistory)

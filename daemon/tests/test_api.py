@@ -899,6 +899,10 @@ async def test_chat_automation_crud(linux_tmp_path: Path) -> None:
         chat = (await client.post(f"/projects/{project['id']}/chats", json={"title": "daily"})).json()
         prompt = "## Check\n\n- build\n- test\n\nReport with `git status`."
 
+        chats_before = (await client.get(f"/projects/{project['id']}/chats")).json()
+        assert chats_before[0]["hasAutomation"] is False
+        revision_before = (await client.get("/remote/v1/catalog?includeHistory=false")).json()["revision"]
+
         created = await client.post(
             f"/projects/{project['id']}/chats/{chat['id']}/automations",
             json={"name": "check", "prompt": f"\n{prompt}\n", "interval_minutes": 5, "enabled": True},
@@ -909,6 +913,13 @@ async def test_chat_automation_crud(linux_tmp_path: Path) -> None:
         assert automation["prompt"] == prompt
         assert automation["enabled"] is True
         assert automation["nextRunAt"] is not None
+
+        chats_after_create = (await client.get(f"/projects/{project['id']}/chats")).json()
+        assert chats_after_create[0]["hasAutomation"] is True
+        fetched_after_create = (await client.get(f"/projects/{project['id']}/chats/{chat['id']}")).json()
+        assert fetched_after_create["hasAutomation"] is True
+        revision_after_create = (await client.get("/remote/v1/catalog?includeHistory=false")).json()["revision"]
+        assert revision_after_create > revision_before
 
         listed = (await client.get(f"/projects/{project['id']}/chats/{chat['id']}/automations")).json()
         assert [item["id"] for item in listed] == [automation["id"]]
@@ -926,6 +937,10 @@ async def test_chat_automation_crud(linux_tmp_path: Path) -> None:
         deleted = await client.delete(f"/projects/{project['id']}/chats/{chat['id']}/automations/{automation['id']}")
         assert deleted.status_code == 204
         assert (await client.get(f"/projects/{project['id']}/chats/{chat['id']}/automations")).json() == []
+        chats_after_delete = (await client.get(f"/projects/{project['id']}/chats")).json()
+        assert chats_after_delete[0]["hasAutomation"] is False
+        revision_after_delete = (await client.get("/remote/v1/catalog?includeHistory=false")).json()["revision"]
+        assert revision_after_delete > revision_after_create
 
 
 @pytest.mark.asyncio
@@ -1167,14 +1182,15 @@ async def test_remote_gateway_exposes_sanitized_catalog_and_idempotent_send(linu
                     "id": project["id"],
                     "name": "Remote",
                     "chats": [
-                        {
-                            "id": chat["id"],
-                            "title": "Outside",
+                            {
+                                "id": chat["id"],
+                                "title": "Outside",
                                 "status": "idle",
                                 "updatedAt": chat["updatedAt"],
                                 "historyRevision": f"{chat['updatedAt']}|0||0||0",
                                 "history": [],
-                        }
+                                "hasAutomation": False,
+                            }
                     ],
                 }
             ],

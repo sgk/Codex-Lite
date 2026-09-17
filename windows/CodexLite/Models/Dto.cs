@@ -67,7 +67,8 @@ public sealed record ChatDto(
     string CreatedAt,
     string UpdatedAt,
     bool CanContinue = true,
-    string? ContinueDisabledReason = null);
+    string? ContinueDisabledReason = null,
+    bool HasAutomation = false);
 
 public sealed record AutomationDto(
     string Id,
@@ -85,13 +86,11 @@ public sealed record AutomationDto(
     string CreatedAt,
     string UpdatedAt)
 {
-    public bool IsDraft => Id.StartsWith("local-automation-draft-", StringComparison.Ordinal);
-
     public string DisplayNextRunAt => FormatLocalTime(NextRunAt);
 
     public string DisplayLastRunAt => FormatLocalTime(LastRunAt);
 
-    public string DisplayState => IsDraft ? "新規" : Running ? "実行中" : Enabled ? "有効" : "無効";
+    public string DisplayState => Running ? "実行中" : Enabled ? "有効" : "無効";
 
     public string DisplayEnabled => Enabled ? "有効" : "無効";
 

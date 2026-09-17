@@ -20,6 +20,7 @@ def chat_out(row: dict) -> dict:
         "updatedAt": row["updated_at"],
         "canContinue": bool(row.get("can_continue", 1)),
         "continueDisabledReason": row.get("continue_disabled_reason"),
+        "hasAutomation": bool(row.get("has_automation", 0)),
     }
 
 

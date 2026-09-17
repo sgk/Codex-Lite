@@ -604,6 +604,7 @@
                             </Grid.ContextMenu>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" MinWidth="0"/>
+                                <ColumnDefinition Width="16"/>
                                 <ColumnDefinition Width="14"/>
                                 <ColumnDefinition Width="24"/>
                             </Grid.ColumnDefinitions>
@@ -611,13 +612,13 @@
                                     Background="#2F6FED"
                                     VerticalAlignment="Top"
                                     Panel.ZIndex="2"
-                                    Grid.ColumnSpan="3"
+                                    Grid.ColumnSpan="4"
                                     Visibility="{Binding ShowDropBefore, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                             <Border Height="2"
                                     Background="#2F6FED"
                                     VerticalAlignment="Bottom"
                                     Panel.ZIndex="2"
-                                    Grid.ColumnSpan="3"
+                                    Grid.ColumnSpan="4"
                                     Visibility="{Binding ShowDropAfter, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                             <TextBlock Grid.Column="0" Text="{Binding Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" MinWidth="0" Margin="16,0,6,0">
                                 <TextBlock.Style>
@@ -649,7 +650,16 @@
                                     </Style>
                                 </TextBox.Style>
                             </TextBox>
-                            <Border Grid.Column="1"
+                            <TextBlock Grid.Column="1"
+                                       Text="&#xE121;"
+                                       FontFamily="Segoe MDL2 Assets"
+                                       FontSize="12"
+                                       Foreground="#667085"
+                                       ToolTip="オートメーション設定済み"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Visibility="{Binding HasAutomation, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                            <Border Grid.Column="2"
                                     Width="7"
                                     Height="7"
                                     CornerRadius="4"
@@ -672,7 +682,7 @@
                                     </Style>
                                 </Border.Style>
                             </Border>
-                            <Viewbox Grid.Column="1"
+                            <Viewbox Grid.Column="2"
                                      Width="12"
                                      Height="12"
                                      ToolTip="処理中"
@@ -717,7 +727,7 @@
                                     </EventTrigger>
                                 </Viewbox.Triggers>
                             </Viewbox>
-                            <Button Grid.Column="2" Content="..." Style="{StaticResource TreeInlineIconButton}" Click="ChatMenu_Click" Tag="{Binding}" IsEnabled="{Binding IsAvailable}">
+                            <Button Grid.Column="3" Content="..." Style="{StaticResource TreeInlineIconButton}" Click="ChatMenu_Click" Tag="{Binding}" IsEnabled="{Binding IsAvailable}">
                                 <Button.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Header="変更 (F2)" Click="RenameChatMenu_Click"
@@ -1637,96 +1647,17 @@
                 <TabItem x:Name="AutomationTab" Header="オートメーション">
                     <Grid Margin="8">
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="150"/>
+                            <RowDefinition Height="180"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <Border x:Name="AutomationEditorPanel"
-                                Background="#F6F8FA"
-                                Grid.Row="1"
-                                BorderBrush="#D6DCE5"
-                                BorderThickness="1"
-                                Padding="8"
-                                Margin="0,8,0,0">
-                            <Grid>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="Auto"/>
-                                </Grid.RowDefinitions>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBox x:Name="AutomationNameBox"
-                                         Grid.Column="0"
-                                         Margin="0,0,8,6"
-                                         Style="{StaticResource WatermarkTextBox}"
-                                         Tag="名前"
-                                         TextChanged="AutomationInput_TextChanged"/>
-                                <CheckBox x:Name="AutomationEnabledBox"
-                                          Grid.Column="1"
-                                          Content="有効"
-                                          IsChecked="True"
-                                          VerticalAlignment="Center"
-                                          Margin="0,0,8,6"
-                                          Checked="AutomationEnabledBox_Changed"
-                                          Unchecked="AutomationEnabledBox_Changed"/>
-                                <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,6">
-                                    <TextBlock Text="実行方式" VerticalAlignment="Center" Foreground="#555" Margin="0,0,6,0"/>
-                                    <ComboBox x:Name="AutomationScheduleKindBox" Width="150" Margin="0,0,10,0" SelectionChanged="AutomationScheduleInput_Changed">
-                                        <ComboBoxItem Content="一定間隔" Tag="interval_minutes" IsSelected="True"/>
-                                        <ComboBoxItem Content="毎時の分指定" Tag="hourly_minute"/>
-                                        <ComboBoxItem Content="毎日の時刻指定" Tag="daily_time"/>
-                                    </ComboBox>
-                                    <StackPanel x:Name="AutomationIntervalPanel" Orientation="Horizontal">
-                                        <TextBlock Text="何分ごと" VerticalAlignment="Center" Foreground="#555" Margin="0,0,6,0"/>
-                                        <TextBox x:Name="AutomationIntervalBox" Width="72" Style="{StaticResource WatermarkTextBox}" Tag="60" Text="60" TextChanged="AutomationInput_TextChanged"/>
-                                    </StackPanel>
-                                    <StackPanel x:Name="AutomationHourlyPanel" Orientation="Horizontal" Visibility="Collapsed">
-                                        <TextBlock Text="毎時" VerticalAlignment="Center" Foreground="#555" Margin="0,0,6,0"/>
-                                        <ComboBox x:Name="AutomationMinuteBox" Width="64" SelectionChanged="AutomationScheduleInput_Changed"/>
-                                        <TextBlock Text="分に実行" VerticalAlignment="Center" Foreground="#555" Margin="6,0,0,0"/>
-                                    </StackPanel>
-                                    <StackPanel x:Name="AutomationDailyPanel" Orientation="Horizontal" Visibility="Collapsed">
-                                        <TextBlock Text="毎日" VerticalAlignment="Center" Foreground="#555" Margin="0,0,6,0"/>
-                                        <ComboBox x:Name="AutomationHourBox" Width="64" SelectionChanged="AutomationScheduleInput_Changed"/>
-                                        <TextBlock Text="時" VerticalAlignment="Center" Foreground="#555" Margin="4,0"/>
-                                        <ComboBox x:Name="AutomationDailyMinuteBox" Width="64" SelectionChanged="AutomationScheduleInput_Changed"/>
-                                        <TextBlock Text="分に実行" VerticalAlignment="Center" Foreground="#555" Margin="4,0,0,0"/>
-                                    </StackPanel>
-                                    <TextBlock x:Name="AutomationScheduleHelpText" Text="指定した分数ごとに実行します（1分以上）。" VerticalAlignment="Center" Foreground="#666" Margin="12,0,0,0"/>
-                                </StackPanel>
-                                <TextBox x:Name="AutomationPromptBox"
-                                         Grid.Row="2"
-                                         Grid.ColumnSpan="2"
-                                         MinHeight="180"
-                                         VerticalAlignment="Stretch"
-                                         AcceptsReturn="True"
-                                         AcceptsTab="True"
-                                         TextWrapping="Wrap"
-                                         VerticalScrollBarVisibility="Auto"
-                                         Style="{StaticResource WatermarkTextBox}"
-                                         Tag="定期実行する指示（Markdown）"
-                                         TextChanged="AutomationInput_TextChanged"/>
-                                <StackPanel Grid.Row="3" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
-                                    <Button x:Name="RefreshAutomationsButton" Content="再読み込み" Click="RefreshAutomations_Click" Margin="0,0,8,0"/>
-                                    <Button x:Name="SaveAutomationButton" Content="保存" Click="SaveAutomation_Click" Margin="0,0,8,0"/>
-                                    <Button x:Name="RunAutomationNowButton" Content="今すぐ実行" Click="RunAutomationNow_Click" Margin="0,0,8,0"/>
-                                    <Button x:Name="ToggleAutomationButton" Content="有効/無効" Click="ToggleAutomation_Click" Margin="0,0,8,0"/>
-                                    <Button x:Name="DeleteAutomationButton" Content="削除" Click="DeleteAutomation_Click"/>
-                                </StackPanel>
-                            </Grid>
-                        </Border>
                         <Grid Grid.Row="0">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="*"/>
                             </Grid.RowDefinitions>
                             <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,6">
-                                <Button x:Name="CreateAutomationButton"
-                                        Content="新規"
-                                        Click="NewAutomation_Click"/>
+                                <Button x:Name="RefreshAutomationsButton" Content="再読み込み" Click="RefreshAutomations_Click" Margin="0,0,8,0"/>
+                                <Button x:Name="CreateAutomationButton" Content="新規作成" Click="NewAutomation_Click"/>
                             </StackPanel>
                             <DataGrid x:Name="AutomationsGrid"
                                       Grid.Row="1"
@@ -1738,14 +1669,151 @@
                                       SelectionChanged="AutomationsGrid_SelectionChanged">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="状態" Binding="{Binding DisplayState}" Width="70"/>
-                                    <DataGridTextColumn Header="名前" Binding="{Binding Name}" Width="160"/>
-                                    <DataGridTextColumn Header="実行予定" Binding="{Binding DisplaySchedule}" Width="120"/>
+                                    <DataGridTextColumn Header="名前" Binding="{Binding Name}" Width="180"/>
+                                    <DataGridTextColumn Header="実行予定" Binding="{Binding DisplaySchedule}" Width="130"/>
                                     <DataGridTextColumn Header="次回実行" Binding="{Binding DisplayNextRunAt}" Width="150"/>
                                     <DataGridTextColumn Header="最終実行" Binding="{Binding DisplayLastRunAt}" Width="150"/>
                                     <DataGridTextColumn Header="エラー" Binding="{Binding LastError}" Width="*"/>
                                 </DataGrid.Columns>
                             </DataGrid>
                         </Grid>
+                        <Border x:Name="AutomationEmptyPanel"
+                                Background="#F6F8FA"
+                                Grid.Row="1"
+                                BorderBrush="#D6DCE5"
+                                BorderThickness="1"
+                                Padding="20"
+                                Margin="0,8,0,0">
+                            <TextBlock Text="一覧からオートメーションを選択するか、「新規作成」を押してください。"
+                                       Foreground="#666"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       TextWrapping="Wrap"/>
+                        </Border>
+                        <Border x:Name="AutomationDetailsPanel"
+                                Visibility="Collapsed"
+                                Background="#F6F8FA"
+                                Grid.Row="1"
+                                BorderBrush="#D6DCE5"
+                                BorderThickness="1"
+                                Padding="12"
+                                Margin="0,8,0,0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="110"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="名前" Foreground="#666" Margin="0,0,8,8"/>
+                                <TextBlock x:Name="AutomationDetailsNameText" Grid.Column="1" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                                <TextBlock Grid.Row="1" Text="状態・実行予定" Foreground="#666" Margin="0,0,8,8"/>
+                                <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,8">
+                                    <TextBlock x:Name="AutomationDetailsStateText" FontWeight="SemiBold" Margin="0,0,16,0"/>
+                                    <TextBlock x:Name="AutomationDetailsScheduleText"/>
+                                </StackPanel>
+                                <TextBlock Grid.Row="2" Text="実行履歴" Foreground="#666" Margin="0,0,8,8"/>
+                                <StackPanel Grid.Row="2" Grid.Column="1" Margin="0,0,0,8">
+                                    <TextBlock x:Name="AutomationDetailsNextRunText"/>
+                                    <TextBlock x:Name="AutomationDetailsLastRunText" Margin="0,3,0,0"/>
+                                    <TextBlock x:Name="AutomationDetailsErrorText" Foreground="#B42318" Margin="0,3,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                                <TextBlock Grid.Row="3" Text="実行する指示" Foreground="#666" Margin="0,0,8,0"/>
+                                <TextBox x:Name="AutomationDetailsPromptText"
+                                         Grid.Row="3"
+                                         Grid.Column="1"
+                                         IsReadOnly="True"
+                                         AcceptsReturn="True"
+                                         TextWrapping="Wrap"
+                                         VerticalScrollBarVisibility="Auto"
+                                         Background="White"/>
+                                <StackPanel Grid.Row="4" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+                                    <Button x:Name="EditAutomationButton" Content="編集" Click="EditAutomation_Click" Margin="0,0,8,0"/>
+                                    <Button x:Name="RunAutomationNowButton" Content="今すぐ実行" Click="RunAutomationNow_Click" Margin="0,0,8,0"/>
+                                    <Button x:Name="ToggleAutomationButton" Content="有効/無効" Click="ToggleAutomation_Click" Margin="0,0,8,0"/>
+                                    <Button x:Name="DeleteAutomationButton" Content="削除" Click="DeleteAutomation_Click"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <Border x:Name="AutomationEditorPanel"
+                                Visibility="Collapsed"
+                                Background="#F6F8FA"
+                                Grid.Row="1"
+                                BorderBrush="#D6DCE5"
+                                BorderThickness="1"
+                                Padding="12"
+                                Margin="0,8,0,0">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="*"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <TextBlock x:Name="AutomationEditorTitleText" Text="オートメーションを編集" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                                <Grid Grid.Row="1" Margin="0,0,0,10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="AutomationNameBox" Margin="0,0,12,0" Style="{StaticResource WatermarkTextBox}" Tag="名前" TextChanged="AutomationInput_TextChanged"/>
+                                    <CheckBox x:Name="AutomationEnabledBox" Grid.Column="1" Content="保存後すぐ有効にする" IsChecked="True" VerticalAlignment="Center" Checked="AutomationEnabledBox_Changed" Unchecked="AutomationEnabledBox_Changed"/>
+                                </Grid>
+                                <Border Grid.Row="2" Background="White" BorderBrush="#D6DCE5" BorderThickness="1" Padding="10" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="実行予定" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,7">
+                                            <RadioButton x:Name="AutomationIntervalRadio" GroupName="AutomationSchedule" Content="一定間隔" Width="110" IsChecked="True" Checked="AutomationScheduleKind_Changed"/>
+                                            <TextBlock Text="" Width="4"/>
+                                            <TextBox x:Name="AutomationIntervalBox" Width="72" Style="{StaticResource WatermarkTextBox}" Tag="60" Text="60" TextChanged="AutomationInput_TextChanged"/>
+                                            <TextBlock Text="分ごとに実行" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                        </StackPanel>
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,7">
+                                            <RadioButton x:Name="AutomationHourlyRadio" GroupName="AutomationSchedule" Content="毎時" Width="110" Checked="AutomationScheduleKind_Changed"/>
+                                            <TextBlock Text="毎時" VerticalAlignment="Center" Margin="4,0,6,0"/>
+                                            <ComboBox x:Name="AutomationMinuteBox" Width="70" SelectionChanged="AutomationScheduleInput_Changed">
+                                                <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding StringFormat={}{0:D2}}"/></DataTemplate></ComboBox.ItemTemplate>
+                                            </ComboBox>
+                                            <TextBlock Text="分に実行" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                        </StackPanel>
+                                        <StackPanel Orientation="Horizontal">
+                                            <RadioButton x:Name="AutomationDailyRadio" GroupName="AutomationSchedule" Content="毎日" Width="110" Checked="AutomationScheduleKind_Changed"/>
+                                            <TextBlock Text="毎日" VerticalAlignment="Center" Margin="4,0,6,0"/>
+                                            <ComboBox x:Name="AutomationHourBox" Width="70" SelectionChanged="AutomationScheduleInput_Changed">
+                                                <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding StringFormat={}{0:D2}}"/></DataTemplate></ComboBox.ItemTemplate>
+                                            </ComboBox>
+                                            <TextBlock Text="時" VerticalAlignment="Center" Margin="5,0"/>
+                                            <ComboBox x:Name="AutomationDailyMinuteBox" Width="70" SelectionChanged="AutomationScheduleInput_Changed">
+                                                <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding StringFormat={}{0:D2}}"/></DataTemplate></ComboBox.ItemTemplate>
+                                            </ComboBox>
+                                            <TextBlock Text="分に実行" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                        </StackPanel>
+                                        <TextBlock x:Name="AutomationScheduleSummaryText" Foreground="#475467" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                </Border>
+                                <TextBox x:Name="AutomationPromptBox"
+                                         Grid.Row="3"
+                                         MinHeight="150"
+                                         VerticalAlignment="Stretch"
+                                         AcceptsReturn="True"
+                                         AcceptsTab="True"
+                                         TextWrapping="Wrap"
+                                         VerticalScrollBarVisibility="Auto"
+                                         Style="{StaticResource WatermarkTextBox}"
+                                         Tag="定期実行する指示（Markdown）"
+                                         TextChanged="AutomationInput_TextChanged"/>
+                                <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+                                    <Button x:Name="CancelAutomationEditButton" Content="キャンセル" Click="CancelAutomationEdit_Click" Margin="0,0,8,0"/>
+                                    <Button x:Name="SaveAutomationButton" Content="保存" Click="SaveAutomation_Click"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
                     </Grid>
                 </TabItem>
 

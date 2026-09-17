@@ -164,7 +164,13 @@ class ChatService:
     def list_chats(self, project_id: str) -> list[dict]:
         self.projects.get_project_row(project_id)
         rows = self.db.fetchall(
-            "SELECT * FROM chats WHERE project_id = ? AND archived_at IS NULL AND can_continue = 1 ORDER BY updated_at DESC, created_at DESC",
+            """
+            SELECT c.*,
+                   EXISTS(SELECT 1 FROM automations a WHERE a.project_id = c.project_id AND a.chat_id = c.id) AS has_automation
+            FROM chats c
+            WHERE c.project_id = ? AND c.archived_at IS NULL AND c.can_continue = 1
+            ORDER BY c.updated_at DESC, c.created_at DESC
+            """,
             (project_id,),
         )
         return [chat_out(row) for row in _dedupe_chat_rows(rows)]
@@ -183,7 +189,18 @@ class ChatService:
         return row
 
     def get_chat(self, project_id: str, chat_id: str) -> dict:
-        return chat_out(self.get_chat_row(project_id, chat_id))
+        row = self.db.fetchone(
+            """
+            SELECT c.*,
+                   EXISTS(SELECT 1 FROM automations a WHERE a.project_id = c.project_id AND a.chat_id = c.id) AS has_automation
+            FROM chats c
+            WHERE c.id = ? AND c.project_id = ?
+            """,
+            (chat_id, project_id),
+        )
+        if row is None:
+            raise AppError("chat_not_found", "Chat was not found.", 404)
+        return chat_out(row)
 
     def mark_resume_on_start(self, chat_ids: list[str]) -> int:
         now = utc_now()

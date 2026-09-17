@@ -57,6 +57,13 @@ test("デスクトップRunの開始と進行シーケンスを差分として�
   assert.deepEqual(diffCatalog(running, progressed).changedChats.map((item) => item.chat.id), ["chat-1"]);
 });
 
+test("オートメーション設定の有無をチャット差分として扱う", () => {
+  const current = structuredClone(first);
+  current[0].chats[0].hasAutomation = true;
+
+  assert.deepEqual(diffCatalog(first, current).changedChats.map((item) => item.chat.id), ["chat-1"]);
+});
+
 test("選択中は転送だけを優先し表示順の値を変更しない", () => {
   const changes = diffCatalog(undefined, first);
   const prioritized = prioritizeCatalogChanges(changes, first, "project-1", "chat-2");
@@ -87,6 +94,15 @@ test("起動時は軽量なクラウドカタログを前回同期状態とし�
       { id: "chat-1", projectId: "project-1", title: "First", status: "idle", historyRevision: "r1", syncOrder: 0 },
     ],
   ), first);
+});
+
+test("起動時にクラウドのオートメーション設定状態を復元する", () => {
+  const snapshot = cloudCatalogSnapshot(
+    [{ id: "project-1", name: "One", syncOrder: 0 }],
+    [{ id: "chat-1", projectId: "project-1", title: "First", status: "idle", historyRevision: "r1", syncOrder: 0, hasAutomation: true }],
+  );
+
+  assert.equal(snapshot[0].chats[0].hasAutomation, true);
 });
 
 test("起動時にクラウドへ残った実行中投影を差分削除対象にする", () => {

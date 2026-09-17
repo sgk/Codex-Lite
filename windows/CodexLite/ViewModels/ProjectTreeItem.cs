@@ -186,6 +186,8 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
 
     public string EditTitle { get; set; }
 
+    public bool HasAutomation => Chat.HasAutomation;
+
     private bool _isEditing;
     private bool _isArchiving;
     private bool _showDropBefore;
@@ -304,6 +306,7 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
     public void SetChat(ChatDto chat)
     {
         var titleChanged = Chat.Title != chat.Title;
+        var automationChanged = Chat.HasAutomation != chat.HasAutomation;
         Chat = chat;
         if (titleChanged)
         {
@@ -311,10 +314,25 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
         }
         OnPropertyChanged(nameof(Chat));
         OnPropertyChanged(nameof(Title));
+        if (automationChanged)
+        {
+            OnPropertyChanged(nameof(HasAutomation));
+        }
         if (titleChanged)
         {
             OnPropertyChanged(nameof(EditTitle));
         }
+    }
+
+    public void SetHasAutomation(bool hasAutomation)
+    {
+        if (Chat.HasAutomation == hasAutomation)
+        {
+            return;
+        }
+        Chat = Chat with { HasAutomation = hasAutomation };
+        OnPropertyChanged(nameof(Chat));
+        OnPropertyChanged(nameof(HasAutomation));
     }
 
     public void ResetEditTitle()

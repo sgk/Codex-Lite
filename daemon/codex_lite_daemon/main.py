@@ -346,7 +346,7 @@ def create_app(config: Config | None = None) -> Starlette:
 
     @post("/projects/{project_id}/chats/{chat_id}/automations")
     async def create_automation(project_id: str, chat_id: str, body: dict) -> dict:
-        return automations.create_automation(
+        automation = automations.create_automation(
             project_id,
             chat_id,
             _required_str(body, "name"),
@@ -355,6 +355,8 @@ def create_app(config: Config | None = None) -> Starlette:
             _optional_bool(body, "enabled", True),
             _optional_str(body, "schedule_kind") or "interval_minutes",
         )
+        remote_gateway.mark_catalog_changed(chat_id)
+        return automation
 
     @patch("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}")
     async def update_automation(project_id: str, chat_id: str, automation_id: str, body: dict) -> dict:
@@ -376,6 +378,7 @@ def create_app(config: Config | None = None) -> Starlette:
     @delete("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}", status_code=204)
     async def delete_automation(project_id: str, chat_id: str, automation_id: str) -> None:
         automations.delete_automation(project_id, chat_id, automation_id)
+        remote_gateway.mark_catalog_changed(chat_id)
 
     @delete("/projects/{project_id}/chats/{chat_id}", status_code=204)
     async def delete_chat(project_id: str, chat_id: str) -> None:

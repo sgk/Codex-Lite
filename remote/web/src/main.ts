@@ -468,6 +468,7 @@ function renderTree(): void {
           for (const chat of projectChats) {
             const chatRow = div("tree-row chat-row");
             const chatButton = treeButton("●", text(chat.data().title) || "New Chat", "chat", device.id === elements.device.value && project.id === elements.project.value && chat.id === elements.chat.value);
+            if (chat.data().hasAutomation === true) appendAutomationIndicator(chatButton);
             appendTreeIndicator(chatButton, chatIndicatorForDocument(device.id, chat), false);
             chatButton.addEventListener("click", () => selectChat(device.id, project.id, chat.id));
             chatRow.append(treeSpacer(), chatButton);
@@ -491,7 +492,7 @@ function treeSignature(): string {
     return `${key}:${text(project.data().displayName)}:${expandedProjectIds.has(key)}:${chats.map((chat) => {
       const activeRunStatus = isObject(chat.data().activeRun) ? text(chat.data().activeRun.status) : "";
       const unread = chatReadStates.get(chatReadKey(device.id, chat.id))?.unread === true;
-      return `${chat.id}:${text(chat.data().title)}:${chatTreeIndicator(activeRunStatus, unread)}`;
+      return `${chat.id}:${text(chat.data().title)}:${chat.data().hasAutomation === true}:${chatTreeIndicator(activeRunStatus, unread)}`;
     }).join(",")}`;
   }).join("|")).join("|");
   return `${elements.device.value}:${elements.project.value}:${elements.chat.value}:${[...expandedDeviceIds].join(",")}:${devicesSignature}:${projectsSignature}`;
@@ -510,6 +511,14 @@ function treeButton(icon: string, label: string, kind: "pc" | "project" | "chat"
 function chatIndicatorForDocument(deviceId: string, chat: QueryDocumentSnapshot<DocumentData>): "running" | "unread" | "none" {
   const activeRunStatus = isObject(chat.data().activeRun) ? text(chat.data().activeRun.status) : "";
   return chatTreeIndicator(activeRunStatus, chatReadStates.get(chatReadKey(deviceId, chat.id))?.unread === true);
+}
+
+function appendAutomationIndicator(button: HTMLButtonElement): void {
+  const indicator = document.createElement("span");
+  indicator.className = "tree-automation-indicator";
+  indicator.textContent = "◷";
+  indicator.title = "オートメーション設定済み";
+  button.append(indicator);
 }
 
 function appendTreeIndicator(button: HTMLButtonElement, indicator: "running" | "unread" | "none", project: boolean): void {
