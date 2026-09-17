@@ -7910,15 +7910,10 @@ public partial class MainWindow : Window
                     var terminalStatus = ExtractSseString(item.Data, "status");
                     if (item.Event == "done" && terminalStatus.Equals("succeeded", StringComparison.OrdinalIgnoreCase))
                     {
-                        var conclusionSynchronized = await ReconcileTerminalRunConclusionAsync(projectId, chatId, runId);
-                        if (!conclusionSynchronized)
-                        {
-                            AddTerminalRunNotice(
-                                projectId,
-                                chatId,
-                                runId,
-                                "応答は完了しましたが、保存済みの結論を取得できませんでした。");
-                        }
+                        // The completed stream already contains the visible answer.
+                        // Replacing it with the persisted row is best-effort and must
+                        // neither delay run completion nor fabricate an error answer.
+                        _ = ReconcileTerminalRunConclusionAsync(projectId, chatId, runId);
                     }
                     _lastRunEventSequenceByRun.Remove(runId);
                     break;
@@ -8010,86 +8005,60 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task<bool> ReconcileTerminalRunConclusionAsync(string projectId, string chatId, string runId)
+    private async Task ReconcileTerminalRunConclusionAsync(string projectId, string chatId, string runId)
     {
-        MessageDto? conclusion;
         try
         {
             using var timeout = new CancellationTokenSource(TerminalMessageSyncTimeout);
-            conclusion = await _client.GetRunConclusionAsync(runId, timeout.Token);
+            var conclusion = await _client.GetRunConclusionAsync(runId, timeout.Token);
+
+            if (conclusion is null)
+            {
+                WritePerformanceLog("terminal-conclusion-missing", $"runId={LogText(runId)}");
+                return;
+            }
+            if (!_chatHistoryCache.TryGetValue(ChatHistoryCacheKey(projectId, chatId), out var entry))
+            {
+                return;
+            }
+
+            var shouldFollow = _selectedProject?.Id == projectId
+                && _selectedChat?.Id == chatId
+                && IsMessagesScrolledNearEnd();
+            for (var i = entry.Messages.Count - 1; i >= 0; i--)
+            {
+                var message = entry.Messages[i];
+                if (message.Id.StartsWith("local-", StringComparison.Ordinal)
+                    && message.RunId == runId
+                    && (message.Kind.Equals("waiting", StringComparison.OrdinalIgnoreCase)
+                        || message.Kind.Equals("conclusion", StringComparison.OrdinalIgnoreCase)))
+                {
+                    entry.Messages.RemoveAt(i);
+                }
+            }
+
+            var existingIndex = entry.Messages.ToList().FindIndex(message => message.Id == conclusion.Id);
+            if (existingIndex >= 0)
+            {
+                entry.Messages[existingIndex] = conclusion;
+            }
+            else
+            {
+                InsertMessageInChronologicalOrder(entry.Messages, conclusion);
+            }
+            entry.TotalCount = Math.Max(entry.TotalCount, entry.Messages.Count(IsRealHistoryMessage));
+            if (shouldFollow)
+            {
+                ScrollMessagesToEnd();
+            }
+            WritePerformanceLog("terminal-conclusion-synchronized", $"runId={LogText(runId)} chars={conclusion.Content.Length}");
         }
         catch (Exception ex)
         {
             WritePerformanceLog(
                 "terminal-conclusion-sync-error",
                 $"runId={LogText(runId)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
-            return false;
         }
-
-        if (conclusion is null)
-        {
-            WritePerformanceLog("terminal-conclusion-missing", $"runId={LogText(runId)}");
-            return false;
-        }
-        if (!_chatHistoryCache.TryGetValue(ChatHistoryCacheKey(projectId, chatId), out var entry))
-        {
-            return true;
-        }
-
-        var shouldFollow = _selectedProject?.Id == projectId
-            && _selectedChat?.Id == chatId
-            && IsMessagesScrolledNearEnd();
-        for (var i = entry.Messages.Count - 1; i >= 0; i--)
-        {
-            var message = entry.Messages[i];
-            if (message.Id.StartsWith("local-", StringComparison.Ordinal)
-                && message.RunId == runId
-                && (message.Kind.Equals("waiting", StringComparison.OrdinalIgnoreCase)
-                    || message.Kind.Equals("conclusion", StringComparison.OrdinalIgnoreCase)))
-            {
-                entry.Messages.RemoveAt(i);
-            }
-        }
-
-        var existingIndex = entry.Messages.ToList().FindIndex(message => message.Id == conclusion.Id);
-        if (existingIndex >= 0)
-        {
-            entry.Messages[existingIndex] = conclusion;
-        }
-        else
-        {
-            InsertMessageInChronologicalOrder(entry.Messages, conclusion);
-        }
-        entry.TotalCount = Math.Max(entry.TotalCount, entry.Messages.Count(IsRealHistoryMessage));
-        if (shouldFollow)
-        {
-            ScrollMessagesToEnd();
-        }
-        WritePerformanceLog("terminal-conclusion-synchronized", $"runId={LogText(runId)} chars={conclusion.Content.Length}");
-        return true;
-    }
-
-    private void AddTerminalRunNotice(string projectId, string chatId, string runId, string content)
-    {
-        if (!_chatHistoryCache.TryGetValue(ChatHistoryCacheKey(projectId, chatId), out var entry))
-        {
-            return;
-        }
-        var messageId = $"local-terminal-notice-{runId}";
-        if (entry.Messages.Any(message => message.Id == messageId))
-        {
-            return;
-        }
-        InsertMessageInChronologicalOrder(
-            entry.Messages,
-            new MessageDto(
-                messageId,
-                chatId,
-                "assistant",
-                content,
-                runId,
-                DateTimeOffset.UtcNow.ToString("O"),
-                "conclusion"));
     }
 
     private static void InsertMessageInChronologicalOrder(ObservableCollection<MessageDto> messages, MessageDto message)
