@@ -147,6 +147,7 @@ public partial class MainWindow : Window
     private static readonly TimeSpan UiStallThreshold = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DaemonHealthCheckInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan AttachmentRetention = TimeSpan.FromDays(7);
+    private static readonly TimeSpan ComposerDraftSaveDelay = TimeSpan.FromMilliseconds(500);
     private const int ComposerHistoryLimit = 100;
     private const long PerformanceLogMaxBytes = 10L * 1024 * 1024;
     private const int PerformanceLogEventsPerSecond = 20;
@@ -178,6 +179,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _uiHeartbeatTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     private readonly DispatcherTimer _daemonHealthTimer = new() { Interval = DaemonHealthCheckInterval };
     private readonly DispatcherTimer _sendReadinessTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    private readonly DispatcherTimer _composerDraftSaveTimer = new() { Interval = ComposerDraftSaveDelay };
     private readonly DispatcherTimer _remotePriorityTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { WriteIndented = true };
     private readonly Stopwatch _performanceClock = Stopwatch.StartNew();
@@ -199,6 +201,8 @@ public partial class MainWindow : Window
     private readonly List<string> _persistedProjectOrderIds = new();
     private readonly Dictionary<string, List<string>> _persistedChatOrderIdsByProject = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<string>> _composerHistoryByChat = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _composerDraftsByChat = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _newChatComposerDraftsByProject = new(StringComparer.Ordinal);
     private readonly List<QueuedComposerSubmission> _queuedComposerSubmissions = new();
     private readonly ObservableCollection<QueuedComposerSubmission> _visibleComposerSubmissions = new();
     private string _textSizeSetting = "small";
@@ -261,12 +265,14 @@ public partial class MainWindow : Window
     private string _preparedSendModel = "";
     private DateTimeOffset _sendTransportPreparedAt = DateTimeOffset.MinValue;
     private bool _isApplyingComposerHistory;
+    private bool _isApplyingComposerDraft;
     private bool _isProcessingComposerQueue;
     private bool _isLoadingRuntimeSettings;
     private bool _isApplyingRuntimeSetting;
     private string _composerHistoryDraft = "";
     private int? _composerHistoryIndex;
     private string? _composerHistoryContextChatId;
+    private string? _activeComposerDraftContext;
     private int _daemonHealthFailureCount;
     private int _busyDepth;
     private int _activityDepth;
@@ -316,6 +322,11 @@ public partial class MainWindow : Window
         _messageRefreshTimer.Tick += MessageRefreshTimer_Tick;
         _daemonHealthTimer.Tick += DaemonHealthTimer_Tick;
         _sendReadinessTimer.Tick += SendReadinessTimer_Tick;
+        _composerDraftSaveTimer.Tick += (_, _) =>
+        {
+            _composerDraftSaveTimer.Stop();
+            SaveUiState();
+        };
         if (RemoteSyncFeature.IsEnabled)
         {
             _remotePriorityTimer.Tick += RemotePriorityTimer_Tick;
@@ -628,6 +639,7 @@ public partial class MainWindow : Window
         _uiHeartbeatTimer.Stop();
         _daemonHealthTimer.Stop();
         _sendReadinessTimer.Stop();
+        _composerDraftSaveTimer.Stop();
         _remotePriorityTimer.Stop();
         _reasoningProgressTimer.Stop();
         PersistExpandedStateFromTree();
@@ -2182,6 +2194,11 @@ public partial class MainWindow : Window
         {
             RememberSelectedChatHistory();
         }
+        foreach (var chatId in _projectTree[removedIndex].Chats.Select(item => item.Chat.Id))
+        {
+            _composerDraftsByChat.Remove(chatId);
+        }
+        _newChatComposerDraftsByProject.Remove(projectId);
         _projectTree.RemoveAt(removedIndex);
         foreach (var key in _chatHistoryCache
                      .Where(pair => pair.Value.ProjectId == projectId)
@@ -2394,6 +2411,22 @@ public partial class MainWindow : Window
             {
                 _persistedSelectedTabsByChat[legacySelectedChatId] = legacySelectedTab;
             }
+            _composerDraftsByChat.Clear();
+            foreach (var pair in state?.ComposerDraftsByChat ?? [])
+            {
+                if (!string.IsNullOrWhiteSpace(pair.Key) && !string.IsNullOrEmpty(pair.Value))
+                {
+                    _composerDraftsByChat[pair.Key] = pair.Value;
+                }
+            }
+            _newChatComposerDraftsByProject.Clear();
+            foreach (var pair in state?.NewChatComposerDraftsByProject ?? [])
+            {
+                if (!string.IsNullOrWhiteSpace(pair.Key) && !string.IsNullOrEmpty(pair.Value))
+                {
+                    _newChatComposerDraftsByProject[pair.Key] = pair.Value;
+                }
+            }
             ApplyFileTextWrapping();
             ApplyWindowPlacement(state?.Window);
             ApplyTreePaneWidth(state?.TreePaneWidth);
@@ -2411,6 +2444,8 @@ public partial class MainWindow : Window
             _persistedSelectedChatId = null;
             _persistedSelectedTab = null;
             _persistedSelectedTabsByChat.Clear();
+            _composerDraftsByChat.Clear();
+            _newChatComposerDraftsByProject.Clear();
             ApplyFileTextWrapping();
         }
         finally
@@ -2462,7 +2497,9 @@ public partial class MainWindow : Window
             selectedChatId,
             _persistedSelectedTab,
             chatOrderIdsByProject,
-            _persistedSelectedTabsByChat.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
+            _persistedSelectedTabsByChat.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+            _composerDraftsByChat.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+            _newChatComposerDraftsByProject.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
         File.WriteAllText(_uiStatePath, JsonSerializer.Serialize(state, _json));
     }
 
@@ -2980,6 +3017,7 @@ public partial class MainWindow : Window
     private void UpdateRightPaneVisibility()
     {
         RefreshVisibleComposerQueue();
+        RestoreCurrentComposerDraft();
         if (_treeLoadingDepth > 0)
         {
             MainTabs.Visibility = Visibility.Collapsed;
@@ -3874,6 +3912,7 @@ public partial class MainWindow : Window
 
     private void RememberSelectedChatHistory()
     {
+        RememberCurrentComposerDraft();
         var entry = CurrentChatHistoryCache();
         if (entry is null)
         {
@@ -6332,10 +6371,12 @@ public partial class MainWindow : Window
             RememberSelectedChatHistory();
         }
         projectItem.Chats.RemoveAt(removedIndex);
+        _composerDraftsByChat.Remove(chatId);
         RemoveChatHistoryCache(ChatHistoryCacheKey(projectItem.Project.Id, chatId));
 
         if (!removedWasSelected)
         {
+            SaveUiState();
             StatusText.Text = $"chat archived | {projectItem.Name}";
             return;
         }
@@ -6878,12 +6919,88 @@ public partial class MainWindow : Window
 
     private void MessageBox_TextChanged(object sender, TextChangedEventArgs e)
     {
+        if (!_isApplyingComposerDraft && sender is TextBox textBox)
+        {
+            RememberComposerDraft(textBox);
+            _composerDraftSaveTimer.Stop();
+            _composerDraftSaveTimer.Start();
+        }
         if (!_isApplyingComposerHistory)
         {
             _composerHistoryIndex = null;
             _composerHistoryDraft = "";
         }
         RefreshSendTransportReadiness();
+    }
+
+    private void RememberComposerDraft(TextBox textBox)
+    {
+        if (_selectedProject is not ProjectDto project)
+        {
+            return;
+        }
+        if (_selectedChat is ChatDto chat && ReferenceEquals(textBox, MessageBox))
+        {
+            SetComposerDraft(_composerDraftsByChat, chat.Id, textBox.Text);
+        }
+        else if (_selectedChat is null && ReferenceEquals(textBox, NewChatMessageBox))
+        {
+            SetComposerDraft(_newChatComposerDraftsByProject, project.Id, textBox.Text);
+        }
+    }
+
+    private void RememberCurrentComposerDraft()
+    {
+        if (_selectedProject is null)
+        {
+            return;
+        }
+        RememberComposerDraft(_selectedChat is null ? NewChatMessageBox : MessageBox);
+    }
+
+    private static void SetComposerDraft(Dictionary<string, string> drafts, string key, string content)
+    {
+        if (content.Length == 0)
+        {
+            drafts.Remove(key);
+        }
+        else
+        {
+            drafts[key] = content;
+        }
+    }
+
+    private void RestoreCurrentComposerDraft()
+    {
+        if (_selectedProject is not ProjectDto project)
+        {
+            _activeComposerDraftContext = null;
+            return;
+        }
+        var context = _selectedChat is ChatDto chat
+            ? $"chat:{chat.Id}"
+            : $"project:{project.Id}";
+        if (string.Equals(_activeComposerDraftContext, context, StringComparison.Ordinal))
+        {
+            return;
+        }
+        _activeComposerDraftContext = context;
+
+        var textBox = _selectedChat is null ? NewChatMessageBox : MessageBox;
+        var draft = _selectedChat is ChatDto selectedChat
+            ? _composerDraftsByChat.GetValueOrDefault(selectedChat.Id, "")
+            : _newChatComposerDraftsByProject.GetValueOrDefault(project.Id, "");
+        _isApplyingComposerDraft = true;
+        try
+        {
+            textBox.Text = draft;
+            textBox.CaretIndex = draft.Length;
+            textBox.SelectionLength = 0;
+        }
+        finally
+        {
+            _isApplyingComposerDraft = false;
+        }
     }
 
     private bool HandleComposerHistoryKey(TextBox textBox, System.Windows.Input.KeyEventArgs e)
@@ -9923,7 +10040,9 @@ public sealed record UiState(
     string? SelectedChatId = null,
     string? SelectedTab = null,
     Dictionary<string, List<string>>? ChatOrderIdsByProject = null,
-    Dictionary<string, string>? SelectedTabsByChat = null);
+    Dictionary<string, string>? SelectedTabsByChat = null,
+    Dictionary<string, string>? ComposerDraftsByChat = null,
+    Dictionary<string, string>? NewChatComposerDraftsByProject = null);
 
 public sealed record WindowPlacementState(
     double Left,
