@@ -118,11 +118,14 @@ async def test_dynamic_tools_set_title_once_and_create_automation(linux_tmp_path
         chat_id = chats.create_chat(project_id, "APIのエラーを調査して修正してください")["id"]
         app_server = RecordingAppServer()
         tools = CodexLiteDynamicTools(chats, automations)
+        changed_chat_ids: list[str] = []
+        tools.set_change_listener(changed_chat_ids.append)
 
         renamed = await tools.execute(SET_TITLE_TOOL, {"title": "APIエラーの修正"}, chat_id, "thread_1", app_server)
         assert renamed.response["success"] is True
         assert chats.get_chat(project_id, chat_id)["title"] == "APIエラーの修正"
         assert app_server.requests == [("thread/name/set", {"threadId": "thread_1", "name": "APIエラーの修正"})]
+        assert changed_chat_ids == [chat_id]
 
         duplicate = await tools.execute(SET_TITLE_TOOL, {"title": "別タイトル"}, chat_id, "thread_1", app_server)
         assert duplicate.response["success"] is True
@@ -135,6 +138,7 @@ async def test_dynamic_tools_set_title_once_and_create_automation(linux_tmp_path
         assert protected.response["success"] is True
         assert chats.get_chat(project_id, manual_chat_id)["title"] == "利用者が付けたタイトル"
         assert len(app_server.requests) == 1
+        assert changed_chat_ids == [chat_id]
 
         created = await tools.execute(
             CREATE_AUTOMATION_TOOL,
@@ -152,6 +156,7 @@ async def test_dynamic_tools_set_title_once_and_create_automation(linux_tmp_path
         assert created.response["success"] is True
         stored = automations.list_automations(project_id, chat_id)
         assert [(item["name"], item["scheduleKind"], item["intervalMinutes"]) for item in stored] == [("毎朝の確認", "daily_time", 570)]
+        assert changed_chat_ids == [chat_id, chat_id]
     finally:
         db.close()
 
@@ -2394,6 +2399,25 @@ def test_chat_index_preserves_local_title_override_against_newer_sync(linux_tmp_
 
     row = chats.get_chat(project_id, "thread_1")
     assert row["title"] == "Local renamed title"
+    db.close()
+
+
+def test_chat_index_preserves_automatic_title_against_newer_sync(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    project_id = projects.create_project(str(project_dir))["id"]
+
+    chats.upsert_chat_index(project_id, "thread_1", "最初の指示全文", "thread_1", "2026-06-30T00:00:00Z", "2026-06-30T00:00:00Z")
+    assert chats.set_automatic_title(project_id, "thread_1", "簡潔な自動タイトル") is True
+    chats.upsert_chat_index(project_id, "thread_1", "最初の指示全文", "thread_1", "2026-06-30T00:00:00Z", "2026-07-01T00:00:00Z")
+
+    row = chats.get_chat(project_id, "thread_1")
+    assert row["title"] == "簡潔な自動タイトル"
     db.close()
 
 

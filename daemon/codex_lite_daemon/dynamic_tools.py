@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .automation_service import AutomationService
 from .errors import AppError
@@ -26,6 +26,14 @@ class CodexLiteDynamicTools:
     def __init__(self, chats: ChatService, automations: AutomationService) -> None:
         self.chats = chats
         self.automations = automations
+        self._change_listener: Callable[[str], None] | None = None
+
+    def set_change_listener(self, listener: Callable[[str], None] | None) -> None:
+        self._change_listener = listener
+
+    def _notify_changed(self, chat_id: str) -> None:
+        if self._change_listener is not None:
+            self._change_listener(chat_id)
 
     @property
     def specs(self) -> list[dict[str, Any]]:
@@ -131,6 +139,7 @@ class CodexLiteDynamicTools:
                 except Exception:
                     self.chats.clear_automatic_title(project_id, chat_id, str(chat["title"]))
                     raise
+                self._notify_changed(chat_id)
                 return _success({"updated": True, "title": title}, f"タイトルを「{title}」に設定しました")
             if tool == LIST_AUTOMATIONS_TOOL:
                 items = self.automations.list_automations(project_id, chat_id)
@@ -145,6 +154,7 @@ class CodexLiteDynamicTools:
                     _required_boolean(args, "enabled"),
                     _required_string(args, "schedule_kind", 40),
                 )
+                self._notify_changed(chat_id)
                 return _success({"automation": item}, f"オートメーション「{item['name']}」を作成しました")
             if tool == UPDATE_AUTOMATION_TOOL:
                 automation_id = _required_string(args, "automation_id", 200)
@@ -161,11 +171,13 @@ class CodexLiteDynamicTools:
                     enabled=_optional_boolean(args, "enabled"),
                     schedule_kind=_optional_string(args, "schedule_kind", 40),
                 )
+                self._notify_changed(chat_id)
                 return _success({"automation": item}, f"オートメーション「{item['name']}」を更新しました")
             if tool == DELETE_AUTOMATION_TOOL:
                 automation_id = _required_string(args, "automation_id", 200)
                 item = self.automations.get_automation(project_id, chat_id, automation_id)
                 self.automations.delete_automation(project_id, chat_id, automation_id)
+                self._notify_changed(chat_id)
                 return _success({"deleted": True, "automationId": automation_id}, f"オートメーション「{item['name']}」を削除しました")
             raise AppError("dynamic_tool_not_found", f"未対応のCodex Liteツールです: {tool}", 400)
         except Exception as exc:

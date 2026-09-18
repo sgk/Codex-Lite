@@ -72,6 +72,7 @@ def create_app(config: Config | None = None) -> Starlette:
     use_app_server = cfg.runner_mode == "app-server"
     automation_runner = SimpleNamespace(start_message_run=app_runs.submit_message) if use_app_server else runs
     remote_gateway = RemoteGateway(db, projects, chats, app_threads, runs, app_runs, app_settings, transcript_import, use_app_server)
+    dynamic_tools.set_change_listener(remote_gateway.mark_catalog_changed)
     messages.set_insert_listener(remote_gateway.mark_catalog_changed)
     runs.events.set_lifecycle_listener(remote_gateway.mark_catalog_changed)
     app_runs.events.set_lifecycle_listener(remote_gateway.mark_catalog_changed)

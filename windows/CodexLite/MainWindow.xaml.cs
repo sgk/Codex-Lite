@@ -7835,6 +7835,10 @@ public partial class MainWindow : Window
                     var progress = ExtractSseText(item.Data);
                     var progressMethod = ExtractSseString(item.Data, "method");
                     var progressDetails = ExtractSseString(item.Data, "details");
+                    if (IsCodexLiteDynamicToolProgress(progressMethod))
+                    {
+                        await RefreshCodexLiteDynamicToolProjectionAsync(projectId, chatId, progressMethod);
+                    }
                     if (IsReasoningDeltaProgress(progressMethod))
                     {
                         QueueReasoningProgress(chatId, runId, progressMethod, ExtractReasoningDelta(progressDetails, progress));
@@ -8444,6 +8448,34 @@ public partial class MainWindow : Window
             || method.StartsWith("mcp_tool_call_", StringComparison.Ordinal)
             || method.StartsWith("apply_patch_", StringComparison.Ordinal)
             || method == "thread/settings/applied";
+    }
+
+    private static bool IsCodexLiteDynamicToolProgress(string method) =>
+        method.StartsWith("item/tool/call/codex_lite_", StringComparison.Ordinal);
+
+    private async Task RefreshCodexLiteDynamicToolProjectionAsync(string projectId, string chatId, string method)
+    {
+        try
+        {
+            if (FindProjectItem(projectId) is { } projectItem)
+            {
+                await LoadProjectChatsAsync(projectItem, chatId);
+            }
+
+            var changesAutomation = method.Equals("item/tool/call/codex_lite_create_automation", StringComparison.Ordinal)
+                || method.Equals("item/tool/call/codex_lite_update_automation", StringComparison.Ordinal)
+                || method.Equals("item/tool/call/codex_lite_delete_automation", StringComparison.Ordinal);
+            if (changesAutomation && _selectedProject?.Id == projectId && _selectedChat?.Id == chatId)
+            {
+                await RefreshAutomationsAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog(
+                "dynamic-tool-projection-refresh-error",
+                $"projectId={LogText(projectId)} chatId={LogText(chatId)} method={LogText(method)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+        }
     }
 
     private static bool IsAssistantMessageBoundaryProgress(string method)

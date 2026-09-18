@@ -366,7 +366,7 @@ class ChatService:
         created = created_at or now
         updated = updated_at or created
         archived_update = "archived_at = ?" if sync_archived else "archived_at = archived_at"
-        title_update = "title = CASE WHEN title_override_at IS NOT NULL AND title <> ? THEN title WHEN julianday(updated_at) > julianday(?) THEN title ELSE ? END"
+        title_update = "title = CASE WHEN (title_override_at IS NOT NULL OR auto_title_set_at IS NOT NULL) AND title <> ? THEN title WHEN julianday(updated_at) > julianday(?) THEN title ELSE ? END"
         title_override_update = "title_override_at = title_override_at"
         updated_update = "updated_at = CASE WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END"
         if codex_session_id:
@@ -391,7 +391,7 @@ class ChatService:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               project_id = excluded.project_id,
-              title = CASE WHEN chats.title_override_at IS NOT NULL AND chats.title <> excluded.title THEN chats.title WHEN julianday(chats.updated_at) > julianday(excluded.updated_at) THEN chats.title ELSE excluded.title END,
+              title = CASE WHEN (chats.title_override_at IS NOT NULL OR chats.auto_title_set_at IS NOT NULL) AND chats.title <> excluded.title THEN chats.title WHEN julianday(chats.updated_at) > julianday(excluded.updated_at) THEN chats.title ELSE excluded.title END,
               title_override_at = chats.title_override_at,
               codex_session_id = excluded.codex_session_id,
               transcript_path = COALESCE(excluded.transcript_path, chats.transcript_path),
