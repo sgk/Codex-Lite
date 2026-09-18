@@ -491,6 +491,10 @@ class AppServerRunService:
         self.runs: dict[str, AppServerActiveRun] = {}
         self.events = EventHub(db)
         self._runtime_reconcile_locks: dict[str, asyncio.Lock] = {}
+        # app-server accepts multiple active turns, but its thread preparation
+        # RPCs are not safe to overlap.  Serialize only the preparation through
+        # turn/start per provider; the turns themselves continue concurrently.
+        self._provider_turn_start_locks: dict[str, asyncio.Lock] = {}
         self._starting_chats: set[str] = set()
         self._submission_tasks: dict[str, asyncio.Task] = {}
         self._cancel_requested_submissions: set[str] = set()
@@ -628,37 +632,38 @@ class AppServerRunService:
             raise
         notification_queue: asyncio.Queue[AppServerNotification] | None = None
         try:
-            provider_thread = await self.threads.ensure_provider_thread(project_id, chat_id, project["path"], run_settings)
-            input_items = _build_turn_input(content, attachments or [])
-            if prior_context and (not bool(provider_thread.get("history_initialized")) or (last_provider is not None and last_provider != provider)):
-                input_items[0]["text"] = _provider_context_prompt(prior_context, str(input_items[0].get("text") or ""))
-            candidate_thread_ids = [str(provider_thread["thread_id"])]
-            legacy_id = chat.get("codex_session_id")
-            if provider == "openai" and legacy_id and str(legacy_id) not in candidate_thread_ids:
-                candidate_thread_ids.append(str(legacy_id))
-            notification_queue = app_server.subscribe_queue(candidate_thread_ids[0])
-            response = None
-            thread_id = candidate_thread_ids[0]
-            last_thread_not_found: AppError | None = None
-            for candidate_thread_id in candidate_thread_ids:
-                try:
-                    app_server.bind_queue(notification_queue, candidate_thread_id)
-                    response = await self._start_turn(app_server, candidate_thread_id, project["path"], input_items, run_settings)
-                    thread_id = candidate_thread_id
-                    break
-                except AppError as exc:
-                    if not _is_thread_not_found(exc):
-                        raise
-                    last_thread_not_found = exc
-            if response is None:
-                raise AppError(
-                    "thread_not_found",
-                    "Codex thread was not found by app-server. No replacement session was created.",
-                    404,
-                ) from last_thread_not_found
-            if thread_id != str(provider_thread["thread_id"]):
-                self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=bool(provider_thread.get("history_initialized")))
-            self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=True)
+            async with self._provider_turn_start_locks.setdefault(provider, asyncio.Lock()):
+                provider_thread = await self.threads.ensure_provider_thread(project_id, chat_id, project["path"], run_settings)
+                input_items = _build_turn_input(content, attachments or [])
+                if prior_context and (not bool(provider_thread.get("history_initialized")) or (last_provider is not None and last_provider != provider)):
+                    input_items[0]["text"] = _provider_context_prompt(prior_context, str(input_items[0].get("text") or ""))
+                candidate_thread_ids = [str(provider_thread["thread_id"])]
+                legacy_id = chat.get("codex_session_id")
+                if provider == "openai" and legacy_id and str(legacy_id) not in candidate_thread_ids:
+                    candidate_thread_ids.append(str(legacy_id))
+                notification_queue = app_server.subscribe_queue(candidate_thread_ids[0])
+                response = None
+                thread_id = candidate_thread_ids[0]
+                last_thread_not_found: AppError | None = None
+                for candidate_thread_id in candidate_thread_ids:
+                    try:
+                        app_server.bind_queue(notification_queue, candidate_thread_id)
+                        response = await self._start_turn(app_server, candidate_thread_id, project["path"], input_items, run_settings)
+                        thread_id = candidate_thread_id
+                        break
+                    except AppError as exc:
+                        if not _is_thread_not_found(exc):
+                            raise
+                        last_thread_not_found = exc
+                if response is None:
+                    raise AppError(
+                        "thread_not_found",
+                        "Codex thread was not found by app-server. No replacement session was created.",
+                        404,
+                    ) from last_thread_not_found
+                if thread_id != str(provider_thread["thread_id"]):
+                    self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=bool(provider_thread.get("history_initialized")))
+                self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=True)
         except (Exception, asyncio.CancelledError) as exc:
             if notification_queue is not None:
                 app_server.unsubscribe_queue(notification_queue)

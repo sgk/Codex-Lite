@@ -2581,6 +2581,62 @@ async def test_app_server_run_allows_parallel_different_chats(linux_tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_app_server_serializes_turn_start_handshake_per_provider(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+
+    class BlockingFirstTurnStart(TurnStartAppServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_turn_start_entered = asyncio.Event()
+            self.allow_first_turn_start = asyncio.Event()
+            self.turn_start_count = 0
+
+        async def request(self, method: str, params: dict) -> dict:
+            self.requests.append((method, params))
+            if method != "turn/start":
+                return {}
+            self.turn_start_count += 1
+            if self.turn_start_count == 1:
+                self.first_turn_start_entered.set()
+                await self.allow_first_turn_start.wait()
+            return {"turn": {"id": f"turn_{self.turn_start_count}"}}
+
+    app_server = BlockingFirstTurnStart()
+    threads = AppServerThreadService(projects, chats, messages, TranscriptImportService(cfg, projects, chats), app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=2, settings=make_runtime_settings())  # type: ignore[arg-type]
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_1 = chats.upsert_chat_index(project_id, "thread_1", "one", "thread_1", utc_now(), utc_now())["id"]
+    chat_2 = chats.upsert_chat_index(project_id, "thread_2", "two", "thread_2", utc_now(), utc_now())["id"]
+
+    first_task = asyncio.create_task(runs.start_message_run(project_id, chat_1, "hello 1"))
+    await asyncio.wait_for(app_server.first_turn_start_entered.wait(), timeout=1)
+    second_task = asyncio.create_task(runs.start_message_run(project_id, chat_2, "hello 2"))
+    await asyncio.sleep(0)
+
+    assert [method for method, _ in app_server.requests] == ["thread/settings/update", "turn/start"]
+    assert not second_task.done()
+
+    app_server.allow_first_turn_start.set()
+    first, second = await asyncio.gather(first_task, second_task)
+    assert first["runId"] != second["runId"]
+    assert [method for method, _ in app_server.requests] == [
+        "thread/settings/update",
+        "turn/start",
+        "thread/settings/update",
+        "turn/start",
+    ]
+    assert len(runs.list_active_runs()) == 2
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_run_rejects_parallel_same_chat(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
