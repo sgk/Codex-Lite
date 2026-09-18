@@ -2421,6 +2421,24 @@ def test_chat_index_preserves_automatic_title_against_newer_sync(linux_tmp_path:
     db.close()
 
 
+def test_chat_index_does_not_replace_concrete_title_with_new_chat(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    project_id = projects.create_project(str(project_dir))["id"]
+
+    chats.upsert_chat_index(project_id, "thread_1", "最初の指示文", "thread_1", "2026-06-30T00:00:00Z", "2026-06-30T00:00:00Z")
+    chats.upsert_chat_index(project_id, "thread_1", "New Chat", "thread_1", "2026-06-30T00:00:00Z", "2026-07-01T00:00:00Z")
+
+    row = chats.get_chat(project_id, "thread_1")
+    assert row["title"] == "最初の指示文"
+    db.close()
+
+
 def test_chat_index_keeps_local_title_override_when_sync_matches(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
@@ -4413,6 +4431,43 @@ def test_codex_state_sync_archives_stale_imported_rows(linux_tmp_path: Path) -> 
     assert [chat["id"] for chat in visible] == ["thr_active"]
     stale = db.fetchone("SELECT archived_at FROM chats WHERE id = ?", ("thr_old_jsonl",))
     assert stale is not None and stale["archived_at"] is not None
+    db.close()
+
+
+def test_codex_state_sync_keeps_recent_local_thread_until_state_db_catches_up(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    active_transcript = cfg.codex_home / "sessions" / "active.jsonl"
+    active_transcript.parent.mkdir(parents=True)
+    active_transcript.write_text(
+        json_line({"type": "session_meta", "payload": {"id": "thr_active", "cwd": str(project_dir), "timestamp": "2026-06-27T00:00:00Z"}}),
+        encoding="utf-8",
+    )
+    write_codex_state_db(
+        cfg,
+        [("thr_active", str(project_dir), "Active from DB", str(active_transcript), 0, 1_782_550_800_000, 1_782_550_801_000, None)],
+    )
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    transcripts = TranscriptImportService(cfg, projects, chats, CodexStateService(cfg))
+    project = projects.create_project(str(project_dir))
+    recent = utc_now()
+    chats.upsert_chat_index(
+        project["id"],
+        "thr_recent",
+        "最初の指示文",
+        "thr_recent",
+        recent,
+        recent,
+    )
+
+    transcripts.index_project(project)
+
+    visible = {chat["id"]: chat for chat in chats.list_chats(project["id"])}
+    assert visible["thr_recent"]["title"] == "最初の指示文"
     db.close()
 
 

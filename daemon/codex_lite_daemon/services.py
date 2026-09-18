@@ -12,6 +12,9 @@ from .util.ids import new_id
 from .util.time import utc_now
 
 
+CODEX_INDEX_VISIBILITY_GRACE_SECONDS = 120
+
+
 class ProjectService:
     def __init__(self, db: Database, config: Config) -> None:
         self.db = db
@@ -366,7 +369,12 @@ class ChatService:
         created = created_at or now
         updated = updated_at or created
         archived_update = "archived_at = ?" if sync_archived else "archived_at = archived_at"
-        title_update = "title = CASE WHEN (title_override_at IS NOT NULL OR auto_title_set_at IS NOT NULL) AND title <> ? THEN title WHEN julianday(updated_at) > julianday(?) THEN title ELSE ? END"
+        if clean_title.casefold() in {"new chat", "chat"}:
+            title_update = "title = CASE WHEN lower(title) NOT IN ('new chat', 'chat') THEN title WHEN julianday(updated_at) > julianday(?) THEN title ELSE ? END"
+            title_params: tuple[object, ...] = (updated, clean_title)
+        else:
+            title_update = "title = CASE WHEN (title_override_at IS NOT NULL OR auto_title_set_at IS NOT NULL) AND title <> ? THEN title WHEN julianday(updated_at) > julianday(?) THEN title ELSE ? END"
+            title_params = (clean_title, updated, clean_title)
         title_override_update = "title_override_at = title_override_at"
         updated_update = "updated_at = CASE WHEN julianday(updated_at) > julianday(?) THEN updated_at ELSE ? END"
         if codex_session_id:
@@ -381,7 +389,7 @@ class ChatService:
                     SET {title_update}, {title_override_update}, codex_session_id = ?, transcript_path = COALESCE(?, transcript_path), created_at = COALESCE(created_at, ?), {updated_update}, {archived_update}, can_continue = ?, continue_disabled_reason = ?
                     WHERE id = ?
                     """,
-                    _archived_params(clean_title, updated, clean_title, codex_session_id, transcript_path, created, updated, updated, archived_at, int(can_continue), continue_disabled_reason, existing["id"], sync_archived),
+                    _archived_params(*title_params, codex_session_id, transcript_path, created, updated, updated, archived_at, int(can_continue), continue_disabled_reason, existing["id"], sync_archived),
                 )
                 return self.get_chat(project_id, existing["id"])
         archived_conflict = "excluded.archived_at" if sync_archived else "chats.archived_at"
@@ -391,7 +399,7 @@ class ChatService:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               project_id = excluded.project_id,
-              title = CASE WHEN (chats.title_override_at IS NOT NULL OR chats.auto_title_set_at IS NOT NULL) AND chats.title <> excluded.title THEN chats.title WHEN julianday(chats.updated_at) > julianday(excluded.updated_at) THEN chats.title ELSE excluded.title END,
+              title = CASE WHEN lower(excluded.title) IN ('new chat', 'chat') AND lower(chats.title) NOT IN ('new chat', 'chat') THEN chats.title WHEN (chats.title_override_at IS NOT NULL OR chats.auto_title_set_at IS NOT NULL) AND chats.title <> excluded.title THEN chats.title WHEN julianday(chats.updated_at) > julianday(excluded.updated_at) THEN chats.title ELSE excluded.title END,
               title_override_at = chats.title_override_at,
               codex_session_id = excluded.codex_session_id,
               transcript_path = COALESCE(excluded.transcript_path, chats.transcript_path),
@@ -530,8 +538,9 @@ class ChatService:
               AND archived_at IS NULL
               {active_filter}
               AND (codex_session_id IS NOT NULL OR transcript_path IS NOT NULL)
+              AND julianday(created_at) <= julianday(?) - (? / 86400.0)
             """,
-            tuple(params),
+            (*params, now, CODEX_INDEX_VISIBILITY_GRACE_SECONDS),
         )
         return int(cursor.rowcount or 0)
 

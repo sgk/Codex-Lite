@@ -2048,7 +2048,8 @@ public partial class MainWindow : Window
 
         for (var index = projectItem.Chats.Count - 1; index >= 0; index--)
         {
-            if (!targetItems.Contains(projectItem.Chats[index]))
+            var existingItem = projectItem.Chats[index];
+            if (!targetItems.Contains(existingItem) && !IsChatRunning(existingItem.Chat.Id))
             {
                 projectItem.Chats.RemoveAt(index);
             }
