@@ -3658,6 +3658,7 @@ async def test_app_server_agent_message_output_keeps_item_phase_and_stores_compl
     await queue.put(AppServerNotification("item/started", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "", "phase": "final_answer"}}))
     await queue.put(AppServerNotification("item/agentMessage/delta", {**common, "itemId": "final_1", "delta": "結論です。"}))
     await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "final_1", "type": "agentMessage", "text": "結論です。", "phase": "final_answer"}}))
+    await queue.put(AppServerNotification("item/completed", {**common, "item": {"id": "final_2", "type": "agentMessage", "text": "追加指示後の結論です。", "phase": "final_answer"}}))
     await queue.put(AppServerNotification("turn/completed", {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "completed"}}))
 
     events = []
@@ -3675,6 +3676,7 @@ async def test_app_server_agent_message_output_keeps_item_phase_and_stores_compl
         ("assistant", "調査します。", "work"),
         ("assistant", "修正します。", "work"),
         ("assistant", "結論です。", "conclusion"),
+        ("assistant", "追加指示後の結論です。", "conclusion"),
     ]
     db.close()
 
@@ -3964,17 +3966,23 @@ async def test_get_run_conclusion_returns_only_the_saved_conclusion(linux_tmp_pa
         "INSERT INTO messages(id, chat_id, role, content, run_id, created_at, kind) VALUES ('msg_final', 'chat_1', 'assistant', 'finished', 'run_1', ?, 'conclusion')",
         (now,),
     )
+    db.execute(
+        "INSERT INTO messages(id, chat_id, role, content, run_id, created_at, kind) VALUES ('msg_final_2', 'chat_1', 'assistant', 'finished again', 'run_1', ?, 'conclusion')",
+        (now,),
+    )
     db.close()
 
     app = create_app(cfg)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         conclusion = await client.get("/runs/run_1/conclusion")
+        conclusions = await client.get("/runs/run_1/conclusions")
         missing_conclusion = await client.get("/runs/run_2/conclusion")
         missing_run = await client.get("/runs/not-found/conclusion")
 
     assert conclusion.status_code == 200
-    assert conclusion.json()["id"] == "msg_final"
-    assert conclusion.json()["content"] == "finished"
+    assert conclusion.json()["id"] == "msg_final_2"
+    assert conclusion.json()["content"] == "finished again"
+    assert [message["id"] for message in conclusions.json()] == ["msg_final", "msg_final_2"]
     assert missing_conclusion.status_code == 200
     assert missing_conclusion.json() is None
     assert missing_run.status_code == 404

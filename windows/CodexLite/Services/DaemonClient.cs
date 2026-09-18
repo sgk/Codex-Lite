@@ -516,6 +516,9 @@ public sealed class DaemonClient
     public Task<MessageDto?> GetRunConclusionAsync(string runId, CancellationToken cancellationToken = default) =>
         _http.GetFromJsonAsync<MessageDto>($"/runs/{runId}/conclusion", JsonOptions, cancellationToken);
 
+    public async Task<IReadOnlyList<MessageDto>> ListRunConclusionsAsync(string runId, CancellationToken cancellationToken = default) =>
+        await _http.GetFromJsonAsync<List<MessageDto>>($"/runs/{runId}/conclusions", JsonOptions, cancellationToken) ?? [];
+
     public Task<RemoteCatalogRevisionDto?> GetRemoteCatalogRevisionAsync(CancellationToken cancellationToken = default) =>
         _http.GetFromJsonAsync<RemoteCatalogRevisionDto>("/remote/v1/catalog-revision", JsonOptions, cancellationToken);
 

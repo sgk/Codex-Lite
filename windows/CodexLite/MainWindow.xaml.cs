@@ -8132,9 +8132,9 @@ public partial class MainWindow : Window
         try
         {
             using var timeout = new CancellationTokenSource(TerminalMessageSyncTimeout);
-            var conclusion = await _client.GetRunConclusionAsync(runId, timeout.Token);
+            var conclusions = await _client.ListRunConclusionsAsync(runId, timeout.Token);
 
-            if (conclusion is null)
+            if (conclusions.Count == 0)
             {
                 WritePerformanceLog("terminal-conclusion-missing", $"runId={LogText(runId)}");
                 return;
@@ -8152,28 +8152,45 @@ public partial class MainWindow : Window
                 var message = entry.Messages[i];
                 if (message.Id.StartsWith("local-", StringComparison.Ordinal)
                     && message.RunId == runId
-                    && (message.Kind.Equals("waiting", StringComparison.OrdinalIgnoreCase)
-                        || message.Kind.Equals("conclusion", StringComparison.OrdinalIgnoreCase)))
+                    && message.Kind.Equals("waiting", StringComparison.OrdinalIgnoreCase))
                 {
                     entry.Messages.RemoveAt(i);
                 }
             }
 
-            var existingIndex = entry.Messages.ToList().FindIndex(message => message.Id == conclusion.Id);
-            if (existingIndex >= 0)
+            var localConclusions = entry.Messages
+                .Where(message => message.Id.StartsWith("local-", StringComparison.Ordinal)
+                    && message.RunId == runId
+                    && message.Kind.Equals("conclusion", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var localIndex = 0;
+            foreach (var conclusion in conclusions)
             {
-                entry.Messages[existingIndex] = conclusion;
-            }
-            else
-            {
-                InsertMessageInChronologicalOrder(entry.Messages, conclusion);
+                var existingIndex = entry.Messages.ToList().FindIndex(message => message.Id == conclusion.Id);
+                if (existingIndex >= 0)
+                {
+                    entry.Messages[existingIndex] = conclusion;
+                }
+                else if (localIndex < localConclusions.Count)
+                {
+                    var localMessage = localConclusions[localIndex++];
+                    var replacementIndex = entry.Messages.IndexOf(localMessage);
+                    if (replacementIndex >= 0)
+                    {
+                        entry.Messages[replacementIndex] = conclusion;
+                    }
+                }
+                else
+                {
+                    InsertMessageInChronologicalOrder(entry.Messages, conclusion);
+                }
             }
             entry.TotalCount = Math.Max(entry.TotalCount, entry.Messages.Count(IsRealHistoryMessage));
             if (shouldFollow)
             {
                 ScrollMessagesToEnd();
             }
-            WritePerformanceLog("terminal-conclusion-synchronized", $"runId={LogText(runId)} chars={conclusion.Content.Length}");
+            WritePerformanceLog("terminal-conclusions-synchronized", $"runId={LogText(runId)} count={conclusions.Count}");
         }
         catch (Exception ex)
         {

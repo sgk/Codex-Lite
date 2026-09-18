@@ -1170,7 +1170,6 @@ class AppServerRunService:
         run.watcher_alive = True
         run.revision += 1
         self._record_run_activity(run_id, run, force=True)
-        final_answer_parts_by_item: dict[str, list[str]] = {}
         agent_message_parts_by_item: dict[str, list[str]] = {}
         completed_agent_message_ids: set[str] = set()
         agent_message_phases: dict[str, str] = {}
@@ -1211,8 +1210,6 @@ class AppServerRunService:
                 return
             if item_id:
                 agent_message_parts_by_item.setdefault(item_id, []).append(delta)
-            if phase == "final_answer":
-                final_answer_parts_by_item.setdefault(item_id, []).append(delta)
             await self.events.publish(
                 run_id,
                 "output",
@@ -1240,11 +1237,18 @@ class AppServerRunService:
             if not content.strip():
                 return
             completed_agent_message_ids.add(item_id)
-            # Commentary is a user-visible, completed message (the orange
-            # "work" card), not transient reasoning. Persist it at its item
-            # boundary so Remote can sync it without waiting for the turn.
-            if phase == "commentary" and not run.adopted:
-                self.messages.insert_message(run.chat_id, "assistant", content, run_id=run_id, kind="work")
+            # Every completed visible assistant item is a distinct message.
+            # A steered turn can contain more than one final_answer item, so
+            # keeping only the last one would erase the answer emitted before
+            # the additional user instruction.
+            if not run.adopted and phase in {"commentary", "final_answer"}:
+                kind = "work" if phase == "commentary" else "conclusion"
+                self.messages.insert_message(run.chat_id, "assistant", content, run_id=run_id, kind=kind)
+
+        async def complete_all_agent_messages() -> None:
+            await flush_all_pending_agent_output()
+            for item_id in list(agent_message_parts_by_item):
+                await publish_completed_agent_message(item_id, agent_message_phases.get(item_id, ""))
 
         async def publish_raw_agent_output(raw_item: dict[str, Any], phase: str) -> str:
             raw_item_id = _raw_agent_message_item_id(raw_item)
@@ -1265,11 +1269,6 @@ class AppServerRunService:
                 await publish_agent_output(output_item_id, raw_text, phase)
                 return output_item_id
             return ""
-
-        def final_answer_text() -> str:
-            if not final_answer_parts_by_item:
-                return ""
-            return "".join(next(reversed(final_answer_parts_by_item.values())))
 
         try:
             while True:
@@ -1315,15 +1314,12 @@ class AppServerRunService:
                             await asyncio.sleep(IDLE_RECONCILE_NOTIFICATION_GRACE_SECONDS)
                             if not notification_queue.empty():
                                 continue
-                            await flush_all_pending_agent_output()
+                            await complete_all_agent_messages()
                             run.status = "succeeded"
                             run.finished_at = utc_now()
                             run.terminal_reason = "thread_idle_reconciled"
                             run.revision += 1
                             self.chats.touch_provider_thread(run.chat_id, run.provider)
-                            final_answer = final_answer_text()
-                            if final_answer and not run.adopted:
-                                self.messages.insert_message(run.chat_id, "assistant", final_answer, run_id=run_id, kind="conclusion")
                             self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
                             await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0})
                             return
@@ -1524,17 +1520,17 @@ class AppServerRunService:
                         },
                     )
                 elif notification.method == "turn/completed":
-                    await flush_all_pending_agent_output()
                     turn = notification.params.get("turn") or {}
                     turn_status = str(turn.get("status") or "completed")
+                    if turn_status == "completed":
+                        await complete_all_agent_messages()
+                    else:
+                        await flush_all_pending_agent_output()
                     run.status = "succeeded" if turn_status == "completed" else "cancelled" if turn_status in {"cancelled", "interrupted"} else "failed"
                     run.finished_at = utc_now()
                     run.terminal_reason = f"turn_completed:{turn_status}"
                     run.revision += 1
                     self.chats.touch_provider_thread(run.chat_id, run.provider)
-                    final_answer = final_answer_text()
-                    if final_answer and not run.adopted:
-                        self.messages.insert_message(run.chat_id, "assistant", final_answer, run_id=run_id, kind="conclusion")
                     self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
                     await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
                     return

@@ -596,6 +596,21 @@ class MessageService:
         )
         return message_out(row) if row is not None else None
 
+    def list_run_conclusions(self, run_id: str) -> list[dict]:
+        run = self.db.fetchone("SELECT id FROM runs WHERE id = ?", (run_id,))
+        if run is None:
+            raise AppError("run_not_found", "Run was not found.", 404)
+        rows = self.db.fetchall(
+            """
+            SELECT *
+            FROM messages
+            WHERE run_id = ? AND role = 'assistant' AND kind = 'conclusion'
+            ORDER BY rtrim(created_at, 'Z') ASC, rowid ASC
+            """,
+            (run_id,),
+        )
+        return [message_out(row) for row in rows]
+
     def insert_message(self, chat_id: str, role: str, content: str, run_id: str | None = None, kind: str | None = None, created_at: str | None = None) -> dict:
         message_id = new_id("msg")
         now = created_at or utc_now()

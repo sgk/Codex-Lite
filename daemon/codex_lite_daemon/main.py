@@ -427,6 +427,10 @@ def create_app(config: Config | None = None) -> Starlette:
     async def get_run_conclusion(run_id: str) -> dict | None:
         return messages.get_run_conclusion(run_id)
 
+    @get("/runs/{run_id}/conclusions")
+    async def list_run_conclusions(run_id: str) -> list[dict]:
+        return messages.list_run_conclusions(run_id)
+
     @get("/runs")
     async def list_active_runs(request: Request) -> list[dict]:
         if use_app_server:
