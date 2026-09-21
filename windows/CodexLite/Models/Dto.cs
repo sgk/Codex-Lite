@@ -36,7 +36,37 @@ public sealed record UsageCapacityDto(
     string FetchedAt,
     string? Provider = null,
     CodexCreditsDto? CodexCredits = null,
-    DeepSeekBalanceDto? DeepSeekBalance = null);
+    DeepSeekBalanceDto? DeepSeekBalance = null,
+    UsageBreakdownDto? Breakdown = null);
+
+public sealed record UsageBreakdownDto(
+    string? CapturedSince,
+    UsageBreakdownWindowDto? FiveHour,
+    UsageBreakdownWindowDto? Weekly);
+
+public sealed record UsageBreakdownWindowDto(
+    string StartAt,
+    string ResetsAt,
+    long InputTokens,
+    long CachedInputTokens,
+    long CacheWriteInputTokens,
+    long OutputTokens,
+    long ReasoningOutputTokens,
+    long TotalTokens,
+    IReadOnlyList<UsageProjectBreakdownDto> Projects,
+    IReadOnlyList<UsageChatBreakdownDto> Chats);
+
+public sealed record UsageProjectBreakdownDto(
+    string ProjectId,
+    string Name,
+    long TotalTokens);
+
+public sealed record UsageChatBreakdownDto(
+    string ChatId,
+    string ProjectId,
+    string ProjectName,
+    string Title,
+    long TotalTokens);
 
 public sealed record UsageWindowDto(
     double UsedPercent,

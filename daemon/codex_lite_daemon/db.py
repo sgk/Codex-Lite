@@ -118,6 +118,36 @@ CREATE TABLE IF NOT EXISTS run_events (
   PRIMARY KEY(run_id, sequence)
 );
 
+CREATE TABLE IF NOT EXISTS token_usage_samples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  cached_input_tokens INTEGER NOT NULL,
+  cache_write_input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL,
+  reasoning_output_tokens INTEGER NOT NULL,
+  total_tokens INTEGER NOT NULL,
+  thread_total_signature TEXT NOT NULL,
+  model_context_window INTEGER,
+  UNIQUE(provider, thread_id, thread_total_signature)
+);
+
+CREATE TABLE IF NOT EXISTS usage_windows (
+  provider TEXT NOT NULL,
+  window_kind TEXT NOT NULL CHECK(window_kind IN ('five_hour', 'weekly')),
+  window_minutes INTEGER NOT NULL,
+  start_at TEXT NOT NULL,
+  resets_at TEXT NOT NULL,
+  used_percent REAL,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY(provider, window_kind)
+);
+
 CREATE TABLE IF NOT EXISTS automations (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -152,6 +182,8 @@ CREATE INDEX IF NOT EXISTS idx_chat_provider_threads_thread ON chat_provider_thr
 CREATE INDEX IF NOT EXISTS idx_model_reasoning_history_used ON model_reasoning_history(used_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_chat_started ON runs(chat_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_run_events_run_sequence ON run_events(run_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_token_usage_samples_recorded ON token_usage_samples(provider, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_token_usage_samples_chat ON token_usage_samples(chat_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_automations_chat ON automations(project_id, chat_id);
 CREATE INDEX IF NOT EXISTS idx_automations_due ON automations(enabled, running, next_run_at);
 CREATE INDEX IF NOT EXISTS idx_remote_tasks_updated ON remote_tasks(updated_at);

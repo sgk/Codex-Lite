@@ -872,7 +872,7 @@
                                 <Canvas x:Name="FiveHourUsageGraph" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,8,0,0" SizeChanged="UsageGraph_SizeChanged"/>
                             </Grid>
                         </Border>
-                        <Border BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="12">
+                        <Border BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="12" Margin="0,0,0,10">
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
@@ -886,6 +886,29 @@
                                 <TextBlock x:Name="WeeklyUsageText" Grid.Column="1" Text="未取得" Foreground="#666"/>
                                 <Canvas x:Name="WeeklyUsageGraph" Grid.Row="1" Grid.ColumnSpan="2" Margin="0,8,0,0" SizeChanged="UsageGraph_SizeChanged"/>
                             </Grid>
+                        </Border>
+                        <Border x:Name="UsageBreakdownBorder" BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="12">
+                            <StackPanel>
+                                <TextBlock Text="期間内のトークン使用量" Foreground="#333" FontWeight="SemiBold"/>
+                                <TextBlock Text="Codex Liteが取得できた応答分です。上の容量％とは単位が異なります。" Foreground="#667085" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,10"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="12"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
+                                        <TextBlock Text="5時間" FontWeight="SemiBold"/>
+                                        <TextBlock x:Name="FiveHourTokenTotalText" Text="未取得" Foreground="#475467" Margin="0,1,0,5"/>
+                                        <StackPanel x:Name="FiveHourTokenRankingPanel"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                        <TextBlock Text="1週間" FontWeight="SemiBold"/>
+                                        <TextBlock x:Name="WeeklyTokenTotalText" Text="未取得" Foreground="#475467" Margin="0,1,0,5"/>
+                                        <StackPanel x:Name="WeeklyTokenRankingPanel"/>
+                                    </StackPanel>
+                                </Grid>
+                            </StackPanel>
                         </Border>
                     </StackPanel>
                 </Grid>

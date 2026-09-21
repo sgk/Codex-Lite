@@ -89,6 +89,8 @@ Enterで送信し、改行操作は修飾キーを使う。送信履歴は上下
 
 プロジェクト選択時の新規チャット画面に、Codexから取得した5時間容量と1週間容量を数値とグラフで表示する。利用者は手動で再読み込みできる。使用状況を開いたときの自動更新と手動の再読み込みでは、モデル一覧も同時に更新する。この機能はapp-serverモードでのみ利用できる。
 
+app-serverの `thread/tokenUsage/updated` で取得できた各応答のトークン数を、プロジェクト・チャット・観測時刻とともにWSL側DBへ保存する。同じthread累計を持つ重複通知は二重計上しない。`account/rateLimits/read` の `resetsAt` とウィンドウ長から現在の5時間・1週間の範囲を定め、その範囲内に観測したトークン数をプロジェクト別・チャット別に集計し、WindowsクライアントとRemote Webへ表示する。リセット後は新しい範囲へ表示を切り替えるが、過去の観測レコードは削除しない。トークン数はレート制限の使用率と同じ単位ではなく、Codex Liteを起動して通知を取得できた応答だけの参考値であることを明記する。
+
 ### 4.5 設定
 
 次のUI設定をWindows側に保存し、次回起動時に復元する。
@@ -192,7 +194,7 @@ APIはWindowsクライアントおよび同一PC上のRemote Agent用のロー�
 | 分類 | 主なAPI |
 |---|---|
 | 稼働・設定 | `GET /health`、`GET /diagnostics`、`GET/PATCH /settings`、`POST /shutdown` |
-| 使用状況 | `GET /usage/capacity`（OpenAI/Codexの5時間・1週間容量、Codexクレジット、DeepSeek選択時の残高） |
+| 使用状況 | `GET /usage/capacity`（OpenAI/Codexの5時間・1週間容量、Codexクレジット、期間内の観測トークン内訳、DeepSeek選択時の残高）、`GET /usage/breakdown`（保存済みウィンドウに対する観測トークン内訳） |
 | プロジェクト | `GET/POST /projects`、`GET/PATCH/DELETE /projects/{id}`、`POST /projects/{id}/relocate`、履歴候補の一覧・取込 |
 | チャット | 一覧、作成、取得、名前変更、アーカイブ、削除 |
 | メッセージ | 一覧、カーソル付きページ取得、送信 |

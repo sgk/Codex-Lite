@@ -3094,6 +3094,7 @@ public partial class MainWindow : Window
             _weeklyUsageWindow = usage?.Weekly;
             _codexCredits = usage?.CodexCredits;
             _deepSeekBalance = usage?.DeepSeekBalance;
+            ApplyUsageBreakdown(usage?.Breakdown);
             if (provider == "openai")
             {
                 SetUsageCapacityText(FormatUsageWindow(_fiveHourUsageWindow), FormatUsageWindow(_weeklyUsageWindow));
@@ -3118,6 +3119,7 @@ public partial class MainWindow : Window
                 _weeklyUsageWindow = null;
                 _codexCredits = null;
                 _deepSeekBalance = null;
+                ApplyUsageBreakdown(null);
                 SetUsageBalanceText("取得不可", "取得不可", "");
                 RedrawUsageGraphs();
                 StatusText.Text = $"usage error | {ShortError(ex)}";
@@ -3180,6 +3182,84 @@ public partial class MainWindow : Window
         OpenAiUsagePanel.Visibility = Visibility.Visible;
         SetUsageCapacityText("未取得", "未取得");
         SetUsageBalanceText("未取得", "未取得", "");
+        ApplyUsageBreakdown(null);
+    }
+
+    private void ApplyUsageBreakdown(UsageBreakdownDto? breakdown)
+    {
+        ApplyUsageBreakdownWindow(FiveHourTokenTotalText, FiveHourTokenRankingPanel, breakdown?.FiveHour);
+        ApplyUsageBreakdownWindow(WeeklyTokenTotalText, WeeklyTokenRankingPanel, breakdown?.Weekly);
+    }
+
+    private static void ApplyUsageBreakdownWindow(TextBlock totalText, StackPanel rankingPanel, UsageBreakdownWindowDto? window)
+    {
+        rankingPanel.Children.Clear();
+        if (window is null)
+        {
+            totalText.Text = "未取得";
+            return;
+        }
+        totalText.Text = $"合計 {FormatTokenCount(window.TotalTokens)} tokens";
+        AddUsageRankingHeading(rankingPanel, "プロジェクト別");
+        foreach (var item in window.Projects.Take(5))
+        {
+            AddUsageRankingRow(rankingPanel, item.Name, item.TotalTokens);
+        }
+        if (window.Projects.Count == 0)
+        {
+            AddUsageRankingEmptyRow(rankingPanel);
+        }
+        AddUsageRankingHeading(rankingPanel, "チャット別");
+        foreach (var item in window.Chats.Take(5))
+        {
+            AddUsageRankingRow(rankingPanel, $"{item.ProjectName} / {item.Title}", item.TotalTokens);
+        }
+        if (window.Chats.Count == 0)
+        {
+            AddUsageRankingEmptyRow(rankingPanel);
+        }
+    }
+
+    private static void AddUsageRankingHeading(StackPanel panel, string text)
+    {
+        panel.Children.Add(new TextBlock
+        {
+            Text = text,
+            Foreground = new SolidColorBrush(Color.FromRgb(102, 112, 133)),
+            FontSize = 11,
+            Margin = new Thickness(0, 5, 0, 1),
+        });
+    }
+
+    private static void AddUsageRankingRow(StackPanel panel, string label, long tokens)
+    {
+        panel.Children.Add(new TextBlock
+        {
+            Text = $"{label}  {FormatTokenCount(tokens)}",
+            ToolTip = $"{label}: {tokens:N0} tokens",
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(52, 64, 84)),
+        });
+    }
+
+    private static void AddUsageRankingEmptyRow(StackPanel panel)
+    {
+        panel.Children.Add(new TextBlock
+        {
+            Text = "この期間の取得分なし",
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(152, 162, 179)),
+        });
+    }
+
+    private static string FormatTokenCount(long value)
+    {
+        return value >= 1_000_000
+            ? $"{value / 1_000_000d:0.0}M"
+            : value >= 1_000
+                ? $"{value / 1_000d:0.0}k"
+                : value.ToString("N0");
     }
 
     private void SetUsageProviderText(string provider)

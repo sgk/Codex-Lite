@@ -58,6 +58,7 @@ const elements = {
   approvalLevel: byId<HTMLSelectElement>("approval-level"), model: byId<HTMLSelectElement>("model"), reasoning: byId<HTMLSelectElement>("reasoning"), attachFile: byId<HTMLButtonElement>("attach-file"), fileInput: byId<HTMLInputElement>("file-input"), attachments: byId<HTMLElement>("attachments"), composer: byId<HTMLElement>("composer"),
   conversationBody: byId<HTMLElement>("conversation-body"), history: byId<HTMLElement>("history"), sendQueue: byId<HTMLElement>("send-queue"), error: byId<HTMLElement>("error"), runProgress: byId<HTMLElement>("run-progress"), runProgressText: byId<HTMLElement>("run-progress-text"), cancelRun: byId<HTMLButtonElement>("cancel-run"), approvalActions: byId<HTMLElement>("approval-actions"), approvalSummary: byId<HTMLElement>("approval-summary"),
   usagePanel: byId<HTMLElement>("usage-panel"), usageRefresh: byId<HTMLButtonElement>("usage-refresh"), usageProvider: byId<HTMLElement>("usage-provider"), usageFiveText: byId<HTMLElement>("usage-five-text"), usageWeekText: byId<HTMLElement>("usage-week-text"), usageCredits: byId<HTMLElement>("usage-credits"), usageFiveBar: byId<HTMLElement>("usage-five-bar"), usageWeekBar: byId<HTMLElement>("usage-week-bar"), usageFiveStart: byId<HTMLElement>("usage-five-start"), usageFiveEnd: byId<HTMLElement>("usage-five-end"), usageWeekStart: byId<HTMLElement>("usage-week-start"), usageWeekEnd: byId<HTMLElement>("usage-week-end"),
+  usageFiveTokens: byId<HTMLElement>("usage-five-tokens"), usageWeekTokens: byId<HTMLElement>("usage-week-tokens"), usageFiveProjects: byId<HTMLOListElement>("usage-five-projects"), usageWeekProjects: byId<HTMLOListElement>("usage-week-projects"), usageFiveChats: byId<HTMLOListElement>("usage-five-chats"), usageWeekChats: byId<HTMLOListElement>("usage-week-chats"),
   sidebar: document.querySelector<HTMLElement>(".sidebar")!, treeMenu: byId<HTMLButtonElement>("tree-menu"), sidebarBackdrop: byId<HTMLButtonElement>("sidebar-backdrop"),
   projectTree: byId<HTMLElement>("project-tree"), treeEmpty: byId<HTMLElement>("tree-empty"), breadcrumb: byId<HTMLElement>("breadcrumb"), conversationTitle: byId<HTMLElement>("conversation-title"), conversationStatus: byId<HTMLElement>("conversation-status"),
   approve: byId<HTMLButtonElement>("approve"), decline: byId<HTMLButtonElement>("decline"),
@@ -1613,11 +1614,47 @@ function applyUsage(usage: Record<string, unknown> | undefined, error: string): 
   elements.usageProvider.textContent = provider ? `提供元: ${provider === "deepseek" ? "DeepSeek" : "OpenAI / Codex"}` : "提供元: 取得不可";
   applyUsageWindow(elements.usageFiveText, elements.usageFiveBar, elements.usageFiveStart, elements.usageFiveEnd, usage && isObject(usage.fiveHour) ? usage.fiveHour : undefined, error);
   applyUsageWindow(elements.usageWeekText, elements.usageWeekBar, elements.usageWeekStart, elements.usageWeekEnd, usage && isObject(usage.weekly) ? usage.weekly : undefined, error);
+  const breakdown = usage && isObject(usage.breakdown) ? usage.breakdown : undefined;
+  applyUsageBreakdownWindow(elements.usageFiveTokens, elements.usageFiveProjects, elements.usageFiveChats, breakdown && isObject(breakdown.fiveHour) ? breakdown.fiveHour : undefined);
+  applyUsageBreakdownWindow(elements.usageWeekTokens, elements.usageWeekProjects, elements.usageWeekChats, breakdown && isObject(breakdown.weekly) ? breakdown.weekly : undefined);
   const credits = usage && isObject(usage.codexCredits) ? usage.codexCredits : undefined;
   const deepSeekBalance = usage && isObject(usage.deepseekBalance) ? usage.deepseekBalance : undefined;
   elements.usageCredits.textContent = isDeepSeek
     ? deepSeekBalanceLabel(deepSeekBalance)
     : credits ? remainingChargeLabel(credits) : error ? "取得不可" : "未取得";
+}
+
+function applyUsageBreakdownWindow(total: HTMLElement, projects: HTMLOListElement, chats: HTMLOListElement, window: Record<string, unknown> | undefined): void {
+  const totalTokens = window && typeof window.totalTokens === "number" ? window.totalTokens : undefined;
+  total.textContent = totalTokens === undefined ? "未取得" : `合計 ${formatTokenCount(totalTokens)} tokens`;
+  renderUsageRanking(projects, window && Array.isArray(window.projects) ? window.projects : [], "name");
+  renderUsageRanking(chats, window && Array.isArray(window.chats) ? window.chats : [], "title");
+}
+
+function renderUsageRanking(list: HTMLOListElement, rows: unknown[], labelKey: "name" | "title"): void {
+  list.replaceChildren();
+  const validRows = rows.filter(isObject).slice(0, 5);
+  if (validRows.length === 0) {
+    const item = document.createElement("li");
+    item.className = "empty";
+    item.textContent = "この期間の取得分なし";
+    list.append(item);
+    return;
+  }
+  for (const row of validRows) {
+    const item = document.createElement("li");
+    const label = labelKey === "title" ? `${text(row.projectName)} / ${text(row.title)}` : text(row.name);
+    const tokens = typeof row.totalTokens === "number" ? row.totalTokens : 0;
+    item.textContent = `${label}  ${formatTokenCount(tokens)}`;
+    item.title = `${label}: ${tokens.toLocaleString()} tokens`;
+    list.append(item);
+  }
+}
+
+function formatTokenCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return value.toLocaleString();
 }
 
 function applyUsageWindow(label: HTMLElement, bar: HTMLElement, startLabel: HTMLElement, endLabel: HTMLElement, window: Record<string, unknown> | undefined, error: string): void {

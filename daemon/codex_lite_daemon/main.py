@@ -36,6 +36,7 @@ from .runner.codex_runner import CodexRunner
 from .runner.fake_runner import FakeRunner
 from .services import ChatService, MessageService, ProjectService
 from .transcript_import import TranscriptImportService
+from .usage_tracking import UsageTrackingService
 
 
 _STATIC_OPENAI_MODELS = ["gpt-6-astra", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5", "gpt-5-codex"]
@@ -65,9 +66,10 @@ def create_app(config: Config | None = None) -> Starlette:
     chats.seed_model_reasoning_history(app_settings.model, app_settings.reasoning_effort)
     automations = AutomationService(db, projects, chats)
     dynamic_tools = CodexLiteDynamicTools(chats, automations)
+    usage_tracking = UsageTrackingService(db)
     app_threads = AppServerThreadService(projects, chats, messages, transcript_import, app_servers, app_settings, dynamic_tools=dynamic_tools)
-    app_runs = AppServerRunService(projects, app_threads, messages, app_servers, cfg.max_concurrent_runs, app_settings, db=db, dynamic_tools=dynamic_tools)
-    app_usage = AppServerUsageService(app_servers)
+    app_runs = AppServerRunService(projects, app_threads, messages, app_servers, cfg.max_concurrent_runs, app_settings, db=db, dynamic_tools=dynamic_tools, usage_tracking=usage_tracking)
+    app_usage = AppServerUsageService(app_servers, usage_tracking=usage_tracking)
     runs.recover_stale_runs()
     use_app_server = cfg.runner_mode == "app-server"
     automation_runner = SimpleNamespace(start_message_run=app_runs.submit_message) if use_app_server else runs
@@ -208,6 +210,11 @@ def create_app(config: Config | None = None) -> Starlette:
         capacity = await app_usage.read_capacity(model_provider_for_model(app_settings.model))
         capacity["provider"] = model_provider_for_model(app_settings.model)
         return capacity
+
+    @get("/usage/breakdown")
+    async def usage_breakdown() -> dict:
+        provider = model_provider_for_model(app_settings.model)
+        return {"provider": provider, "breakdown": usage_tracking.breakdown(provider)}
 
     @patch("/settings")
     async def update_settings(body: dict) -> dict:

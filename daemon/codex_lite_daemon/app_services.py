@@ -24,6 +24,7 @@ from .provider_context import PROVIDER_CONTEXT_PREFIX
 from .run_service import EventHub
 from .services import ChatService, MessageService, ProjectService
 from .transcript_import import TranscriptImportService
+from .usage_tracking import UsageTrackingService
 from .util.ids import new_id
 from .util.time import utc_now
 
@@ -343,9 +344,10 @@ class AppServerThreadService:
 
 
 class AppServerUsageService:
-    def __init__(self, app_server: AppServerClient, deepseek_balance_reader=read_deepseek_balance) -> None:
+    def __init__(self, app_server: AppServerClient, deepseek_balance_reader=read_deepseek_balance, usage_tracking: UsageTrackingService | None = None) -> None:
         self.app_server = app_server
         self.deepseek_balance_reader = deepseek_balance_reader
+        self.usage_tracking = usage_tracking
 
     async def read_capacity(self, provider: str = "openai") -> dict:
         if provider == DEEPSEEK_PROVIDER:
@@ -367,7 +369,7 @@ class AppServerUsageService:
             raise AppError("usage_unavailable", "Codex usage capacity was not available.", 502)
         primary = _usage_window(rate_limits.get("primary"))
         secondary = _usage_window(rate_limits.get("secondary"))
-        return {
+        result = {
             "fiveHour": _window_for_minutes([primary, secondary], 300),
             "weekly": _window_for_minutes([primary, secondary], 10080),
             "planType": rate_limits.get("planType") if isinstance(rate_limits.get("planType"), str) else None,
@@ -377,6 +379,10 @@ class AppServerUsageService:
             "deepseekBalance": None,
             "fetchedAt": utc_now(),
         }
+        if self.usage_tracking is not None:
+            self.usage_tracking.record_capacity(provider, result)
+            result["breakdown"] = self.usage_tracking.breakdown(provider)
+        return result
 
 
 @dataclass
@@ -478,7 +484,7 @@ async def _request_running_app_server(app_server: Any, method: str, params: dict
 
 
 class AppServerRunService:
-    def __init__(self, projects: ProjectService, threads: AppServerThreadService, messages: MessageService, app_server: AppServerClient, max_concurrent_runs: int, settings: AppServerRuntimeSettings, db: Database | None = None, dynamic_tools: CodexLiteDynamicTools | None = None) -> None:
+    def __init__(self, projects: ProjectService, threads: AppServerThreadService, messages: MessageService, app_server: AppServerClient, max_concurrent_runs: int, settings: AppServerRuntimeSettings, db: Database | None = None, dynamic_tools: CodexLiteDynamicTools | None = None, usage_tracking: UsageTrackingService | None = None) -> None:
         self.projects = projects
         self.threads = threads
         self.chats = threads.chats
@@ -488,6 +494,7 @@ class AppServerRunService:
         self.settings = settings
         self.db = db
         self.dynamic_tools = dynamic_tools
+        self.usage_tracking = usage_tracking
         self.runs: dict[str, AppServerActiveRun] = {}
         self.events = EventHub(db)
         self._runtime_reconcile_locks: dict[str, asyncio.Lock] = {}
@@ -1357,6 +1364,18 @@ class AppServerRunService:
                 self._record_run_activity(run_id, run)
                 if run.status != "running":
                     return
+                if notification.method == "thread/tokenUsage/updated":
+                    if self.usage_tracking is not None:
+                        self.usage_tracking.record_thread_usage(
+                            run_id=run_id,
+                            chat_id=run.chat_id,
+                            provider=run.provider,
+                            thread_id=run.thread_id,
+                            turn_id=str(notification.params.get("turnId") or run.turn_id),
+                            token_usage=notification.params.get("tokenUsage"),
+                            recorded_at=run.last_notification_at,
+                        )
+                    continue
                 if notification.method == "turn/completed" and run.replacing_idle_turn:
                     continue
                 if SERVER_REQUEST_ID_KEY in notification.params:
