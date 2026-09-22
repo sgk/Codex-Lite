@@ -41,11 +41,27 @@ class FileService:
                     "kind": kind,
                     "size": None if child.is_dir() else stat.st_size,
                     "modifiedAt": _mtime_to_iso(stat.st_mtime),
+                    "revision": _revision(stat),
                     "isText": None if child.is_dir() else viewer_kind in PREVIEW_TEXT_KINDS,
                     "viewerKind": viewer_kind,
                 }
             )
         return {"path": "" if target == root else target.relative_to(root).as_posix(), "entries": entries}
+
+    def read_metadata(self, project_id: str, rel_path: str) -> dict:
+        root, target = self._resolve(project_id, rel_path)
+        if not target.exists():
+            raise AppError("file_not_found", "File path was not found.", 404)
+        if target.is_dir():
+            raise AppError("file_path_invalid", "Path is a directory.")
+        stat = target.stat()
+        return {
+            "path": target.relative_to(root).as_posix(),
+            "kind": self._viewer_kind(target, stat.st_size),
+            "size": stat.st_size,
+            "modifiedAt": _mtime_to_iso(stat.st_mtime),
+            "revision": _revision(stat),
+        }
 
     def read_content(self, project_id: str, rel_path: str) -> dict:
         root, target = self._resolve(project_id, rel_path)
@@ -53,7 +69,8 @@ class FileService:
             raise AppError("file_not_found", "File path was not found.", 404)
         if target.is_dir():
             raise AppError("file_path_invalid", "Path is a directory.")
-        size = target.stat().st_size
+        stat = target.stat()
+        size = stat.st_size
         viewer_kind = self._viewer_kind(target, size)
         if viewer_kind not in PREVIEW_TEXT_KINDS:
             raise AppError("file_not_previewable", "This file type is not previewed as text.", 415, {"viewerKind": viewer_kind})
@@ -65,6 +82,8 @@ class FileService:
             "kind": viewer_kind,
             "encoding": "utf-8",
             "size": size,
+            "modifiedAt": _mtime_to_iso(stat.st_mtime),
+            "revision": _revision(stat),
             "content": content,
         }
 
@@ -143,4 +162,8 @@ class FileService:
 def _mtime_to_iso(mtime: float) -> str:
     from datetime import datetime, timezone
 
-    return datetime.fromtimestamp(mtime, timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _revision(stat) -> str:
+    return f"{stat.st_mtime_ns}:{stat.st_size}"

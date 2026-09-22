@@ -298,6 +298,7 @@ public sealed record FileEntryDto(
     string Kind,
     long? Size,
     string ModifiedAt,
+    string Revision,
     bool? IsText,
     string ViewerKind);
 
@@ -308,7 +309,16 @@ public sealed record FileContentDto(
     string Kind,
     string Encoding,
     long Size,
+    string ModifiedAt,
+    string Revision,
     string Content);
+
+public sealed record FileMetadataDto(
+    string Path,
+    string Kind,
+    long Size,
+    string ModifiedAt,
+    string Revision);
 
 public sealed record ErrorEnvelope(ErrorBody Error);
 

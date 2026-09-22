@@ -29,6 +29,8 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     private readonly DispatcherTimer _renderTimer;
     private string _pendingMarkdown = "";
     private DateTimeOffset _lastRenderAt = DateTimeOffset.MinValue;
+    private bool _preserveNextMarkdownChange;
+    private bool _preserveScrollPositionForPendingRender;
 
     public static readonly DependencyProperty MarkdownProperty =
         DependencyProperty.Register(
@@ -73,13 +75,22 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     {
         if (dependencyObject is MarkdownViewer viewer)
         {
-            viewer.ScheduleMarkdownRender(e.NewValue as string ?? "");
+            viewer.ScheduleMarkdownRender(e.NewValue as string ?? "", viewer._preserveNextMarkdownChange);
+            viewer._preserveNextMarkdownChange = false;
         }
     }
 
-    private void ScheduleMarkdownRender(string markdown)
+    public void UpdateMarkdownPreservingScroll(string markdown)
+    {
+        _preserveNextMarkdownChange = true;
+        SetCurrentValue(MarkdownProperty, markdown);
+        _preserveNextMarkdownChange = false;
+    }
+
+    private void ScheduleMarkdownRender(string markdown, bool preserveScrollPosition)
     {
         _pendingMarkdown = markdown;
+        _preserveScrollPositionForPendingRender = preserveScrollPosition;
         var elapsed = DateTimeOffset.Now - _lastRenderAt;
         if (elapsed >= RenderInterval)
         {
@@ -97,8 +108,37 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     private void RenderPendingMarkdown()
     {
         _renderTimer.Stop();
+        var verticalOffset = _preserveScrollPositionForPendingRender
+            ? FindScrollViewer(this)?.VerticalOffset
+            : null;
+        _preserveScrollPositionForPendingRender = false;
         Document = CreateDocument(_pendingMarkdown);
         _lastRenderAt = DateTimeOffset.Now;
+        if (verticalOffset is { } offset)
+        {
+            _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+            {
+                UpdateLayout();
+                FindScrollViewer(this)?.ScrollToVerticalOffset(offset);
+            }));
+        }
+    }
+
+    private static ScrollViewer? FindScrollViewer(DependencyObject root)
+    {
+        if (root is ScrollViewer scrollViewer)
+        {
+            return scrollViewer;
+        }
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
+        {
+            var found = FindScrollViewer(VisualTreeHelper.GetChild(root, index));
+            if (found is not null)
+            {
+                return found;
+            }
+        }
+        return null;
     }
 
     private void MarkdownViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)

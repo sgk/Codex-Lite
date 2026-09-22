@@ -4099,6 +4099,17 @@ async def test_readonly_files_api(linux_tmp_path: Path) -> None:
         content = await client.get(f"/projects/{project_id}/files/content", params={"path": "README.md"})
         assert content.status_code == 200
         assert content.json()["content"] == "# Title\n"
+        initial_revision = content.json()["revision"]
+
+        metadata = await client.get(f"/projects/{project_id}/files/metadata", params={"path": "README.md"})
+        assert metadata.status_code == 200
+        assert metadata.json()["revision"] == initial_revision
+        assert metadata.json()["kind"] == "markdown"
+
+        (project_dir / "README.md").write_text("# Other\n", encoding="utf-8")
+        changed_metadata = await client.get(f"/projects/{project_id}/files/metadata", params={"path": "README.md"})
+        assert changed_metadata.status_code == 200
+        assert changed_metadata.json()["revision"] != initial_revision
 
         image = await client.get(f"/projects/{project_id}/files/image", params={"path": "pixel.png"})
         assert image.status_code == 200
@@ -4116,6 +4127,10 @@ async def test_readonly_files_api(linux_tmp_path: Path) -> None:
         escape = await client.get(f"/projects/{project_id}/files/content", params={"path": "../secret"})
         assert escape.status_code == 400
         assert escape.json()["error"]["code"] == "file_path_invalid"
+
+        metadata_escape = await client.get(f"/projects/{project_id}/files/metadata", params={"path": "../secret"})
+        assert metadata_escape.status_code == 400
+        assert metadata_escape.json()["error"]["code"] == "file_path_invalid"
 
         pdf_preview = await client.get(f"/projects/{project_id}/files/content", params={"path": "large.pdf"})
         assert pdf_preview.status_code == 415

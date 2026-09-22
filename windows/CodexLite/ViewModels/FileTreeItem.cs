@@ -18,7 +18,7 @@ public sealed class FileTreeItem : INotifyPropertyChanged
 
     private FileTreeItem()
     {
-        Entry = new FileEntryDto("読み込み中...", "", "placeholder", null, "", null, "");
+        Entry = new FileEntryDto("読み込み中...", "", "placeholder", null, "", "", null, "");
         IsPlaceholder = true;
     }
 

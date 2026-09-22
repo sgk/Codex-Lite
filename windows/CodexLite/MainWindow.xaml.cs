@@ -147,6 +147,7 @@ public partial class MainWindow : Window
     private static readonly TimeSpan UiStallThreshold = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DaemonHealthCheckInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan AttachmentRetention = TimeSpan.FromDays(7);
+    private static readonly TimeSpan FilePreviewRefreshTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ComposerDraftSaveDelay = TimeSpan.FromMilliseconds(500);
     private const int ComposerHistoryLimit = 100;
     private const long PerformanceLogMaxBytes = 10L * 1024 * 1024;
@@ -176,6 +177,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _streamingTextTimer = new(DispatcherPriority.Render) { Interval = StreamingTextInterval };
     private readonly DispatcherTimer _reasoningProgressTimer = new(DispatcherPriority.Render) { Interval = ReasoningProgressInterval };
     private readonly DispatcherTimer _messageRefreshTimer = new() { Interval = TimeSpan.FromSeconds(3) };
+    private readonly DispatcherTimer _filePreviewRefreshTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly DispatcherTimer _uiHeartbeatTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     private readonly DispatcherTimer _daemonHealthTimer = new() { Interval = DaemonHealthCheckInterval };
     private readonly DispatcherTimer _sendReadinessTimer = new() { Interval = TimeSpan.FromSeconds(5) };
@@ -227,6 +229,7 @@ public partial class MainWindow : Window
     private ProjectDto? _selectedProject;
     private ChatDto? _selectedChat;
     private string _currentFilePath = "";
+    private string _currentFilePreviewRevision = "";
     private string _currentDirectoryPath = "";
     private string _wslDistroName = "";
     private string _wslHomePath = "";
@@ -243,6 +246,7 @@ public partial class MainWindow : Window
     private bool _isLoadingOlderMessages;
     private bool _isPollingMessages;
     private bool _isPollingChatTree;
+    private bool _isRefreshingFilePreview;
     private bool _isRestartingDaemon;
     private bool _isRefreshingUsageCapacity;
     private bool _usageRefreshPending;
@@ -320,6 +324,7 @@ public partial class MainWindow : Window
         _streamingTextTimer.Tick += StreamingTextTimer_Tick;
         _reasoningProgressTimer.Tick += ReasoningProgressTimer_Tick;
         _messageRefreshTimer.Tick += MessageRefreshTimer_Tick;
+        _filePreviewRefreshTimer.Tick += FilePreviewRefreshTimer_Tick;
         _daemonHealthTimer.Tick += DaemonHealthTimer_Tick;
         _sendReadinessTimer.Tick += SendReadinessTimer_Tick;
         _composerDraftSaveTimer.Tick += (_, _) =>
@@ -638,6 +643,7 @@ public partial class MainWindow : Window
         _uiWatchdogCts.Cancel();
         _uiHeartbeatTimer.Stop();
         _daemonHealthTimer.Stop();
+        _filePreviewRefreshTimer.Stop();
         _sendReadinessTimer.Stop();
         _composerDraftSaveTimer.Stop();
         _remotePriorityTimer.Stop();
@@ -702,6 +708,7 @@ public partial class MainWindow : Window
                 _isDaemonHttpReady = true;
                 // Observe runs even if a later startup request times out.
                 _messageRefreshTimer.Start();
+                _filePreviewRefreshTimer.Start();
                 _daemonHealthTimer.Start();
                 if (RemoteSyncFeature.IsEnabled)
                     _ = WatchRemoteRunChangesAsync(_remoteRunWatchCts.Token);
@@ -2812,6 +2819,7 @@ public partial class MainWindow : Window
             _isDaemonHttpReady = false;
             InvalidateSendTransportReadiness();
             _messageRefreshTimer.Stop();
+            _filePreviewRefreshTimer.Stop();
             await RunBusyAsync("CODEX_HOMEを切り替え中...", async () =>
             {
                 await _client.ShutdownDaemonAsync();
@@ -2836,6 +2844,7 @@ public partial class MainWindow : Window
         {
             _isRestartingDaemon = false;
             _messageRefreshTimer.Start();
+            _filePreviewRefreshTimer.Start();
         }
     }
 
@@ -9148,6 +9157,11 @@ public partial class MainWindow : Window
         {
             SetFileWrapControl(enabled: false, isChecked: true);
             var content = await _client.ReadFileAsync(project.Id, item.Path);
+            if (_selectedProject?.Id != project.Id || _currentFilePath != item.Path)
+            {
+                return;
+            }
+            _currentFilePreviewRevision = content?.Revision ?? "";
             FileMarkdownPreview.Markdown = content?.Content ?? "";
             FileMarkdownPreview.Visibility = Visibility.Visible;
         }
@@ -9602,6 +9616,61 @@ public partial class MainWindow : Window
     private static bool IsImageViewerKind(string viewerKind) =>
         viewerKind is "png" or "jpeg" or "image";
 
+    private async void FilePreviewRefreshTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_isClosing || _isRestartingDaemon || _isRefreshingFilePreview || !_isDaemonHttpReady ||
+            !ReferenceEquals(MainTabs.SelectedItem, FilesTab) ||
+            _selectedProject is not ProjectDto project ||
+            FilesTree.SelectedItem is not FileTreeItem { ViewerKind: "markdown" } item ||
+            item.Path != _currentFilePath)
+        {
+            return;
+        }
+
+        _isRefreshingFilePreview = true;
+        var projectId = project.Id;
+        var path = item.Path;
+        try
+        {
+            using var timeout = new CancellationTokenSource(FilePreviewRefreshTimeout);
+            var metadata = await _client.ReadFileMetadataAsync(projectId, path, timeout.Token);
+            if (!IsCurrentMarkdownPreview(projectId, path) || metadata is null || metadata.Revision == _currentFilePreviewRevision)
+            {
+                return;
+            }
+
+            var content = await _client.ReadFileAsync(projectId, path, timeout.Token);
+            if (!IsCurrentMarkdownPreview(projectId, path) || content is null)
+            {
+                return;
+            }
+            _currentFilePreviewRevision = content.Revision;
+            FileMarkdownPreview.UpdateMarkdownPreservingScroll(content.Content);
+            FileMarkdownPreview.Visibility = Visibility.Visible;
+        }
+        catch (OperationCanceledException)
+        {
+            WritePerformanceLog("file-preview-refresh-timeout", $"projectId={LogText(projectId)} path={LogText(path)}");
+        }
+        catch (Exception ex)
+        {
+            WritePerformanceLog(
+                "file-preview-refresh-error",
+                $"projectId={LogText(projectId)} path={LogText(path)} type={LogText(ex.GetType().FullName ?? ex.GetType().Name)} message={LogText(ex.ToString())}");
+        }
+        finally
+        {
+            _isRefreshingFilePreview = false;
+        }
+    }
+
+    private bool IsCurrentMarkdownPreview(string projectId, string path) =>
+        _selectedProject?.Id == projectId &&
+        _currentFilePath == path &&
+        ReferenceEquals(MainTabs.SelectedItem, FilesTab) &&
+        FilesTree.SelectedItem is FileTreeItem { ViewerKind: "markdown" } selected &&
+        selected.Path == path;
+
     private static string PreviewUnavailableText(string viewerKind) =>
         viewerKind switch
         {
@@ -9615,6 +9684,7 @@ public partial class MainWindow : Window
 
     private void ClearFilePreview()
     {
+        _currentFilePreviewRevision = "";
         FileContentBox.Text = "";
         FileContentBox.Visibility = Visibility.Collapsed;
         FileMarkdownPreview.Markdown = "";
@@ -9654,7 +9724,25 @@ public partial class MainWindow : Window
     {
         if (_selectedProject is ProjectDto project && _currentFilePath.Length > 0)
         {
-            StartShell(ToUncPath(project.Path, _currentFilePath), "");
+            var targetPath = ToWindowsPath(JoinWslPath(project.Path, _currentFilePath));
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = targetPath,
+                    WorkingDirectory = Path.GetDirectoryName(targetPath) ?? "",
+                    Verb = "open",
+                    UseShellExecute = true
+                });
+                WritePerformanceLog("file-opened", $"targetPath={LogText(targetPath)}");
+            }
+            catch (Exception ex)
+            {
+                WritePerformanceLog(
+                    "file-open-error",
+                    $"targetPath={LogText(targetPath)} type={LogText(ex.GetType().FullName ?? ex.GetType().Name)} message={LogText(ex.ToString())}");
+                StatusText.Text = $"file open error | {ShortError(ex)}";
+            }
         }
     }
 
