@@ -400,6 +400,7 @@ class AppServerActiveRun:
     last_reconnect_message: str | None = None
     lease_released: bool = False
     replacing_idle_turn: bool = False
+    notification_queue: asyncio.Queue[AppServerNotification] | None = field(default=None, repr=False)
     pending_approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
     watcher_alive: bool = False
     last_notification_at: str | None = None
@@ -685,7 +686,14 @@ class AppServerRunService:
             self._finish_run_row(run_id, "failed", "turn/start did not return a turn id.")
             raise AppError("app_server_error", "turn/start did not return a turn id.", 502)
         app_server.bind_queue(notification_queue, thread_id, turn_id)
-        self.runs[run_id] = AppServerActiveRun(thread_id, turn_id, chat_id, provider=provider, started_at=utc_now())
+        self.runs[run_id] = AppServerActiveRun(
+            thread_id,
+            turn_id,
+            chat_id,
+            provider=provider,
+            started_at=utc_now(),
+            notification_queue=notification_queue,
+        )
         self._start_run_row(run_id, thread_id, turn_id, provider)
         await self.events.publish(run_id, "status", {"status": "running"})
         asyncio.create_task(self._watch_run(run_id, notification_queue, app_server))
@@ -859,6 +867,7 @@ class AppServerRunService:
                         provider=provider,
                         started_at=utc_now(),
                         adopted=True,
+                        notification_queue=notification_queue,
                     )
                     self._start_run_row(run_id, thread_id, turn_id, provider, adopted=True)
                     _acquire_run_lease(app_server)
@@ -1056,71 +1065,80 @@ class AppServerRunService:
         chat_row = self.chats.get_chat_row_by_id(run.chat_id)
         run_settings = self.threads.settings_for_chat(str(chat_row["project_id"]), run.chat_id)
         self.chats.record_model_reasoning_choice(run_settings.model, run_settings.reasoning_effort)
-        await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "sending additional instructions"})
+        # Pause notification handling across the turn/steer completion race.
+        # If the previous turn has just finished, steer falls back to a new
+        # turn and the same watcher must move to that turn without losing its
+        # first notifications.
+        run.replacing_idle_turn = True
         try:
-            await app_server.request(
-                "turn/steer",
-                {
-                    "threadId": run.thread_id,
-                    "expectedTurnId": run.turn_id,
-                    "input": input_items,
-                },
-            )
-        except AppError as exc:
-            no_active_turn = _is_no_active_turn(exc)
-            if no_active_turn:
-                # Keep a delayed completion notification for the previous turn
-                # from terminating the run while its replacement is starting.
-                run.replacing_idle_turn = True
-            await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": exc.message})
-            if not no_active_turn:
-                raise
-            project_id = str(chat_row["project_id"])
-            project = self.projects.get_project_row(project_id)
             try:
-                response = await self._start_turn(app_server, run.thread_id, str(project["path"]), input_items, run_settings)
-                turn_id = _turn_id_from_response(response)
-                if not turn_id:
-                    raise AppError("app_server_error", "turn/start did not return a turn id.", 502)
-                run.turn_id = turn_id
-                run.revision += 1
-                if self.db is not None:
-                    self.db.execute(
-                        "UPDATE runs SET turn_id = ?, revision = ? WHERE id = ?",
-                        (turn_id, run.revision, run_id),
-                    )
-            except Exception as start_exc:
-                run.status = "failed"
-                run.error = str(start_exc)
-                run.finished_at = utc_now()
-                run.terminal_reason = "replacement_turn_start_failed"
-                run.revision += 1
-                self._finish_run_row(run_id, run.status, run.error, run.terminal_reason)
-                await self.events.publish(run_id, "error", {"code": "app_server_error", "message": run.error})
-                raise
-            finally:
-                run.replacing_idle_turn = False
-            await self.events.publish(
-                run_id,
-                "progress",
-                {
-                    "method": "turn/start",
-                    "summary": "The previous turn had already completed; the instruction was started as the next turn.",
-                },
+                await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "sending additional instructions"})
+                await app_server.request(
+                    "turn/steer",
+                    {
+                        "threadId": run.thread_id,
+                        "expectedTurnId": run.turn_id,
+                        "input": input_items,
+                    },
+                )
+            except AppError as exc:
+                no_active_turn = _is_no_active_turn(exc)
+                await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": exc.message})
+                if not no_active_turn:
+                    raise
+                if run.notification_queue is None:
+                    raise AppError("app_server_error", "Run notification queue is not available.", 502)
+                project_id = str(chat_row["project_id"])
+                project = self.projects.get_project_row(project_id)
+                try:
+                    # Receive the whole thread while turn/start is in flight;
+                    # app-server can emit the new turn's first notifications
+                    # before returning its turn id.
+                    app_server.bind_queue(run.notification_queue, run.thread_id)
+                    response = await self._start_turn(app_server, run.thread_id, str(project["path"]), input_items, run_settings)
+                    turn_id = _turn_id_from_response(response)
+                    if not turn_id:
+                        raise AppError("app_server_error", "turn/start did not return a turn id.", 502)
+                    run.turn_id = turn_id
+                    app_server.bind_queue(run.notification_queue, run.thread_id, turn_id)
+                    run.revision += 1
+                    if self.db is not None:
+                        self.db.execute(
+                            "UPDATE runs SET turn_id = ?, revision = ? WHERE id = ?",
+                            (turn_id, run.revision, run_id),
+                        )
+                except Exception as start_exc:
+                    run.status = "failed"
+                    run.error = str(start_exc)
+                    run.finished_at = utc_now()
+                    run.terminal_reason = "replacement_turn_start_failed"
+                    run.revision += 1
+                    self._finish_run_row(run_id, run.status, run.error, run.terminal_reason)
+                    await self.events.publish(run_id, "error", {"code": "app_server_error", "message": run.error})
+                    raise
+                await self.events.publish(
+                    run_id,
+                    "progress",
+                    {
+                        "method": "turn/start",
+                        "summary": "The previous turn had already completed; the instruction was started as the next turn.",
+                    },
+                )
+            user_message = self.messages.insert_message(
+                run.chat_id,
+                "user",
+                _content_with_attachment_summary(clean_content, attachments or []),
+                run_id=run_id,
+                kind="instruction",
+                created_at=accepted_at,
             )
-        user_message = self.messages.insert_message(
-            run.chat_id,
-            "user",
-            _content_with_attachment_summary(clean_content, attachments or []),
-            run_id=run_id,
-            kind="instruction",
-            created_at=accepted_at,
-        )
-        await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
-        result = _run_out(run_id, run)
-        result["messageId"] = user_message["id"]
-        result["createdAt"] = user_message["createdAt"]
-        return result
+            await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
+            result = _run_out(run_id, run)
+            result["messageId"] = user_message["id"]
+            result["createdAt"] = user_message["createdAt"]
+            return result
+        finally:
+            run.replacing_idle_turn = False
 
     async def resolve_approval(self, run_id: str, request_id: str, decision: str) -> dict:
         run = self.runs.get(run_id)
@@ -1331,6 +1349,10 @@ class AppServerRunService:
                             await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0})
                             return
                     continue
+                while run.replacing_idle_turn and run.status == "running":
+                    await asyncio.sleep(0.01)
+                if run.status != "running":
+                    return
                 if notification.method == "app_server/exited":
                     await flush_reasoning_progress()
                     await flush_all_pending_agent_output()

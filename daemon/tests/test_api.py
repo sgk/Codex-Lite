@@ -3822,8 +3822,23 @@ async def test_app_server_steer_starts_next_turn_when_previous_turn_is_already_i
         "turn/start",
         {"threadId": "thread_1", "cwd": str(project_dir), "input": [{"type": "text", "text": "continue"}]},
     )
+    assert app_server.replacement_routes == [("thread_1", None)]
+    assert app_server.subscriber_routes[app_server.subscribers[-1]] == ("thread_1", "turn_2")
+
+    events = []
+    async for event in runs.stream_events(result["runId"]):
+        events.append(event)
+        if "event: done" in event:
+            break
+
+    assert any("replacement answer" in event for event in events)
+    assert runs.get_run(result["runId"])["status"] == "succeeded"
     stored_messages = messages.list_messages(project_id, chat_id)
-    assert [message["content"] for message in stored_messages] == ["hello", "continue"]
+    assert [(message["role"], message["content"]) for message in stored_messages] == [
+        ("user", "hello"),
+        ("user", "continue"),
+        ("assistant", "replacement answer"),
+    ]
     db.close()
 
 
@@ -5198,16 +5213,44 @@ class NoActiveSteerAppServer(TurnStartAppServer):
     def __init__(self) -> None:
         super().__init__()
         self.turn_start_count = 0
+        self.replacement_routes: list[tuple[str, str | None] | None] = []
 
     async def request(self, method: str, params: dict) -> dict:
         self.requests.append((method, params))
         if method == "turn/start":
             self.turn_start_count += 1
             if self.turn_start_count == 2:
-                await self.subscribers[-1].put(
+                queue = self.subscribers[-1]
+                self.replacement_routes.append(self.subscriber_routes[queue])
+                await queue.put(
                     AppServerNotification(
                         "turn/completed",
                         {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "completed"}},
+                    )
+                )
+                common = {"threadId": "thread_1", "turnId": "turn_2"}
+                await queue.put(
+                    AppServerNotification(
+                        "item/started",
+                        {**common, "item": {"id": "replacement_1", "type": "agentMessage", "text": "", "phase": "final_answer"}},
+                    )
+                )
+                await queue.put(
+                    AppServerNotification(
+                        "item/agentMessage/delta",
+                        {**common, "itemId": "replacement_1", "delta": "replacement answer"},
+                    )
+                )
+                await queue.put(
+                    AppServerNotification(
+                        "item/completed",
+                        {**common, "item": {"id": "replacement_1", "type": "agentMessage", "text": "replacement answer", "phase": "final_answer"}},
+                    )
+                )
+                await queue.put(
+                    AppServerNotification(
+                        "turn/completed",
+                        {"threadId": "thread_1", "turn": {"id": "turn_2", "status": "completed"}},
                     )
                 )
                 await asyncio.sleep(0)
