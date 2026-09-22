@@ -108,8 +108,11 @@ input:focus, textarea:focus { border-color: #84adff; box-shadow: 0 0 0 3px #dbea
 .usage-breakdown-grid h5 { margin-top: 8px; color: #667085; font-size: 10px; }
 .usage-breakdown-grid b { display: block; margin-top: 2px; color: #475467; font-size: 11px; }
 .usage-breakdown-grid ol { margin: 2px 0 0; padding-left: 20px; }
-.usage-breakdown-grid li { overflow: hidden; color: #344054; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.usage-breakdown-grid li { color: #344054; font-size: 11px; }
 .usage-breakdown-grid li.empty { list-style: none; margin-left: -20px; color: #98a2b3; }
+.usage-ranking-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; min-width: 0; }
+.usage-ranking-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-ranking-value { text-align: right; white-space: nowrap; }
 .message { display: flex; max-width: 82%; flex-direction: column; gap: 4px; }
 .message.user { align-self: flex-end; align-items: flex-end; }
 .message.assistant { align-self: flex-start; align-items: flex-start; }

@@ -3219,15 +3219,6 @@ public partial class MainWindow : Window
         {
             AddUsageRankingEmptyRow(rankingPanel);
         }
-        AddUsageRankingHeading(rankingPanel, "チャット別");
-        foreach (var item in window.Chats.Take(5))
-        {
-            AddUsageRankingRow(rankingPanel, $"{item.ProjectName} / {item.Title}", item.TotalTokens);
-        }
-        if (window.Chats.Count == 0)
-        {
-            AddUsageRankingEmptyRow(rankingPanel);
-        }
     }
 
     private static void AddUsageRankingHeading(StackPanel panel, string text)
@@ -3243,14 +3234,31 @@ public partial class MainWindow : Window
 
     private static void AddUsageRankingRow(StackPanel panel, string label, long tokens)
     {
-        panel.Children.Add(new TextBlock
+        var row = new Grid
         {
-            Text = $"{label}  {FormatTokenCount(tokens)}",
             ToolTip = $"{label}: {tokens:N0} tokens",
+        };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var labelText = new TextBlock
+        {
+            Text = label,
             TextTrimming = TextTrimming.CharacterEllipsis,
             FontSize = 11,
             Foreground = new SolidColorBrush(Color.FromRgb(52, 64, 84)),
-        });
+        };
+        var tokenText = new TextBlock
+        {
+            Text = FormatTokenCount(tokens),
+            Margin = new Thickness(8, 0, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(52, 64, 84)),
+        };
+        Grid.SetColumn(tokenText, 1);
+        row.Children.Add(labelText);
+        row.Children.Add(tokenText);
+        panel.Children.Add(row);
     }
 
     private static void AddUsageRankingEmptyRow(StackPanel panel)
