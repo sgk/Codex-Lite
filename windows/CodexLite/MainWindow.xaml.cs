@@ -3251,7 +3251,7 @@ public partial class MainWindow : Window
         {
             Text = FormatTokenCount(tokens),
             Margin = new Thickness(8, 0, 0, 0),
-            HorizontalAlignment = HorizontalAlignment.Right,
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Right,
             FontSize = 11,
             Foreground = new SolidColorBrush(Color.FromRgb(52, 64, 84)),
         };
@@ -9620,11 +9620,11 @@ public partial class MainWindow : Window
     private static bool TryNormalizeWslPath(string basePath, string target, out string normalizedPath)
     {
         normalizedPath = "";
-        if (!basePath.StartsWith('/', StringComparison.Ordinal))
+        if (!basePath.StartsWith("/", StringComparison.Ordinal))
         {
             return false;
         }
-        var combined = target.StartsWith('/', StringComparison.Ordinal)
+        var combined = target.StartsWith("/", StringComparison.Ordinal)
             ? target
             : $"{basePath.TrimEnd('/')}/{target}";
         var parts = new List<string>();
