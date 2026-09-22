@@ -23,6 +23,7 @@ using Microsoft.Win32;
 using Binding = System.Windows.Data.Binding;
 using Button = System.Windows.Controls.Button;
 using ComboBox = System.Windows.Controls.ComboBox;
+using Color = System.Windows.Media.Color;
 using DrawingIcon = System.Drawing.Icon;
 using DragDropEffects = System.Windows.DragDropEffects;
 using Key = System.Windows.Input.Key;
