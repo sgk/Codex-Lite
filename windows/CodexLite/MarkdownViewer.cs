@@ -26,6 +26,9 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     private static readonly Regex MarkdownImageRegex = new(
         @"!\[([^\]\r\n]*)\]\((?:<([^>\r\n]+)>|([^)\s]+))\)",
         RegexOptions.Compiled);
+    private static readonly Regex HtmlLineBreakRegex = new(
+        @"<br\s*/?>",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private readonly DispatcherTimer _renderTimer;
     private string _pendingMarkdown = "";
     private DateTimeOffset _lastRenderAt = DateTimeOffset.MinValue;
@@ -607,20 +610,29 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
         while (index < text.Length)
         {
             var codeStart = text.IndexOf('`', index);
-            if (codeStart < 0)
+            var lineBreakMatch = HtmlLineBreakRegex.Match(text, index);
+            var lineBreakStart = lineBreakMatch.Success ? lineBreakMatch.Index : -1;
+            var next = NextIndex(codeStart, lineBreakStart);
+            if (next < 0)
             {
                 inlines.Add(TextRun(text[index..]));
                 return;
+            }
+            if (next > index)
+            {
+                inlines.Add(TextRun(text[index..next]));
+            }
+            if (next == lineBreakStart)
+            {
+                inlines.Add(new LineBreak());
+                index = lineBreakMatch.Index + lineBreakMatch.Length;
+                continue;
             }
             var codeEnd = text.IndexOf('`', codeStart + 1);
             if (codeEnd < 0)
             {
-                inlines.Add(TextRun(text[index..]));
+                inlines.Add(TextRun(text[codeStart..]));
                 return;
-            }
-            if (codeStart > index)
-            {
-                inlines.Add(TextRun(text[index..codeStart]));
             }
             inlines.Add(InlineCodeRun(text[(codeStart + 1)..codeEnd]));
             index = codeEnd + 1;
@@ -652,11 +664,13 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             var imageStart = imageMatch.Success ? imageMatch.Index : -1;
             var linkMatch = MarkdownLinkRegex.Match(text, index);
             var linkStart = linkMatch.Success ? linkMatch.Index : -1;
+            var lineBreakMatch = HtmlLineBreakRegex.Match(text, index);
+            var lineBreakStart = lineBreakMatch.Success ? lineBreakMatch.Index : -1;
             if (imageStart >= 0 && linkStart == imageStart + 1)
             {
                 linkStart = -1;
             }
-            var next = NextIndex(codeStart, boldStart, strikethroughStart, imageStart, linkStart);
+            var next = NextIndex(codeStart, boldStart, strikethroughStart, imageStart, linkStart, lineBreakStart);
             if (next < 0)
             {
                 paragraph.Inlines.Add(TextRun(text[index..]));
@@ -676,6 +690,12 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
                 }
                 paragraph.Inlines.Add(InlineCodeRun(text[(next + 1)..end]));
                 index = end + 1;
+                continue;
+            }
+            if (next == lineBreakStart)
+            {
+                paragraph.Inlines.Add(new LineBreak());
+                index = lineBreakMatch.Index + lineBreakMatch.Length;
                 continue;
             }
             if (next == imageStart)
@@ -808,13 +828,14 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
 
     private void AddHyperlink(Paragraph paragraph, string text, string target)
     {
-        var hyperlink = new Hyperlink(TextRun(text))
+        var hyperlink = new Hyperlink
         {
             Cursor = System.Windows.Input.Cursors.Hand,
             Foreground = new SolidColorBrush(Color.FromRgb(9, 105, 218)),
             TextDecorations = TextDecorations.Underline,
             ToolTip = target
         };
+        AddDecodedTextWithInlineCode(hyperlink.Inlines, text);
         hyperlink.Click += (_, _) => LinkClicked?.Invoke(this, new MarkdownLinkClickedEventArgs(target));
         paragraph.Inlines.Add(hyperlink);
     }

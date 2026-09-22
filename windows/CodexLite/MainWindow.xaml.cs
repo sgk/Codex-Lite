@@ -9429,7 +9429,7 @@ public partial class MainWindow : Window
 
     private async void MarkdownViewer_LinkClicked(object sender, MarkdownLinkClickedEventArgs e)
     {
-        await OpenMarkdownLinkAsync(e.Target);
+        await OpenMarkdownLinkAsync(sender, e.Target);
     }
 
     private void MarkdownViewer_ImageRequested(object sender, MarkdownImageRequestedEventArgs e)
@@ -9494,7 +9494,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task OpenMarkdownLinkAsync(string target)
+    private async Task OpenMarkdownLinkAsync(object sender, string target)
     {
         var cleanTarget = target.Trim();
         if (cleanTarget.Length == 0)
@@ -9502,7 +9502,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (HasUriScheme(cleanTarget))
+        if (Uri.TryCreate(cleanTarget, UriKind.Absolute, out var uri) && uri.IsFile)
+        {
+            cleanTarget = FileUriToLocalPath(uri);
+        }
+        else if (HasUriScheme(cleanTarget))
         {
             StartShell(cleanTarget, "");
             return;
@@ -9514,13 +9518,147 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!TryNormalizeProjectRelativePath(project.Path, cleanTarget, out var relativePath))
+        if (!TryResolveMarkdownLocalPath(sender, project.Path, cleanTarget, out var resolvedWslPath, out var directWindowsPath))
         {
-            StatusText.Text = $"file link ignored | outside project | {cleanTarget}";
+            StatusText.Text = $"file link invalid | {cleanTarget}";
             return;
         }
 
-        await SelectFileTabPathAsync(project, relativePath);
+        if (directWindowsPath is null && TryGetProjectRelativeWslPath(project.Path, resolvedWslPath, out var relativePath))
+        {
+            await SelectFileTabPathAsync(project, relativePath);
+            return;
+        }
+
+        var windowsPath = directWindowsPath ?? ToWindowsPath(resolvedWslPath);
+        if (File.Exists(windowsPath))
+        {
+            OpenExplorer(windowsPath, selectTarget: true);
+            return;
+        }
+        if (Directory.Exists(windowsPath))
+        {
+            OpenExplorer(windowsPath, selectTarget: false);
+            return;
+        }
+        StatusText.Text = $"file link not found | {cleanTarget}";
+    }
+
+    private bool TryResolveMarkdownLocalPath(
+        object sender,
+        string projectPath,
+        string target,
+        out string resolvedWslPath,
+        out string? directWindowsPath)
+    {
+        resolvedWslPath = "";
+        directWindowsPath = null;
+        var localTarget = CleanMarkdownLocalTarget(target);
+        if (localTarget.Length == 0)
+        {
+            return false;
+        }
+
+        if (Regex.IsMatch(localTarget, @"^[A-Za-z]:[\\/]", RegexOptions.CultureInvariant) ||
+            localTarget.StartsWith("\\\\", StringComparison.Ordinal))
+        {
+            var converted = WindowsPathToWslPath(localTarget);
+            if (!converted.StartsWith("//", StringComparison.Ordinal) && converted.StartsWith("/", StringComparison.Ordinal))
+            {
+                return TryNormalizeWslPath("/", converted, out resolvedWslPath);
+            }
+            directWindowsPath = localTarget;
+            return true;
+        }
+
+        var basePath = projectPath;
+        if (ReferenceEquals(sender, FileMarkdownPreview))
+        {
+            var separatorIndex = _currentFilePath.LastIndexOf('/');
+            if (separatorIndex >= 0)
+            {
+                basePath = JoinWslPath(projectPath, _currentFilePath[..separatorIndex]);
+            }
+        }
+        return TryNormalizeWslPath(basePath, localTarget.Replace('\\', '/'), out resolvedWslPath);
+    }
+
+    private static string CleanMarkdownLocalTarget(string target)
+    {
+        var localTarget = target.Split('#', 2)[0].Trim();
+        try
+        {
+            localTarget = Uri.UnescapeDataString(localTarget);
+        }
+        catch (UriFormatException)
+        {
+            return "";
+        }
+        return Regex.Replace(localTarget, @":\d+(?::\d+)?$", "", RegexOptions.CultureInvariant);
+    }
+
+    private static string FileUriToLocalPath(Uri uri)
+    {
+        if (uri.IsUnc)
+        {
+            return uri.LocalPath;
+        }
+        var path = Uri.UnescapeDataString(uri.AbsolutePath);
+        return Regex.IsMatch(path, @"^/[A-Za-z]:/", RegexOptions.CultureInvariant)
+            ? path[1..].Replace('/', '\\')
+            : path;
+    }
+
+    private static bool TryNormalizeWslPath(string basePath, string target, out string normalizedPath)
+    {
+        normalizedPath = "";
+        if (!basePath.StartsWith('/', StringComparison.Ordinal))
+        {
+            return false;
+        }
+        var combined = target.StartsWith('/', StringComparison.Ordinal)
+            ? target
+            : $"{basePath.TrimEnd('/')}/{target}";
+        var parts = new List<string>();
+        foreach (var part in combined.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (part == ".")
+            {
+                continue;
+            }
+            if (part == "..")
+            {
+                if (parts.Count > 0)
+                {
+                    parts.RemoveAt(parts.Count - 1);
+                }
+                continue;
+            }
+            parts.Add(part);
+        }
+        normalizedPath = "/" + string.Join('/', parts);
+        return true;
+    }
+
+    private static bool TryGetProjectRelativeWslPath(string projectPath, string candidatePath, out string relativePath)
+    {
+        relativePath = "";
+        if (!TryNormalizeWslPath("/", projectPath, out var normalizedProjectPath) ||
+            !TryNormalizeWslPath("/", candidatePath, out var normalizedCandidatePath))
+        {
+            return false;
+        }
+        var projectPrefix = normalizedProjectPath.TrimEnd('/') + "/";
+        if (normalizedCandidatePath.Equals(normalizedProjectPath, StringComparison.Ordinal))
+        {
+            return true;
+        }
+        if (!normalizedCandidatePath.StartsWith(projectPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        relativePath = normalizedCandidatePath[projectPrefix.Length..];
+        return true;
     }
 
     private async Task SelectFileTabPathAsync(ProjectDto project, string relativePath)
