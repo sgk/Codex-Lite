@@ -203,6 +203,11 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
                 continue;
             }
 
+            if (TryAddBlockQuote(document, lines, ref lineIndex, paragraph))
+            {
+                continue;
+            }
+
             if (string.IsNullOrWhiteSpace(line))
             {
                 FlushParagraph(document, paragraph, addFollowingLineGap: true);
@@ -232,6 +237,89 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
         }
         FlushParagraph(document, paragraph);
         return document;
+    }
+
+    private bool TryAddBlockQuote(FlowDocument document, string[] lines, ref int lineIndex, StringBuilder paragraph)
+    {
+        if (!TryExtractBlockQuoteContent(lines[lineIndex].TrimEnd(), out _))
+        {
+            return false;
+        }
+
+        FlushParagraph(document, paragraph);
+        var quotedLines = new List<string>();
+        var nextIndex = lineIndex;
+        while (nextIndex < lines.Length &&
+               TryExtractBlockQuoteContent(lines[nextIndex].TrimEnd(), out var content))
+        {
+            quotedLines.Add(content);
+            nextIndex++;
+        }
+        AddBlockQuote(document, quotedLines);
+        lineIndex = nextIndex - 1;
+        return true;
+    }
+
+    private static bool TryExtractBlockQuoteContent(string line, out string content)
+    {
+        content = "";
+        var trimmed = line.TrimStart();
+        if (trimmed.Length == 0 || trimmed[0] != '>')
+        {
+            return false;
+        }
+        var contentStart = trimmed.Length > 1 && (trimmed[1] == ' ' || trimmed[1] == '\t') ? 2 : 1;
+        content = trimmed[contentStart..];
+        return true;
+    }
+
+    private void AddBlockQuote(FlowDocument document, IReadOnlyList<string> lines)
+    {
+        var section = new Section
+        {
+            BorderBrush = new SolidColorBrush(Color.FromRgb(152, 162, 179)),
+            BorderThickness = new Thickness(3, 0, 0, 0),
+            Foreground = new SolidColorBrush(Color.FromRgb(102, 112, 133)),
+            Margin = new Thickness(0, 4, 0, 6),
+            Padding = new Thickness(10, 0, 0, 0),
+        };
+        var paragraphText = new StringBuilder();
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                FlushBlockQuoteParagraph(section, paragraphText);
+                continue;
+            }
+            if (paragraphText.Length > 0)
+            {
+                paragraphText.Append('\n');
+            }
+            paragraphText.Append(line);
+        }
+        FlushBlockQuoteParagraph(section, paragraphText);
+        if (section.Blocks.Count == 0)
+        {
+            section.Blocks.Add(new Paragraph { Margin = new Thickness(0), LineHeight = 20 });
+        }
+        document.Blocks.Add(section);
+    }
+
+    private void FlushBlockQuoteParagraph(Section section, StringBuilder paragraphText)
+    {
+        if (paragraphText.Length == 0)
+        {
+            return;
+        }
+        var paragraph = new Paragraph
+        {
+            Margin = new Thickness(0, section.Blocks.Count == 0 ? 0 : 8, 0, 0),
+            LineHeight = 20,
+            LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
+        };
+        AddInlineRuns(paragraph, paragraphText.ToString());
+        section.Blocks.Add(paragraph);
+        paragraphText.Clear();
     }
 
     private bool TryAddTable(FlowDocument document, string[] lines, ref int lineIndex, StringBuilder paragraph)
@@ -360,13 +448,6 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
                 trimmed,
                 margin: new Thickness(left, 1, 0, 1),
                 textIndent: -markerWidth);
-            return true;
-        }
-
-        if (trimmed.StartsWith("> ", StringComparison.Ordinal))
-        {
-            FlushParagraph(document, paragraph);
-            AddParagraph(document, trimmed[2..].Trim(), foreground: Brushes.DimGray, margin: new Thickness(10, 2, 0, 2));
             return true;
         }
 
