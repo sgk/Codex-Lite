@@ -52,8 +52,24 @@ test("順序なしと順序付きの箇条書きを解析する", () => {
   });
 });
 
-test("生HTMLはMarkdownとして解釈しない", () => {
+test("対応対象外の生HTMLはMarkdownとして解釈しない", () => {
   assert.deepEqual(parseMarkdownInline("<script>alert(1)</script>"), [{ type: "text", value: "<script>alert(1)</script>" }]);
+});
+
+test("uタグだけを下線として解析しコード内では文字列を維持する", () => {
+  assert.deepEqual(parseMarkdownInline("通常 <u>下線 **太字**</u> `<u>code</u>`"), [
+    { type: "text", value: "通常 " },
+    {
+      type: "underline",
+      children: [
+        { type: "text", value: "下線 " },
+        { type: "strong", children: [{ type: "text", value: "太字" }] },
+      ],
+    },
+    { type: "text", value: " " },
+    { type: "code", value: "<u>code</u>" },
+  ]);
+  assert.deepEqual(parseMarkdownInline("閉じていない<u>タグ"), [{ type: "text", value: "閉じていない<u>タグ" }]);
 });
 
 test("引用と取り消し線をデスクトップ版同様に解析する", () => {

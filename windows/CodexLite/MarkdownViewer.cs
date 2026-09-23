@@ -29,6 +29,12 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     private static readonly Regex HtmlLineBreakRegex = new(
         @"<br\s*/?>",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex HtmlUnderlineOpenRegex = new(
+        @"<u\s*>",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex HtmlUnderlineCloseRegex = new(
+        @"</u\s*>",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     private readonly DispatcherTimer _renderTimer;
     private string _pendingMarkdown = "";
     private DateTimeOffset _lastRenderAt = DateTimeOffset.MinValue;
@@ -693,7 +699,11 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             var codeStart = text.IndexOf('`', index);
             var lineBreakMatch = HtmlLineBreakRegex.Match(text, index);
             var lineBreakStart = lineBreakMatch.Success ? lineBreakMatch.Index : -1;
-            var next = NextIndex(codeStart, lineBreakStart);
+            var underlineMatch = HtmlUnderlineOpenRegex.Match(text, index);
+            var underlineStart = underlineMatch.Success ? underlineMatch.Index : -1;
+            var boldStart = text.IndexOf("**", index, StringComparison.Ordinal);
+            var strikethroughStart = text.IndexOf("~~", index, StringComparison.Ordinal);
+            var next = NextIndex(codeStart, lineBreakStart, underlineStart, boldStart, strikethroughStart);
             if (next < 0)
             {
                 inlines.Add(TextRun(text[index..]));
@@ -707,6 +717,38 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             {
                 inlines.Add(new LineBreak());
                 index = lineBreakMatch.Index + lineBreakMatch.Length;
+                continue;
+            }
+            if (next == underlineStart)
+            {
+                var underlineContentStart = underlineMatch.Index + underlineMatch.Length;
+                var underlineEnd = HtmlUnderlineCloseRegex.Match(text, underlineContentStart);
+                if (!underlineEnd.Success)
+                {
+                    inlines.Add(TextRun(text[underlineMatch.Index..]));
+                    return;
+                }
+                var underline = new Span { TextDecorations = TextDecorations.Underline };
+                AddDecodedTextWithInlineCode(underline.Inlines, text[underlineContentStart..underlineEnd.Index]);
+                inlines.Add(underline);
+                index = underlineEnd.Index + underlineEnd.Length;
+                continue;
+            }
+            if (next == boldStart || next == strikethroughStart)
+            {
+                var marker = next == boldStart ? "**" : "~~";
+                var decorationEnd = text.IndexOf(marker, next + marker.Length, StringComparison.Ordinal);
+                if (decorationEnd < 0)
+                {
+                    inlines.Add(TextRun(text[next..]));
+                    return;
+                }
+                Span decoration = next == boldStart
+                    ? new Bold()
+                    : new Span { TextDecorations = TextDecorations.Strikethrough };
+                AddDecodedTextWithInlineCode(decoration.Inlines, text[(next + marker.Length)..decorationEnd]);
+                inlines.Add(decoration);
+                index = decorationEnd + marker.Length;
                 continue;
             }
             var codeEnd = text.IndexOf('`', codeStart + 1);
@@ -747,11 +789,13 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             var linkStart = linkMatch.Success ? linkMatch.Index : -1;
             var lineBreakMatch = HtmlLineBreakRegex.Match(text, index);
             var lineBreakStart = lineBreakMatch.Success ? lineBreakMatch.Index : -1;
+            var underlineMatch = HtmlUnderlineOpenRegex.Match(text, index);
+            var underlineStart = underlineMatch.Success ? underlineMatch.Index : -1;
             if (imageStart >= 0 && linkStart == imageStart + 1)
             {
                 linkStart = -1;
             }
-            var next = NextIndex(codeStart, boldStart, strikethroughStart, imageStart, linkStart, lineBreakStart);
+            var next = NextIndex(codeStart, boldStart, strikethroughStart, imageStart, linkStart, lineBreakStart, underlineStart);
             if (next < 0)
             {
                 paragraph.Inlines.Add(TextRun(text[index..]));
@@ -777,6 +821,21 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             {
                 paragraph.Inlines.Add(new LineBreak());
                 index = lineBreakMatch.Index + lineBreakMatch.Length;
+                continue;
+            }
+            if (next == underlineStart)
+            {
+                var underlineContentStart = underlineMatch.Index + underlineMatch.Length;
+                var underlineEnd = HtmlUnderlineCloseRegex.Match(text, underlineContentStart);
+                if (!underlineEnd.Success)
+                {
+                    paragraph.Inlines.Add(TextRun(text[underlineMatch.Index..]));
+                    return;
+                }
+                var underline = new Span { TextDecorations = TextDecorations.Underline };
+                AddDecodedTextWithInlineCode(underline.Inlines, text[underlineContentStart..underlineEnd.Index]);
+                paragraph.Inlines.Add(underline);
+                index = underlineEnd.Index + underlineEnd.Length;
                 continue;
             }
             if (next == imageStart)

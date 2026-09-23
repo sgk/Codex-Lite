@@ -1,6 +1,6 @@
 export type MarkdownInline =
   | { type: "text"; value: string }
-  | { type: "strong" | "em"; children: MarkdownInline[] }
+  | { type: "strong" | "em" | "underline"; children: MarkdownInline[] }
   | { type: "delete"; children: MarkdownInline[] }
   | { type: "code"; value: string }
   | { type: "link"; href: string; children: MarkdownInline[] }
@@ -105,6 +105,15 @@ export function parseMarkdownInline(source: string): MarkdownInline[] {
       const end = source.indexOf("~~", index + 2);
       if (end >= 0) { flush(); nodes.push({ type: "delete", children: parseMarkdownInline(source.slice(index + 2, end)) }); index = end + 2; continue; }
     }
+    const underlineOpen = source.slice(index).match(/^<u\s*>/i);
+    if (underlineOpen) {
+      const contentStart = index + underlineOpen[0].length;
+      const underlineClose = /<\/u\s*>/i.exec(source.slice(contentStart));
+      if (underlineClose) {
+        const contentEnd = contentStart + underlineClose.index;
+        flush(); nodes.push({ type: "underline", children: parseMarkdownInline(source.slice(contentStart, contentEnd)) }); index = contentEnd + underlineClose[0].length; continue;
+      }
+    }
     if (source[index] === "`") {
       const end = source.indexOf("`", index + 1);
       if (end >= 0) { flush(); nodes.push({ type: "code", value: source.slice(index + 1, end) }); index = end + 1; continue; }
@@ -164,7 +173,7 @@ function appendInline(parent: HTMLElement, nodes: MarkdownInline[]): void {
       const src = safeHttpUrl(node.src); if (!src) { parent.append(document.createTextNode(`![${node.alt}](${node.src})`)); continue; }
       const image = document.createElement("img"); image.src = src; image.alt = node.alt; image.loading = "lazy"; image.referrerPolicy = "no-referrer"; parent.append(image); continue;
     }
-    const element = document.createElement(node.type === "strong" ? "strong" : node.type === "em" ? "em" : node.type === "delete" ? "del" : "a");
+    const element = document.createElement(node.type === "strong" ? "strong" : node.type === "em" ? "em" : node.type === "underline" ? "u" : node.type === "delete" ? "del" : "a");
     if (node.type === "link") {
       const href = safeHttpUrl(node.href); if (!href) { appendInline(parent, node.children); continue; }
       element.setAttribute("href", href); element.setAttribute("target", "_blank"); element.setAttribute("rel", "noopener noreferrer");
