@@ -143,7 +143,7 @@ public partial class MainWindow : Window
     }
     private static readonly TimeSpan BackgroundMessagePollTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan TerminalMessageSyncTimeout = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan UsageCapacityTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan UsageCapacityTimeout = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan SlowUiPhaseThreshold = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan UiStallThreshold = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DaemonHealthCheckInterval = TimeSpan.FromSeconds(10);
@@ -3078,8 +3078,10 @@ public partial class MainWindow : Window
         _usageCapacityCts?.Dispose();
         var cts = new CancellationTokenSource(UsageCapacityTimeout);
         _usageCapacityCts = cts;
+        var projectId = _selectedProject.Id;
         var modelRefreshTask = RefreshModelListAsync(cts.Token);
         var provider = CurrentUsageProvider();
+        WritePerformanceLog("usage-refresh-start", $"projectId={LogText(projectId)} provider={LogText(provider)}");
         SetUsageProviderText(provider);
         _fiveHourUsageWindow = null;
         _weeklyUsageWindow = null;
@@ -3116,9 +3118,35 @@ public partial class MainWindow : Window
                 SetUsageBalanceText("OpenAI選択時に表示", FormatDeepSeekBalance(_deepSeekBalance), FormatDeepSeekBalanceDetail(_deepSeekBalance));
             }
             RedrawUsageGraphs();
+            WritePerformanceLog(
+                "usage-refresh-complete",
+                $"projectId={LogText(projectId)} provider={LogText(provider)} fiveHour={_fiveHourUsageWindow is not null} weekly={_weeklyUsageWindow is not null}");
         }
         catch (OperationCanceledException)
         {
+            var replacedByNewRefresh = _usageRefreshPending;
+            var selectionChanged = _selectedProject?.Id != projectId
+                || _selectedChat is not null
+                || CurrentUsageProvider() != provider;
+            if (!replacedByNewRefresh && !selectionChanged && !_isClosing)
+            {
+                SetUsageCapacityText("取得タイムアウト", "取得タイムアウト");
+                _codexCredits = null;
+                _deepSeekBalance = null;
+                ApplyUsageBreakdown(null);
+                SetUsageBalanceText("取得タイムアウト", "取得タイムアウト", "");
+                RedrawUsageGraphs();
+                StatusText.Text = "usage error | 取得がタイムアウトしました。再読み込みしてください。";
+                WritePerformanceLog(
+                    "usage-refresh-timeout",
+                    $"projectId={LogText(projectId)} provider={LogText(provider)} timeoutSeconds={UsageCapacityTimeout.TotalSeconds:F0}");
+            }
+            else
+            {
+                WritePerformanceLog(
+                    "usage-refresh-cancelled",
+                    $"projectId={LogText(projectId)} provider={LogText(provider)} replaced={replacedByNewRefresh} selectionChanged={selectionChanged} closing={_isClosing}");
+            }
         }
         catch (Exception ex)
         {
@@ -3133,6 +3161,9 @@ public partial class MainWindow : Window
                 SetUsageBalanceText("取得不可", "取得不可", "");
                 RedrawUsageGraphs();
                 StatusText.Text = $"usage error | {ShortError(ex)}";
+                WritePerformanceLog(
+                    "usage-refresh-error",
+                    $"projectId={LogText(projectId)} provider={LogText(provider)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
             }
         }
         finally
