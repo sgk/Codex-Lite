@@ -188,6 +188,10 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
 
     public bool HasAutomation => Chat.HasAutomation;
 
+    public bool HasEnabledAutomation => Chat.HasEnabledAutomation;
+
+    public bool HasOnlyDisabledAutomations => Chat.HasAutomation && !Chat.HasEnabledAutomation;
+
     private bool _isEditing;
     private bool _isArchiving;
     private bool _showDropBefore;
@@ -306,7 +310,8 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
     public void SetChat(ChatDto chat)
     {
         var titleChanged = Chat.Title != chat.Title;
-        var automationChanged = Chat.HasAutomation != chat.HasAutomation;
+        var automationChanged = Chat.HasAutomation != chat.HasAutomation
+            || Chat.HasEnabledAutomation != chat.HasEnabledAutomation;
         Chat = chat;
         if (titleChanged)
         {
@@ -317,6 +322,8 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
         if (automationChanged)
         {
             OnPropertyChanged(nameof(HasAutomation));
+            OnPropertyChanged(nameof(HasEnabledAutomation));
+            OnPropertyChanged(nameof(HasOnlyDisabledAutomations));
         }
         if (titleChanged)
         {
@@ -324,15 +331,18 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
         }
     }
 
-    public void SetHasAutomation(bool hasAutomation)
+    public void SetAutomationState(bool hasAutomation, bool hasEnabledAutomation)
     {
-        if (Chat.HasAutomation == hasAutomation)
+        hasEnabledAutomation &= hasAutomation;
+        if (Chat.HasAutomation == hasAutomation && Chat.HasEnabledAutomation == hasEnabledAutomation)
         {
             return;
         }
-        Chat = Chat with { HasAutomation = hasAutomation };
+        Chat = Chat with { HasAutomation = hasAutomation, HasEnabledAutomation = hasEnabledAutomation };
         OnPropertyChanged(nameof(Chat));
         OnPropertyChanged(nameof(HasAutomation));
+        OnPropertyChanged(nameof(HasEnabledAutomation));
+        OnPropertyChanged(nameof(HasOnlyDisabledAutomations));
     }
 
     public void ResetEditTitle()

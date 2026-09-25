@@ -654,11 +654,24 @@
                                        Text="&#xE121;"
                                        FontFamily="Segoe MDL2 Assets"
                                        FontSize="12"
-                                       Foreground="#667085"
-                                       ToolTip="オートメーション設定済み"
                                        HorizontalAlignment="Center"
                                        VerticalAlignment="Center"
-                                       Visibility="{Binding HasAutomation, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                       Visibility="{Binding HasAutomation, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <TextBlock.Style>
+                                    <Style TargetType="{x:Type TextBlock}">
+                                        <Setter Property="Foreground" Value="#667085"/>
+                                        <Setter Property="Opacity" Value="1"/>
+                                        <Setter Property="ToolTip" Value="有効なオートメーションがあります"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding HasOnlyDisabledAutomations}" Value="True">
+                                                <Setter Property="Foreground" Value="#B8C0CC"/>
+                                                <Setter Property="Opacity" Value="0.55"/>
+                                                <Setter Property="ToolTip" Value="オートメーションはすべて無効です"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
                             <Border Grid.Column="2"
                                     Width="7"
                                     Height="7"

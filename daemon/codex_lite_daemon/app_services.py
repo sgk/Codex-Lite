@@ -2190,6 +2190,7 @@ def _chat_out(project_id: str, thread: dict[str, Any]) -> dict:
         "createdAt": _iso_from_epoch(thread.get("createdAt")),
         "updatedAt": _iso_from_epoch(thread.get("updatedAt") or thread.get("recencyAt") or thread.get("createdAt")),
         "hasAutomation": False,
+        "hasEnabledAutomation": False,
     }
 
 

@@ -157,6 +157,7 @@ class RemoteGateway:
             "title": str(chat.get("title") or "New Chat"),
             "status": str(active_run.get("status") or "running") if active_run else "idle",
             "hasAutomation": bool(chat.get("hasAutomation")),
+            "hasEnabledAutomation": bool(chat.get("hasEnabledAutomation")),
             "updatedAt": chat.get("updatedAt"),
             "historyRevision": self._history_revision(chat_id, chat.get("updatedAt")),
         }

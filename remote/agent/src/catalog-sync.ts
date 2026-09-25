@@ -19,6 +19,7 @@ export interface CatalogChat {
   activeRunEventSequence?: number;
   historyChunkHashes?: string[];
   hasAutomation?: boolean;
+  hasEnabledAutomation?: boolean;
 }
 
 export interface CatalogProject {
@@ -44,6 +45,7 @@ export interface CloudCatalogChatRecord {
   historyChunkHashes?: string[];
   activeRunId?: string;
   hasAutomation?: boolean;
+  hasEnabledAutomation?: boolean;
 }
 
 export interface CatalogChanges {
@@ -150,6 +152,7 @@ export function cloudCatalogSnapshot(
       ...(record.historyChunkHashes ? { historyChunkHashes: record.historyChunkHashes } : {}),
       ...(record.activeRunId ? { activeRunId: record.activeRunId } : {}),
       ...(record.hasAutomation ? { hasAutomation: true } : {}),
+      ...(record.hasEnabledAutomation ? { hasEnabledAutomation: true } : {}),
     });
   }
   const chatOrders = new Map(chatRecords.map((record) => [`${record.projectId}\n${record.id}`, record.syncOrder]));
@@ -211,6 +214,7 @@ function chatFingerprint(chat: CatalogChat, syncOrder: number): string {
     activeRunId: chat.activeRunId ?? null,
     activeRunEventSequence: chat.activeRunEventSequence ?? 0,
     hasAutomation: chat.hasAutomation ?? false,
+    hasEnabledAutomation: chat.hasEnabledAutomation ?? false,
   });
 }
 

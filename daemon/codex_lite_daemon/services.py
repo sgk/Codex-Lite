@@ -169,7 +169,8 @@ class ChatService:
         rows = self.db.fetchall(
             """
             SELECT c.*,
-                   EXISTS(SELECT 1 FROM automations a WHERE a.project_id = c.project_id AND a.chat_id = c.id) AS has_automation
+                   EXISTS(SELECT 1 FROM automations a WHERE a.project_id = c.project_id AND a.chat_id = c.id) AS has_automation,
+                   EXISTS(SELECT 1 FROM automations a WHERE a.project_id = c.project_id AND a.chat_id = c.id AND a.enabled = 1) AS has_enabled_automation
             FROM chats c
             WHERE c.project_id = ? AND c.archived_at IS NULL AND c.can_continue = 1
             ORDER BY c.updated_at DESC, c.created_at DESC
@@ -195,7 +196,8 @@ class ChatService:
         row = self.db.fetchone(
             """
             SELECT c.*,
-                   EXISTS(SELECT 1 FROM automations a WHERE a.project_id = c.project_id AND a.chat_id = c.id) AS has_automation
+                   EXISTS(SELECT 1 FROM automations a WHERE a.project_id = c.project_id AND a.chat_id = c.id) AS has_automation,
+                   EXISTS(SELECT 1 FROM automations a WHERE a.project_id = c.project_id AND a.chat_id = c.id AND a.enabled = 1) AS has_enabled_automation
             FROM chats c
             WHERE c.id = ? AND c.project_id = ?
             """,

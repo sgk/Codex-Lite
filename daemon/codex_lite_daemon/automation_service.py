@@ -5,7 +5,7 @@ import inspect
 import json
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .db import Database
 from .errors import AppError
@@ -25,6 +25,14 @@ class AutomationService:
         self.db = db
         self.projects = projects
         self.chats = chats
+        self._change_listener: Callable[[str | None], None] | None = None
+
+    def set_change_listener(self, listener: Callable[[str | None], None] | None) -> None:
+        self._change_listener = listener
+
+    def _notify_changed(self, chat_id: str) -> None:
+        if self._change_listener is not None:
+            self._change_listener(chat_id)
 
     def list_automations(self, project_id: str, chat_id: str) -> list[dict]:
         self.chats.get_chat_row(project_id, chat_id)
@@ -57,6 +65,7 @@ class AutomationService:
             """,
             (automation_id, project_id, chat_id, clean_name, clean_prompt, kind, schedule_value, int(enabled), _next_run_at(kind, schedule_value, now) if enabled else None, now, now),
         )
+        self._notify_changed(chat_id)
         return self.get_automation(project_id, chat_id, automation_id)
 
     def get_automation(self, project_id: str, chat_id: str, automation_id: str) -> dict:
@@ -102,11 +111,13 @@ class AutomationService:
             """,
             (clean_name, clean_prompt, kind, schedule_value, int(new_enabled), next_run_at, int(new_enabled), now, automation_id),
         )
+        self._notify_changed(chat_id)
         return self.get_automation(project_id, chat_id, automation_id)
 
     def delete_automation(self, project_id: str, chat_id: str, automation_id: str) -> None:
         self._get_automation_row(project_id, chat_id, automation_id)
         self.db.execute("DELETE FROM automations WHERE id = ?", (automation_id,))
+        self._notify_changed(chat_id)
 
     async def run_now(self, project_id: str, chat_id: str, automation_id: str, runner: AutomationRunner) -> dict:
         automation = self._get_automation_row(project_id, chat_id, automation_id)
@@ -148,11 +159,14 @@ class AutomationService:
         )
 
     def disable(self, automation_id: str, error: str) -> None:
+        automation = self.db.fetchone("SELECT chat_id FROM automations WHERE id = ?", (automation_id,))
         now = utc_now()
         self.db.execute(
             "UPDATE automations SET enabled = 0, running = 0, next_run_at = NULL, last_error = ?, updated_at = ? WHERE id = ?",
             (error, now, automation_id),
         )
+        if automation is not None:
+            self._notify_changed(str(automation["chat_id"]))
 
     def _get_automation_row(self, project_id: str, chat_id: str, automation_id: str) -> dict:
         self.chats.get_chat_row(project_id, chat_id)

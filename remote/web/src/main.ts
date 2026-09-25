@@ -469,7 +469,7 @@ function renderTree(): void {
           for (const chat of projectChats) {
             const chatRow = div("tree-row chat-row");
             const chatButton = treeButton("●", text(chat.data().title) || "New Chat", "chat", device.id === elements.device.value && project.id === elements.project.value && chat.id === elements.chat.value);
-            if (chat.data().hasAutomation === true) appendAutomationIndicator(chatButton);
+            if (chat.data().hasAutomation === true) appendAutomationIndicator(chatButton, chat.data().hasEnabledAutomation === true);
             appendTreeIndicator(chatButton, chatIndicatorForDocument(device.id, chat), false);
             chatButton.addEventListener("click", () => selectChat(device.id, project.id, chat.id));
             chatRow.append(treeSpacer(), chatButton);
@@ -493,7 +493,7 @@ function treeSignature(): string {
     return `${key}:${text(project.data().displayName)}:${expandedProjectIds.has(key)}:${chats.map((chat) => {
       const activeRunStatus = isObject(chat.data().activeRun) ? text(chat.data().activeRun.status) : "";
       const unread = chatReadStates.get(chatReadKey(device.id, chat.id))?.unread === true;
-      return `${chat.id}:${text(chat.data().title)}:${chat.data().hasAutomation === true}:${chatTreeIndicator(activeRunStatus, unread)}`;
+      return `${chat.id}:${text(chat.data().title)}:${chat.data().hasAutomation === true}:${chat.data().hasEnabledAutomation === true}:${chatTreeIndicator(activeRunStatus, unread)}`;
     }).join(",")}`;
   }).join("|")).join("|");
   return `${elements.device.value}:${elements.project.value}:${elements.chat.value}:${[...expandedDeviceIds].join(",")}:${devicesSignature}:${projectsSignature}`;
@@ -514,11 +514,12 @@ function chatIndicatorForDocument(deviceId: string, chat: QueryDocumentSnapshot<
   return chatTreeIndicator(activeRunStatus, chatReadStates.get(chatReadKey(deviceId, chat.id))?.unread === true);
 }
 
-function appendAutomationIndicator(button: HTMLButtonElement): void {
+function appendAutomationIndicator(button: HTMLButtonElement, hasEnabledAutomation: boolean): void {
   const indicator = document.createElement("span");
-  indicator.className = "tree-automation-indicator";
+  indicator.className = `tree-automation-indicator${hasEnabledAutomation ? "" : " all-disabled"}`;
   indicator.textContent = "◷";
-  indicator.title = "オートメーション設定済み";
+  indicator.title = hasEnabledAutomation ? "有効なオートメーションがあります" : "オートメーションはすべて無効です";
+  indicator.setAttribute("aria-label", indicator.title);
   button.append(indicator);
 }
 

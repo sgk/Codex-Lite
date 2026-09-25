@@ -98,7 +98,8 @@ public sealed record ChatDto(
     string UpdatedAt,
     bool CanContinue = true,
     string? ContinueDisabledReason = null,
-    bool HasAutomation = false);
+    bool HasAutomation = false,
+    bool HasEnabledAutomation = false);
 
 public sealed record AutomationDto(
     string Id,

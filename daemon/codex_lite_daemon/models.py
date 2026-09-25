@@ -21,6 +21,7 @@ def chat_out(row: dict) -> dict:
         "canContinue": bool(row.get("can_continue", 1)),
         "continueDisabledReason": row.get("continue_disabled_reason"),
         "hasAutomation": bool(row.get("has_automation", 0)),
+        "hasEnabledAutomation": bool(row.get("has_enabled_automation", 0)),
     }
 
 

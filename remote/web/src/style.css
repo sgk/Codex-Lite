@@ -45,6 +45,7 @@ button:disabled { opacity: .5; cursor: default; }
 .tree-text { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-count { margin-left: auto; color: #98a2b3; font-size: 11px; }
 .tree-automation-indicator { flex: 0 0 15px; color: #667085; font-size: 14px; line-height: 1; text-align: center; }
+.tree-automation-indicator.all-disabled { color: #b8c0cc; opacity: .55; }
 .tree-chat-indicator { margin-left: auto; }
 .tree-chat-indicator.unread { flex: 0 0 9px; width: 9px; height: 9px; border-radius: 50%; background: #2f6fed; }
 .tree-chat-indicator.running { flex: 0 0 12px; width: 12px; height: 12px; border: 2px solid #b9cdfb; border-top-color: #2f6fed; border-radius: 50%; animation: tree-chat-spin 1s linear infinite; }

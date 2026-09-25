@@ -74,6 +74,7 @@ def create_app(config: Config | None = None) -> Starlette:
     use_app_server = cfg.runner_mode == "app-server"
     automation_runner = SimpleNamespace(start_message_run=app_runs.submit_message) if use_app_server else runs
     remote_gateway = RemoteGateway(db, projects, chats, app_threads, runs, app_runs, app_settings, transcript_import, use_app_server)
+    automations.set_change_listener(remote_gateway.mark_catalog_changed)
     dynamic_tools.set_change_listener(remote_gateway.mark_catalog_changed)
     messages.set_insert_listener(remote_gateway.mark_catalog_changed)
     runs.events.set_lifecycle_listener(remote_gateway.mark_catalog_changed)
@@ -365,7 +366,6 @@ def create_app(config: Config | None = None) -> Starlette:
             _optional_bool(body, "enabled", True),
             _optional_str(body, "schedule_kind") or "interval_minutes",
         )
-        remote_gateway.mark_catalog_changed(chat_id)
         return automation
 
     @patch("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}")
@@ -388,7 +388,6 @@ def create_app(config: Config | None = None) -> Starlette:
     @delete("/projects/{project_id}/chats/{chat_id}/automations/{automation_id}", status_code=204)
     async def delete_automation(project_id: str, chat_id: str, automation_id: str) -> None:
         automations.delete_automation(project_id, chat_id, automation_id)
-        remote_gateway.mark_catalog_changed(chat_id)
 
     @delete("/projects/{project_id}/chats/{chat_id}", status_code=204)
     async def delete_chat(project_id: str, chat_id: str) -> None:

@@ -5006,7 +5006,7 @@ public partial class MainWindow : Window
             {
                 _automations.Add(item);
             }
-            SetChatHasAutomation(chat.Id, _automations.Count > 0);
+            SetChatAutomationState(chat.Id, _automations.Count > 0, _automations.Any(item => item.Enabled));
         }
         catch (Exception ex)
         {
@@ -5316,7 +5316,7 @@ public partial class MainWindow : Window
             {
                 _automations.Add(created);
                 AutomationsGrid.SelectedItem = created;
-                SetChatHasAutomation(chat.Id, true);
+                SetChatAutomationState(chat.Id, true, _automations.Any(item => item.Enabled));
                 EndAutomationEdit();
             }
             StatusText.Text = "オートメーションを作成しました";
@@ -5491,7 +5491,7 @@ public partial class MainWindow : Window
             await _client.DeleteAutomationAsync(project.Id, chat.Id, automation.Id);
             _automations.Remove(automation);
             ClearDeletedAutomationSelection();
-            SetChatHasAutomation(chat.Id, _automations.Count > 0);
+            SetChatAutomationState(chat.Id, _automations.Count > 0, _automations.Any(item => item.Enabled));
             StatusText.Text = "オートメーションを削除しました";
         }
         catch (Exception ex)
@@ -5520,11 +5520,13 @@ public partial class MainWindow : Window
             _automations[index] = updated;
             AutomationsGrid.SelectedItem = updated;
             ShowSelectedAutomationDetails();
+            SetChatAutomationState(updated.ChatId, true, _automations.Any(item => item.Enabled));
             return;
         }
         _automations.Add(updated);
         AutomationsGrid.SelectedItem = updated;
         ShowSelectedAutomationDetails();
+        SetChatAutomationState(updated.ChatId, true, _automations.Any(item => item.Enabled));
         UpdateAutomationButtonState();
     }
 
@@ -6287,13 +6289,13 @@ public partial class MainWindow : Window
         return FindChatItem(chatId)?.Project.Id;
     }
 
-    private void SetChatHasAutomation(string chatId, bool hasAutomation)
+    private void SetChatAutomationState(string chatId, bool hasAutomation, bool hasEnabledAutomation)
     {
         if (FindChatItem(chatId) is not { } item)
         {
             return;
         }
-        item.SetHasAutomation(hasAutomation);
+        item.SetAutomationState(hasAutomation, hasEnabledAutomation);
         if (_selectedChat?.Id == chatId)
         {
             _selectedChat = item.Chat;
