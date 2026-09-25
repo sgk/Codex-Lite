@@ -143,10 +143,19 @@ def test_new_capacity_window_switches_display_without_deleting_history(tmp_path)
 class FakeAppServer:
     async def request(self, method: str) -> dict:
         assert method == "account/rateLimits/read"
+        now = datetime.now(timezone.utc)
         return {
             "rateLimits": {
-                "primary": {"usedPercent": 10, "windowDurationMins": 300, "resetsAt": 1790000000},
-                "secondary": {"usedPercent": 25, "windowDurationMins": 10080, "resetsAt": 1790500000},
+                "primary": {
+                    "usedPercent": 10,
+                    "windowDurationMins": 300,
+                    "resetsAt": int((now + timedelta(hours=4)).timestamp()),
+                },
+                "secondary": {
+                    "usedPercent": 25,
+                    "windowDurationMins": 10080,
+                    "resetsAt": int((now + timedelta(days=6)).timestamp()),
+                },
             }
         }
 
