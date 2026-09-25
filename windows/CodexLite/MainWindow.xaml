@@ -1046,7 +1046,7 @@
                             <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
                             <ComboBox x:Name="NewChatPermissionModeBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="Codexの権限モード" SelectionChanged="ChatRuntimeSetting_Changed"/>
                             <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                            <ComboBox x:Name="NewChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                            <ComboBox x:Name="NewChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="使用するモデル" DropDownOpened="ModelBox_DropDownOpened" SelectionChanged="ChatRuntimeSetting_Changed"/>
                             <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
                             <ComboBox x:Name="NewChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
                         </StackPanel>
@@ -1460,7 +1460,7 @@
                                 <TextBlock Text="承認" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
                                 <ComboBox x:Name="ChatPermissionModeBox" Width="104" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="Codexの権限モード" SelectionChanged="ChatRuntimeSetting_Changed"/>
                                 <TextBlock Text="モデル" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
-                                <ComboBox x:Name="ChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="使用するモデル" SelectionChanged="ChatRuntimeSetting_Changed"/>
+                                <ComboBox x:Name="ChatModelBox" Width="126" Height="24" FontSize="11" Margin="0,0,8,0" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="使用するモデル" DropDownOpened="ModelBox_DropDownOpened" SelectionChanged="ChatRuntimeSetting_Changed"/>
                                 <TextBlock Text="思考" FontSize="11" VerticalAlignment="Center" Foreground="#666" Margin="0,0,4,0"/>
                                 <ComboBox x:Name="ChatReasoningEffortBox" Width="82" Height="24" FontSize="11" ItemContainerStyle="{StaticResource ChatRuntimeChoiceItem}" ToolTip="思考の深さ" SelectionChanged="ChatRuntimeSetting_Changed"/>
                             </StackPanel>

@@ -174,6 +174,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, int> _runActivityDepthByChat = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _runProgressTextByChat = new(StringComparer.Ordinal);
     private readonly Dictionary<string, IReadOnlyList<string>> _reasoningEffortsByModel = new(StringComparer.Ordinal);
+    private readonly List<string> _discoveredModels = new();
     private readonly List<RecentModelReasoningChoiceDto> _recentModelReasoningChoices = new();
     private readonly DispatcherTimer _streamingTextTimer = new(DispatcherPriority.Render) { Interval = StreamingTextInterval };
     private readonly DispatcherTimer _reasoningProgressTimer = new(DispatcherPriority.Render) { Interval = ReasoningProgressInterval };
@@ -4972,6 +4973,7 @@ public partial class MainWindow : Window
             if (models?.AvailableModels is { Count: > 0 })
             {
                 ApplyModelList(models);
+                WritePerformanceLog("model-list-refreshed", $"dynamic={models.Dynamic} count={models.AvailableModels.Count}");
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -5790,7 +5792,10 @@ public partial class MainWindow : Window
         var choices = new List<ModelChoice>();
         choices.AddRange(_recentModelReasoningChoices.Select(choice => new ModelChoice(choice.Model, choice.ReasoningEffort, true)));
         choices.Add(new ModelChoice("", "", false));
-        foreach (var model in models)
+        var availableModels = _discoveredModels.Count > 0
+            ? _discoveredModels.Concat(models)
+            : models;
+        foreach (var model in availableModels)
         {
             var normalized = (model ?? "").Trim();
             if (normalized.Length > 0 && !choices.Any(choice => string.Equals(choice.Model, normalized, StringComparison.Ordinal) && !choice.IsRecent))
@@ -5852,15 +5857,32 @@ public partial class MainWindow : Window
 
     private void ApplyModelList(ModelListDto modelList)
     {
-        _reasoningEffortsByModel.Clear();
-        foreach (var pair in modelList.ReasoningEffortsByModel ?? new Dictionary<string, IReadOnlyList<string>>())
+        if (modelList.Dynamic || _discoveredModels.Count == 0)
         {
-            if (pair.Value is { Count: > 0 })
+            _discoveredModels.Clear();
+            _discoveredModels.AddRange(
+                modelList.AvailableModels
+                    .Select(model => (model ?? "").Trim())
+                    .Where(model => model.Length > 0)
+                    .Distinct(StringComparer.Ordinal));
+        }
+        if (modelList.Dynamic || _reasoningEffortsByModel.Count == 0)
+        {
+            _reasoningEffortsByModel.Clear();
+            foreach (var pair in modelList.ReasoningEffortsByModel ?? new Dictionary<string, IReadOnlyList<string>>())
             {
-                _reasoningEffortsByModel[pair.Key] = pair.Value;
+                if (pair.Value is { Count: > 0 })
+                {
+                    _reasoningEffortsByModel[pair.Key] = pair.Value;
+                }
             }
         }
         UpdateModelChoices(modelList.AvailableModels);
+    }
+
+    private async void ModelBox_DropDownOpened(object sender, EventArgs e)
+    {
+        await RefreshModelListAsync();
     }
 
     private IReadOnlyList<string> ReasoningEffortsForModel(string model)
