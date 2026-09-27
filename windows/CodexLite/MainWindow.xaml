@@ -1053,7 +1053,7 @@
                         <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
                             <Button x:Name="NewChatAttachButton" Content="添付" Click="AttachFiles_Click" Height="24" MinWidth="56" Margin="0,0,6,0"/>
                             <Button x:Name="NewChatPasteImageButton" Content="画像貼付" Click="PasteImage_Click" Height="24" MinWidth="76" Margin="0,0,6,0"/>
-                            <Button x:Name="NewChatSendButton" Content="送信" Click="NewChatSend_Click" Height="24" MinWidth="56"/>
+                            <Button x:Name="NewChatSendButton" Content="送信" Click="NewChatSend_Click" Height="24" MinWidth="56" ToolTip="Ctrl+Enterで送信"/>
                         </StackPanel>
                     </Grid>
                     <TextBlock x:Name="NewChatComposerHintText"
@@ -1467,7 +1467,7 @@
                             <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
                                 <Button x:Name="AttachButton" Content="添付" Click="AttachFiles_Click" Height="24" MinWidth="56" Margin="0,0,6,0"/>
                                 <Button x:Name="PasteImageButton" Content="画像貼付" Click="PasteImage_Click" Height="24" MinWidth="76" Margin="0,0,6,0"/>
-                                <Button x:Name="SendButton" Content="送信" Click="Send_Click" Height="24" MinWidth="56" Margin="0,0,6,0"/>
+                                <Button x:Name="SendButton" Content="送信" Click="Send_Click" Height="24" MinWidth="56" Margin="0,0,6,0" ToolTip="Ctrl+Enterで送信"/>
                                 <Button x:Name="CancelButton" Content="停止" Click="Cancel_Click" Height="24" MinWidth="56" IsEnabled="False" ToolTipService.ShowOnDisabled="True"/>
                             </StackPanel>
                         </Grid>

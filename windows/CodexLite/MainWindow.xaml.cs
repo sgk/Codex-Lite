@@ -7012,7 +7012,7 @@ public partial class MainWindow : Window
         {
             return;
         }
-        if (e.Key == Key.Enter && !e.KeyboardDevice.Modifiers.HasFlag(System.Windows.Input.ModifierKeys.Shift))
+        if (e.Key == Key.Enter && e.KeyboardDevice.Modifiers == System.Windows.Input.ModifierKeys.Control)
         {
             e.Handled = true;
             await SubmitMessageBoxAsync();

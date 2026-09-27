@@ -115,8 +115,15 @@ export function chatSelectionFromHash(hash: string): ChatSelection | undefined {
   } catch { return undefined; }
 }
 
-export function shouldSubmitComposer(key: string, shiftKey: boolean, isComposing: boolean, mobileLayout = false): boolean {
-  return key === "Enter" && !shiftKey && !isComposing && !mobileLayout;
+export function shouldSubmitComposer(
+  key: string,
+  ctrlKey: boolean,
+  shiftKey: boolean,
+  altKey: boolean,
+  metaKey: boolean,
+  isComposing: boolean,
+): boolean {
+  return key === "Enter" && ctrlKey && !shiftKey && !altKey && !metaKey && !isComposing;
 }
 
 export function composerDraftContextKey(deviceId: string, projectId: string, chatId: string): string {

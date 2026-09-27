@@ -133,7 +133,14 @@ elements.logout.addEventListener("click", () => void signOut(auth));
 elements.device.addEventListener("change", subscribeDeviceContents);
 elements.send.addEventListener("click", () => void sendInstruction());
 elements.content.addEventListener("keydown", (event) => {
-  if (!shouldSubmitComposer(event.key, event.shiftKey, event.isComposing || event.keyCode === 229, mobileLayout())) return;
+  if (!shouldSubmitComposer(
+    event.key,
+    event.ctrlKey,
+    event.shiftKey,
+    event.altKey,
+    event.metaKey,
+    event.isComposing || event.keyCode === 229,
+  )) return;
   event.preventDefault();
   void sendInstruction();
 });

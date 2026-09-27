@@ -83,11 +83,13 @@ test("チャット選択をハッシュURLへ往復変換する", () => {
   assert.equal(chatSelectionFromHash("#/invalid"), undefined);
 });
 
-test("Enterで送信しShift+EnterとIME変換中は送信しない", () => {
-  assert.equal(shouldSubmitComposer("Enter", false, false), true);
-  assert.equal(shouldSubmitComposer("Enter", true, false), false);
-  assert.equal(shouldSubmitComposer("Enter", false, true), false);
-  assert.equal(shouldSubmitComposer("Enter", false, false, true), false);
+test("Ctrl+Enterだけで送信しEnterとIME変換中は送信しない", () => {
+  assert.equal(shouldSubmitComposer("Enter", true, false, false, false, false), true);
+  assert.equal(shouldSubmitComposer("Enter", false, false, false, false, false), false);
+  assert.equal(shouldSubmitComposer("Enter", true, true, false, false, false), false);
+  assert.equal(shouldSubmitComposer("Enter", true, false, true, false, false), false);
+  assert.equal(shouldSubmitComposer("Enter", true, false, false, true, false), false);
+  assert.equal(shouldSubmitComposer("Enter", true, false, false, false, true), false);
 });
 
 test("画像添付で扱えるMIMEタイプだけを受け入れる", () => {
