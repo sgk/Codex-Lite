@@ -1055,7 +1055,7 @@ class AppServerRunService:
         if run is None:
             raise AppError("steer_failed", "Run is not active.", 409)
         if run.status != "running":
-            raise AppError("steer_failed", "Run is not running.", 409)
+            raise AppError("steer_run_finished", "Run has already finished.", 409)
         clean_content = content.strip()
         if not clean_content:
             raise AppError("validation_error", "Steer content must not be empty.", 400)

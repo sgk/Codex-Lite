@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text;
@@ -8,6 +9,50 @@ using System.Text.Json;
 using CodexLite.Models;
 
 namespace CodexLite.Services;
+
+public sealed class DaemonRequestException : InvalidOperationException
+{
+    private DaemonRequestException(HttpStatusCode statusCode, string code, string message, string responseBody)
+        : base(message)
+    {
+        StatusCode = statusCode;
+        Code = code;
+        ResponseBody = responseBody;
+    }
+
+    public HttpStatusCode StatusCode { get; }
+    public string Code { get; }
+    public string ResponseBody { get; }
+
+    public static DaemonRequestException FromResponse(HttpStatusCode statusCode, string responseBody)
+    {
+        var code = "daemon_request_failed";
+        var message = responseBody;
+        try
+        {
+            using var document = JsonDocument.Parse(responseBody);
+            if (document.RootElement.TryGetProperty("error", out var error)
+                && error.ValueKind == JsonValueKind.Object)
+            {
+                if (error.TryGetProperty("code", out var codeElement) && codeElement.ValueKind == JsonValueKind.String)
+                {
+                    code = codeElement.GetString() ?? code;
+                }
+                if (error.TryGetProperty("message", out var messageElement) && messageElement.ValueKind == JsonValueKind.String)
+                {
+                    message = messageElement.GetString() ?? message;
+                }
+            }
+        }
+        catch (JsonException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        return new DaemonRequestException(statusCode, code, message, responseBody);
+    }
+}
 
 public sealed class DaemonClient
 {
@@ -647,7 +692,7 @@ public sealed class DaemonClient
         if (!response.IsSuccessStatusCode)
         {
             var text = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new InvalidOperationException(text);
+            throw DaemonRequestException.FromResponse(response.StatusCode, text);
         }
         return await response.Content.ReadFromJsonAsync<T>(JsonOptions, cancellationToken);
     }

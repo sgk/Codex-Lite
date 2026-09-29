@@ -3853,6 +3853,35 @@ async def test_app_server_steer_starts_next_turn_when_previous_turn_is_already_i
 
 
 @pytest.mark.asyncio
+async def test_app_server_steer_reports_finished_run_separately(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    app_server = TurnStartAppServer()
+    threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "hello")
+    runs.runs[result["runId"]].status = "succeeded"
+
+    with pytest.raises(AppError) as exc:
+        await runs.steer_run(result["runId"], "continue")
+
+    assert exc.value.code == "steer_run_finished"
+    assert not any(method == "turn/steer" for method, _ in app_server.requests)
+    assert [message["content"] for message in messages.list_messages(project_id, chat_id)] == ["hello"]
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_app_server_run_sends_attachments_to_turn(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()

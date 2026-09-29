@@ -116,6 +116,8 @@ public partial class MainWindow : Window
             Operation ??= hasActiveRun ? "steer" : "send";
             return Operation;
         }
+
+        public void SwitchToSend() => Operation = "send";
     }
     private sealed record RemoteSyncProgress(
         string State,
@@ -7963,7 +7965,6 @@ public partial class MainWindow : Window
         WritePerformanceLog(
             "steer-request",
             $"chatId={LogText(chat.Id)} runId={LogText(runId)} content={LogText(content)} attachments={LogText(AttachmentLogText(attachments), 12000)}");
-        AddComposerHistory(chat.Id, content);
         try
         {
             SendButton.IsEnabled = false;
@@ -7973,6 +7974,7 @@ public partial class MainWindow : Window
             {
                 throw new InvalidOperationException("追加指示の保存済みメッセージIDを取得できませんでした。");
             }
+            AddComposerHistory(chat.Id, content);
             RemoveQueuedComposerSubmission(submission);
             AppendMessageForChat(activeRun.ProjectId, chat.Id, new MessageDto(
                 result.MessageId,
@@ -7987,6 +7989,21 @@ public partial class MainWindow : Window
             WritePerformanceLog("steer-sent", $"chatId={LogText(chat.Id)} runId={LogText(runId)}");
             ShowRunProgressForChat(chat.Id, "追加指示を送信済み");
             return true;
+        }
+        catch (DaemonRequestException ex) when (ex.Code.Equals("steer_run_finished", StringComparison.Ordinal))
+        {
+            WritePerformanceLog(
+                "steer-finished-switch-to-send",
+                $"chatId={LogText(chat.Id)} runId={LogText(runId)} code={LogText(ex.Code)}");
+            submission.SwitchToSend();
+            if (!string.Equals(_selectedProject?.Id, submission.ProjectId, StringComparison.Ordinal)
+                || !string.Equals(_selectedChat?.Id, submission.ChatId, StringComparison.Ordinal))
+            {
+                submission.SetState("queued");
+                return false;
+            }
+            ShowRunProgressForChat(chat.Id, "前の応答が完了したため、次の指示として送信中");
+            return await SendCurrentMessageAsync(submission);
         }
         catch (Exception ex)
         {
