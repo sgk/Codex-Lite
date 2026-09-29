@@ -25,7 +25,7 @@ import { loadAgentConfig } from "./config.js";
 import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon } from "./daemon.js";
 import { isCountableProgressEvent } from "./progress-sync.js";
-import { historyChunkId, historyChunks } from "./history-chunks.js";
+import { historyChunks } from "./history-chunks.js";
 
 interface QueuedTask {
   operation: RemoteOperation;
@@ -417,12 +417,22 @@ async function syncCatalog(): Promise<void> {
           120_000,
           `会話履歴の取得がタイムアウトしました（${change.chat.id}）。`,
         );
-        const historySync = await syncHistoryChunks(change.chat.id, history, previousChat?.historyChunkHashes);
+        const historySync = await syncHistoryChunks(
+          change.chat.id,
+          history,
+          previousChat?.historyGeneration ? previousChat.historyChunkHashes : undefined,
+        );
         recordsTotal += historySync.writes;
         recordsWritten += historySync.writes;
         data.historyItemCount = history.length;
         data.historyChunkHashes = historySync.hashes;
+        data.historyChunkIds = historySync.chunkIds;
+        data.historyGeneration = historySync.generation;
         data.historySyncedAt = serverTimestamp();
+        await setDoc(doc(deviceRef, "chats", change.chat.id), data, { merge: true });
+        recordsWritten += 1;
+        await deleteStaleHistoryChunks(change.chat.id, new Set(historySync.chunkIds));
+        continue;
       }
       writes.push({
         reference: doc(deviceRef, "chats", change.chat.id),
@@ -542,6 +552,7 @@ async function loadCloudCatalogSnapshot(): Promise<CatalogProject[]> {
       hasAutomation: chat.data().hasAutomation === true,
       hasEnabledAutomation: chat.data().hasEnabledAutomation === true,
       historyChunkHashes: stringArrayField(chat.data(), "historyChunkHashes"),
+      historyGeneration: textField(chat.data(), "historyGeneration") || undefined,
       activeRunId: isObject(chat.data().activeRun) ? textField(chat.data().activeRun, "id") || undefined : undefined,
     })),
   );
@@ -576,7 +587,7 @@ async function syncHistoryChunks(
   chatId: string,
   history: import("./catalog-sync.js").CatalogHistoryItem[],
   previousHashes: string[] | undefined,
-): Promise<{ writes: number; hashes: string[] }> {
+): Promise<{ writes: number; hashes: string[]; generation: string; chunkIds: string[] }> {
   const chunksRef = collection(deviceRef, "historyChunks");
   const writes: Array<{ reference: DocumentReference<DocumentData>; data?: Record<string, unknown> }> = [];
   const chunks = historyChunks(chatId, history);
@@ -586,9 +597,6 @@ async function syncHistoryChunks(
       reference: doc(chunksRef, chunk.id),
       data: { chatId, index: chunk.index, hash: chunk.hash, payload: chunk.payload },
     });
-  }
-  for (let index = chunks.length; index < (previousHashes?.length ?? 0); index += 1) {
-    writes.push({ reference: doc(chunksRef, historyChunkId(chatId, index)) });
   }
   // Keep each large history document in its own commit. Live activeRun
   // updates then wait behind at most one history document, not a multi-MiB
@@ -601,7 +609,26 @@ async function syncHistoryChunks(
     }
     await batch.commit();
   }
-  return { writes: writes.length, hashes: chunks.map((chunk) => chunk.hash) };
+  return {
+    writes: writes.length,
+    hashes: chunks.map((chunk) => chunk.hash),
+    generation: chunks[0]?.generation ?? "empty",
+    chunkIds: chunks.map((chunk) => chunk.id),
+  };
+}
+
+async function deleteStaleHistoryChunks(chatId: string, currentChunkIds: Set<string>): Promise<void> {
+  try {
+    const snapshot = await getDocs(query(collection(deviceRef, "historyChunks"), where("chatId", "==", chatId)));
+    const stale = snapshot.docs.filter((chunk) => !currentChunkIds.has(chunk.id));
+    for (let offset = 0; offset < stale.length; offset += 450) {
+      const batch = writeBatch(db);
+      for (const chunk of stale.slice(offset, offset + 450)) batch.delete(chunk.ref);
+      await batch.commit();
+    }
+  } catch (error) {
+    reportBackgroundError(error);
+  }
 }
 
 function reportSyncProgress(progress: Record<string, unknown>): void {

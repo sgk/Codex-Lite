@@ -30,8 +30,16 @@ test("単一履歴項目が文書上限を超えてもUTF-8を壊さず分割し
   assert.deepEqual(JSON.parse(chunks.map((chunk) => chunk.payload).join("")), entries);
 });
 
-test("履歴チャンクIDはチャットと連番から安定して生成する", () => {
-  assert.equal(historyChunkId("chat-1", 0), historyChunks("chat-1", [entry("1", "a")])[0].id);
-  assert.match(historyChunkId("chat-1", 2), /-000002$/);
-  assert.notEqual(historyChunkId("chat-1", 2), historyChunkId("chat-2", 2));
+test("履歴チャンクIDはチャット、内容ハッシュ、連番から安定して生成する", () => {
+  const chunk = historyChunks("chat-1", [entry("1", "a")])[0];
+  assert.equal(historyChunkId("chat-1", chunk.hash, 0), chunk.id);
+  assert.match(historyChunkId("chat-1", "a".repeat(64), 2), new RegExp(`-${"a".repeat(32)}-000002$`));
+  assert.notEqual(historyChunkId("chat-1", chunk.hash, 2), historyChunkId("chat-2", chunk.hash, 2));
+});
+
+test("履歴内容が変わるとチャンク世代と文書IDも変わる", () => {
+  const before = historyChunks("chat-1", [entry("1", "a")]);
+  const after = historyChunks("chat-1", [entry("1", "b")]);
+  assert.notEqual(before[0].generation, after[0].generation);
+  assert.notEqual(before[0].id, after[0].id);
 });

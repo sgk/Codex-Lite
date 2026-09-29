@@ -88,16 +88,34 @@ test("同じカタログ版の同期失敗は待機を増やして3回で止め�
 });
 
 test("起動時は軽量なクラウドカタログを前回同期状態として復元する", () => {
-  assert.deepEqual(cloudCatalogSnapshot(
+  const restored = cloudCatalogSnapshot(
     [
       { id: "project-2", name: "Two", syncOrder: 1 },
       { id: "project-1", name: "One", syncOrder: 0 },
     ],
     [
-      { id: "chat-2", projectId: "project-1", title: "Second", status: "idle", historyRevision: "r1", syncOrder: 1 },
-      { id: "chat-1", projectId: "project-1", title: "First", status: "idle", historyRevision: "r1", syncOrder: 0 },
+      { id: "chat-2", projectId: "project-1", title: "Second", status: "idle", historyRevision: "r1", historyGeneration: "g2", syncOrder: 1 },
+      { id: "chat-1", projectId: "project-1", title: "First", status: "idle", historyRevision: "r1", historyGeneration: "g1", syncOrder: 0 },
     ],
-  ), first);
+  );
+  assert.equal(restored[0].chats[0].historyRevision, "r1");
+  assert.equal(restored[0].chats[0].historyGeneration, "g1");
+  assert.equal(restored[0].chats[1].historyGeneration, "g2");
+  assert.equal(restored[1].id, "project-2");
+});
+
+test("世代のない旧履歴は同じ履歴改訂でも再同期対象にする", () => {
+  const cloud = cloudCatalogSnapshot(
+    [{ id: "project-1", name: "One", syncOrder: 0 }],
+    [{ id: "chat-1", projectId: "project-1", title: "First", status: "idle", historyRevision: "r1", syncOrder: 0 }],
+  );
+  const local: CatalogProject[] = [{
+    id: "project-1",
+    name: "One",
+    chats: [{ id: "chat-1", title: "First", status: "idle", historyRevision: "r1" }],
+  }];
+
+  assert.deepEqual(diffCatalog(cloud, local).changedChats.map((item) => item.chat.id), ["chat-1"]);
 });
 
 test("起動時にクラウドのオートメーション設定状態を復元する", () => {

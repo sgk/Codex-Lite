@@ -18,6 +18,7 @@ export interface CatalogChat {
   activeRunId?: string;
   activeRunEventSequence?: number;
   historyChunkHashes?: string[];
+  historyGeneration?: string;
   hasAutomation?: boolean;
   hasEnabledAutomation?: boolean;
 }
@@ -43,6 +44,7 @@ export interface CloudCatalogChatRecord {
   updatedAt?: string;
   historyRevision?: string;
   historyChunkHashes?: string[];
+  historyGeneration?: string;
   activeRunId?: string;
   hasAutomation?: boolean;
   hasEnabledAutomation?: boolean;
@@ -148,8 +150,9 @@ export function cloudCatalogSnapshot(
       title: record.title,
       status: record.status,
       ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
-      ...(record.historyRevision ? { historyRevision: record.historyRevision } : {}),
-      ...(record.historyChunkHashes ? { historyChunkHashes: record.historyChunkHashes } : {}),
+      ...(record.historyGeneration && record.historyRevision ? { historyRevision: record.historyRevision } : {}),
+      ...(record.historyGeneration && record.historyChunkHashes ? { historyChunkHashes: record.historyChunkHashes } : {}),
+      ...(record.historyGeneration ? { historyGeneration: record.historyGeneration } : {}),
       ...(record.activeRunId ? { activeRunId: record.activeRunId } : {}),
       ...(record.hasAutomation ? { hasAutomation: true } : {}),
       ...(record.hasEnabledAutomation ? { hasEnabledAutomation: true } : {}),

@@ -4,7 +4,9 @@ import { getAuth, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signO
 import {
   collection,
   doc,
+  documentId,
   getFirestore,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -67,7 +69,6 @@ const elements = {
 let user: User | null = null;
 let deviceUnsubscribe: Unsubscribe | undefined;
 let taskUnsubscribe: Unsubscribe | undefined;
-let historyUnsubscribe: Unsubscribe | undefined;
 let tasks: Array<QueryDocumentSnapshot<DocumentData>> = [];
 let devices: Array<QueryDocumentSnapshot<DocumentData>> = [];
 const projectUnsubscribes = new Map<string, Unsubscribe>();
@@ -85,7 +86,7 @@ let renderedConversationSelection = "";
 let selectedHistoryKey = "";
 let selectedHistorySignature = "";
 let selectedHistoryEntries: HistoryEntry[] = [];
-let selectedHistoryChunkDocs: Array<QueryDocumentSnapshot<DocumentData>> = [];
+let historyLoadVersion = 0;
 let historyScrollVersion = 0;
 let activeApproval: { runId: string; requestId: string; summary: string } | undefined;
 let pendingCreatedChat: { taskId: string; deviceId: string; projectId: string; optimisticId: string } | undefined;
@@ -411,7 +412,6 @@ function subscribeDeviceChats(deviceId: string, deviceRef: ReturnType<typeof doc
         elements.chat.value = "";
         elements.newChat.checked = Boolean(elements.project.value);
       }
-      applySelectedHistoryChunks();
       renderConversationHeader();
       renderRunProgress();
     }
@@ -782,52 +782,63 @@ function markChatRead(deviceId: string, chatId: string): void {
 }
 
 function syncSelectedHistorySubscription(): void {
+  const selectedChat = selectedChats(elements.project.value).find((item) => item.id === elements.chat.value);
+  const generation = selectedChat ? text(selectedChat.data().historyGeneration) : "";
   const desiredKey = user && elements.device.value && elements.chat.value
-    ? `${elements.device.value}\n${elements.chat.value}`
+    ? `${elements.device.value}\n${elements.chat.value}\n${generation || "@pending"}`
     : "";
   if (desiredKey === selectedHistoryKey) return;
-  historyUnsubscribe?.();
-  historyUnsubscribe = undefined;
+  const loadVersion = ++historyLoadVersion;
   selectedHistoryKey = desiredKey;
   selectedHistorySignature = "";
   selectedHistoryEntries = [];
-  selectedHistoryChunkDocs = [];
-  setHistoryLoading(Boolean(desiredKey));
-  if (!user || !desiredKey) return;
-  const subscriptionKey = desiredKey;
-  const chunks = query(
-    collection(db, "users", user.uid, "devices", elements.device.value, "historyChunks"),
-    where("chatId", "==", elements.chat.value),
-  );
-  historyUnsubscribe = onSnapshot(chunks, (snapshot) => {
-    if (selectedHistoryKey !== subscriptionKey) return;
-    selectedHistoryChunkDocs = snapshot.docs;
-    applySelectedHistoryChunks();
-  }, (error) => {
-    setHistoryLoading(false);
-    showError(error);
-  });
+  setHistoryLoading(Boolean(desiredKey && generation));
+  if (!user || !desiredKey || !selectedChat || !generation) return;
+  const chunkIds = Array.isArray(selectedChat.data().historyChunkIds)
+    ? selectedChat.data().historyChunkIds.filter((item: unknown): item is string => typeof item === "string")
+    : [];
+  const expectedHashes = Array.isArray(selectedChat.data().historyChunkHashes)
+    ? selectedChat.data().historyChunkHashes.filter((item: unknown): item is string => typeof item === "string")
+    : [];
+  void loadSelectedHistoryChunks(desiredKey, loadVersion, chunkIds, expectedHashes);
 }
 
-function applySelectedHistoryChunks(): void {
-  const chat = selectedChats(elements.project.value).find((item) => item.id === elements.chat.value);
-  if (!chat) return;
-  const expectedHashes = Array.isArray(chat.data().historyChunkHashes)
-    ? chat.data().historyChunkHashes.filter((item: unknown): item is string => typeof item === "string")
-    : [];
-  const actual = selectedHistoryChunkDocs.map((chunk) => ({ index: number(chunk.data().index), hash: text(chunk.data().hash) }));
-  if (!historyChunksAreComplete(expectedHashes, actual)) return;
-  const ordered = [...selectedHistoryChunkDocs].sort((left, right) => number(left.data().index) - number(right.data().index));
-  const nextSignature = ordered.map((chunk) => `${chunk.id}:${text(chunk.data().hash)}`).join("|");
-  if (nextSignature !== selectedHistorySignature) {
-    selectedHistoryEntries = parseHistoryChunk(ordered.map((chunk) => text(chunk.data().payload)).join(""))
-      .filter(isHistoryEntry);
-    selectedHistorySignature = nextSignature;
-    reconcileOptimisticHistory(elements.device.value);
-    renderedConversationSignature = "";
+async function loadSelectedHistoryChunks(
+  selectionKey: string,
+  loadVersion: number,
+  chunkIds: string[],
+  expectedHashes: string[],
+): Promise<void> {
+  try {
+    const chunkDocs: Array<QueryDocumentSnapshot<DocumentData>> = [];
+    const chunksRef = collection(db, "users", user!.uid, "devices", elements.device.value, "historyChunks");
+    for (let offset = 0; offset < chunkIds.length; offset += 30) {
+      const snapshot = await getDocs(query(chunksRef, where(documentId(), "in", chunkIds.slice(offset, offset + 30))));
+      chunkDocs.push(...snapshot.docs);
+    }
+    if (loadVersion !== historyLoadVersion || selectedHistoryKey !== selectionKey) return;
+    const actual = chunkDocs.map((chunk) => ({ index: number(chunk.data().index), hash: text(chunk.data().hash) }));
+    if (!historyChunksAreComplete(expectedHashes, actual)) {
+      setHistoryLoading(false);
+      showError("会話履歴の同期データが不完全です。Remote Agentの同期完了を待って再読み込みしてください。");
+      return;
+    }
+    const ordered = [...chunkDocs].sort((left, right) => number(left.data().index) - number(right.data().index));
+    const nextSignature = ordered.map((chunk) => `${chunk.id}:${text(chunk.data().hash)}`).join("|");
+    if (nextSignature !== selectedHistorySignature) {
+      selectedHistoryEntries = parseHistoryChunk(ordered.map((chunk) => text(chunk.data().payload)).join(""))
+        .filter(isHistoryEntry);
+      selectedHistorySignature = nextSignature;
+      reconcileOptimisticHistory(elements.device.value);
+      renderedConversationSignature = "";
+    }
+    setHistoryLoading(false);
+    renderConversationHeader();
+  } catch (error) {
+    if (loadVersion !== historyLoadVersion || selectedHistoryKey !== selectionKey) return;
+    setHistoryLoading(false);
+    showError(error);
   }
-  setHistoryLoading(false);
-  renderConversationHeader();
 }
 
 function mobileLayout(): boolean {
@@ -1245,7 +1256,7 @@ function selectedOptimisticInstructions(): typeof optimisticInstructions {
 }
 
 function syncedInstructionCount(deviceId: string, projectId: string, chatId: string, content: string): number {
-  if (`${deviceId}\n${chatId}` !== selectedHistoryKey || projectId !== elements.project.value) return 0;
+  if (!selectedHistoryKey.startsWith(`${deviceId}\n${chatId}\n`) || projectId !== elements.project.value) return 0;
   return selectedHistoryEntries.filter((entry) => entry.role === "user" && entry.content === content).length;
 }
 
@@ -1447,12 +1458,12 @@ function statusLabel(status: string): string {
 }
 
 function stopSubscriptions(): void {
-  deviceUnsubscribe?.(); taskUnsubscribe?.(); historyUnsubscribe?.();
+  deviceUnsubscribe?.(); taskUnsubscribe?.();
   for (const unsubscribe of projectUnsubscribes.values()) unsubscribe();
   for (const unsubscribe of chatUnsubscribes.values()) unsubscribe();
   projectUnsubscribes.clear();
   chatUnsubscribes.clear();
-  deviceUnsubscribe = taskUnsubscribe = historyUnsubscribe = undefined;
+  deviceUnsubscribe = taskUnsubscribe = undefined;
   subscribedDeviceId = "";
   renderedDeviceSignature = "";
   activeApproval = undefined;
@@ -1476,7 +1487,7 @@ function stopSubscriptions(): void {
   selectedHistoryKey = "";
   selectedHistorySignature = "";
   selectedHistoryEntries = [];
-  selectedHistoryChunkDocs = [];
+  historyLoadVersion += 1;
   historyScrollVersion += 1;
   composerDraftContext = "";
   elements.content.value = "";

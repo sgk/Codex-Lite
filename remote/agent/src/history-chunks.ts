@@ -5,15 +5,16 @@ export interface HistoryChunk {
   id: string;
   index: number;
   hash: string;
+  generation: string;
   payload: string;
 }
 
 const MAX_CHUNK_BYTES = 400_000;
 const MAX_CHUNK_ITEMS = 160;
 
-export function historyChunkId(chatId: string, index: number): string {
+export function historyChunkId(chatId: string, hash: string, index: number): string {
   const prefix = createHash("sha256").update(chatId).digest("hex").slice(0, 24);
-  return `${prefix}-${String(index).padStart(6, "0")}`;
+  return `${prefix}-${hash.slice(0, 32)}-${String(index).padStart(6, "0")}`;
 }
 
 export function historyChunks(chatId: string, entries: CatalogHistoryItem[]): HistoryChunk[] {
@@ -60,10 +61,19 @@ export function historyChunks(chatId: string, entries: CatalogHistoryItem[]): Hi
   append("]");
   flush();
 
-  return payloads.map((payload, index) => ({
-    id: historyChunkId(chatId, index),
-    index,
+  const hashed = payloads.map((payload) => ({
     hash: createHash("sha256").update(payload).digest("hex"),
     payload,
+  }));
+  const generation = createHash("sha256")
+    .update(JSON.stringify(hashed.map((chunk) => chunk.hash)))
+    .digest("hex")
+    .slice(0, 32);
+  return hashed.map((chunk, index) => ({
+    id: historyChunkId(chatId, chunk.hash, index),
+    index,
+    hash: chunk.hash,
+    generation,
+    payload: chunk.payload,
   }));
 }
