@@ -4071,7 +4071,7 @@ public partial class MainWindow : Window
                 ChatId = chatId,
                 View = CreateChatHistoryView()
             };
-            entry.View.ItemsSource = entry.Messages;
+            BindCompactHistoryDisplay(entry.View, entry.Messages);
             ChatConversationPanel.Children.Add(entry.View);
             _chatHistoryCache[key] = entry;
         }
@@ -4111,6 +4111,43 @@ public partial class MainWindow : Window
         view.PreviewMouseUp += MessagesList_PreviewMouseUp;
         Grid.SetRow(view, 0);
         return view;
+    }
+
+    private static void BindCompactHistoryDisplay(ListBox view, ObservableCollection<MessageDto> messages)
+    {
+        // Keep the source intact for paging, deduplication and run replay.
+        // Only the view drops intermediate events preceding displayed prose.
+        var cutoff = DateTimeOffset.MinValue;
+        static bool IsProse(MessageDto message) =>
+            message.Role.Equals("assistant", StringComparison.OrdinalIgnoreCase)
+            && (message.Kind.Equals("work", StringComparison.OrdinalIgnoreCase)
+                || message.Kind.Equals("conclusion", StringComparison.OrdinalIgnoreCase))
+            && !string.IsNullOrWhiteSpace(message.Content);
+        var display = new ListCollectionView(messages);
+        display.Filter = item => item is MessageDto message
+            && (!(message.IsInlineStatus || message.IsActivityIndicator)
+                || MessageCreatedAt(message) > cutoff);
+        messages.CollectionChanged += (_, change) =>
+        {
+            var nextCutoff = cutoff;
+            if (change.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
+            {
+                nextCutoff = DateTimeOffset.MinValue;
+            }
+            if (change.NewItems is not null)
+            {
+                foreach (MessageDto message in change.NewItems)
+                {
+                    if (IsProse(message))
+                        nextCutoff = DateTimeOffset.Compare(MessageCreatedAt(message), nextCutoff) > 0
+                            ? MessageCreatedAt(message) : nextCutoff;
+                }
+            }
+            if (nextCutoff == cutoff) return;
+            cutoff = nextCutoff;
+            display.Refresh();
+        };
+        view.ItemsSource = display;
     }
 
     private void RestoreChatHistoryState(ChatHistoryCacheEntry entry)
@@ -4341,7 +4378,7 @@ public partial class MainWindow : Window
 
     private static void PositionHistoryAtEnd(ListBox targetView, IReadOnlyList<MessageDto> targetMessages)
     {
-        var lastMessage = targetMessages.LastOrDefault(IsRealHistoryMessage);
+        var lastMessage = targetView.Items.OfType<MessageDto>().LastOrDefault(IsRealHistoryMessage);
         if (lastMessage is null)
         {
             return;
@@ -4626,9 +4663,9 @@ public partial class MainWindow : Window
                 scrollViewer.ScrollToEnd();
                 return;
             }
-            if (_messages.Count > 0)
+            if (targetView.Items.Count > 0)
             {
-                targetView.ScrollIntoView(_messages[^1]);
+                targetView.ScrollIntoView(targetView.Items[targetView.Items.Count - 1]);
             }
         }, System.Windows.Threading.DispatcherPriority.Background);
     }
@@ -4700,9 +4737,9 @@ public partial class MainWindow : Window
         {
             _messageScrollInteractionVersion++;
             e.Handled = true;
-            if (_messages.Count > 0)
+            if (ActiveMessagesList.Items.Count > 0)
             {
-                ActiveMessagesList.ScrollIntoView(_messages[0]);
+                ActiveMessagesList.ScrollIntoView(ActiveMessagesList.Items[0]);
             }
             SetCurrentChatFollowNewMessages(false);
             if (FindVisualChild<ScrollViewer>(ActiveMessagesList, _ => true) is ScrollViewer scrollViewer)
@@ -8973,6 +9010,7 @@ public partial class MainWindow : Window
         }
         if (index < 0)
         {
+            FlushReasoningProgress(runId, remove: true);
             AppendMessage(new MessageDto(
                 messageId,
                 chatId,
@@ -8986,6 +9024,12 @@ public partial class MainWindow : Window
         }
         var current = messages[index];
         var isPlaceholder = current.Kind == "waiting";
+        if (isPlaceholder)
+        {
+            FlushReasoningProgress(runId, remove: true);
+            // Flushing pending reasoning can insert a row before the placeholder.
+            index = messages.IndexOf(current);
+        }
         var content = isPlaceholder ? text : current.Content + text;
         messages[index] = current with
         {
