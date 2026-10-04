@@ -8,7 +8,8 @@
     Width="1200"
     Height="760"
     MinWidth="900"
-    MinHeight="560">
+    MinHeight="560"
+    PreviewKeyDown="HistorySearch_PreviewKeyDown">
 
     <Window.Resources>
         <local:SubtractConverter x:Key="SubtractConverter"/>
@@ -1072,12 +1073,22 @@
                           PreviewDragOver="Composer_PreviewDragOver"
                           PreviewDrop="Composer_PreviewDrop">
                     <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
+                    <DockPanel x:Name="HistorySearchPanel" Grid.Row="0" Visibility="Collapsed" Margin="0,0,0,6">
+                        <Button DockPanel.Dock="Right" Content="×" Click="CloseHistorySearch_Click" ToolTip="検索を閉じる (Esc)" Margin="6,0,0,0"/>
+                        <Button DockPanel.Dock="Right" Content="次へ" Click="NextHistorySearch_Click" ToolTip="F3" Margin="6,0,0,0"/>
+                        <Button DockPanel.Dock="Right" Content="前へ" Click="PreviousHistorySearch_Click" ToolTip="Shift+F3" Margin="6,0,0,0"/>
+                        <TextBlock x:Name="HistorySearchCountText" DockPanel.Dock="Right" VerticalAlignment="Center" Margin="8,0"/>
+                        <Button DockPanel.Dock="Right" Content="検索" Click="RunHistorySearch_Click" Margin="6,0,0,0"/>
+                        <TextBox x:Name="HistorySearchBox" ToolTip="このチャットの全履歴を検索 (Enter)" PreviewKeyDown="HistorySearchBox_PreviewKeyDown"/>
+                    </DockPanel>
                     <ListBox x:Name="MessagesList"
+                             Grid.Row="1"
                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                              ScrollViewer.VerticalScrollBarVisibility="Auto"
                              ScrollViewer.CanContentScroll="True"
@@ -1156,6 +1167,7 @@
                                                         Margin="-6,-6,0,-6"
                                                         Visibility="{Binding IsWorkProgressMessage, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                                 <local:MarkdownViewer Markdown="{Binding Content}"
+                                                                      SearchText="{Binding HistorySearchTerm, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
                                                                       LinkClicked="MarkdownViewer_LinkClicked"
                                                                       ImageRequested="MarkdownViewer_ImageRequested">
                                                     <local:MarkdownViewer.Style>
@@ -1280,7 +1292,7 @@
                         </ListBox.ItemTemplate>
                     </ListBox>
                     <Border x:Name="ChatHistoryLoadingOverlay"
-                            Grid.Row="0"
+                            Grid.Row="1"
                             Background="#CCFFFFFF"
                             Visibility="Collapsed"
                             Panel.ZIndex="20">
@@ -1304,7 +1316,7 @@
                             </StackPanel>
                         </Border>
                     </Border>
-                    <ItemsControl x:Name="ComposerQueueList" Grid.Row="1" Margin="0,8,0,0">
+                    <ItemsControl x:Name="ComposerQueueList" Grid.Row="2" Margin="0,8,0,0">
                         <ItemsControl.Style>
                             <Style TargetType="{x:Type ItemsControl}">
                                 <Setter Property="Visibility" Value="Collapsed"/>
@@ -1378,7 +1390,7 @@
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
-                    <StackPanel Grid.Row="2" Margin="0,8,0,0">
+                    <StackPanel Grid.Row="3" Margin="0,8,0,0">
                         <Border x:Name="RunProgressPanel"
                                 Visibility="Collapsed"
                                 Background="#F6F8FA"
@@ -1394,7 +1406,7 @@
                                        VerticalAlignment="Center"/>
                         </Border>
                     </StackPanel>
-                    <Grid Grid.Row="3" Margin="0,8,0,0">
+                    <Grid Grid.Row="4" Margin="0,8,0,0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>

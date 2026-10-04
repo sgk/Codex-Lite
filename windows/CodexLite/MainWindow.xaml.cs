@@ -4062,6 +4062,7 @@ public partial class MainWindow : Window
 
     private void ActivateChatHistory(string projectId, string chatId)
     {
+        CloseHistorySearch();
         var key = ChatHistoryCacheKey(projectId, chatId);
         if (!_chatHistoryCache.TryGetValue(key, out var entry))
         {
@@ -4109,7 +4110,7 @@ public partial class MainWindow : Window
         view.PreviewMouseWheel += MessagesList_PreviewMouseWheel;
         view.PreviewMouseDown += MessagesList_PreviewMouseDown;
         view.PreviewMouseUp += MessagesList_PreviewMouseUp;
-        Grid.SetRow(view, 0);
+        Grid.SetRow(view, 1);
         return view;
     }
 
@@ -4124,9 +4125,10 @@ public partial class MainWindow : Window
                 || message.Kind.Equals("conclusion", StringComparison.OrdinalIgnoreCase))
             && !string.IsNullOrWhiteSpace(message.Content);
         var display = new ListCollectionView(messages);
-        display.Filter = item => item is MessageDto message
+        Predicate<object> filter = item => item is MessageDto message
             && (!(message.IsInlineStatus || message.IsActivityIndicator)
                 || MessageCreatedAt(message) > cutoff);
+        display.Filter = filter;
         messages.CollectionChanged += (_, change) =>
         {
             var nextCutoff = cutoff;
@@ -4145,7 +4147,11 @@ public partial class MainWindow : Window
             }
             if (nextCutoff == cutoff) return;
             cutoff = nextCutoff;
-            display.Refresh();
+            using (display.DeferRefresh())
+            {
+                display.Filter = null;
+                display.Filter = filter;
+            }
         };
         view.ItemsSource = display;
     }
@@ -4184,6 +4190,7 @@ public partial class MainWindow : Window
 
     private void ShowEmptyMessageCollection()
     {
+        CloseHistorySearch();
         ActiveMessagesList.Visibility = Visibility.Hidden;
         _messages = new ObservableCollection<MessageDto>();
         _activeMessagesList = MessagesList;

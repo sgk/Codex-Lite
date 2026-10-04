@@ -40,6 +40,74 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     private DateTimeOffset _lastRenderAt = DateTimeOffset.MinValue;
     private bool _preserveNextMarkdownChange;
     private bool _preserveScrollPositionForPendingRender;
+    private readonly List<(TextRange Range, object Background)> _searchHighlights = new();
+
+    public static readonly DependencyProperty SearchTextProperty = DependencyProperty.Register(
+        nameof(SearchText), typeof(string), typeof(MarkdownViewer),
+        new PropertyMetadata("", (owner, _) => ((MarkdownViewer)owner).UpdateSearchHighlights()));
+
+    public string SearchText
+    {
+        get => (string)GetValue(SearchTextProperty);
+        set => SetValue(SearchTextProperty, value);
+    }
+
+    public void BringFirstSearchMatchIntoView()
+    {
+        if (_searchHighlights.Count > 0
+            && _searchHighlights[0].Range.Start.Parent is FrameworkContentElement element)
+            element.BringIntoView();
+    }
+
+    private void UpdateSearchHighlights()
+    {
+        foreach (var highlight in _searchHighlights)
+            highlight.Range.ApplyPropertyValue(TextElement.BackgroundProperty,
+                highlight.Background is Brush brush ? brush : Brushes.Transparent);
+        _searchHighlights.Clear();
+        if (Document is null || string.IsNullOrWhiteSpace(SearchText)) return;
+
+        // Join adjacent text runs so a term can cross bold/link formatting,
+        // while retaining document pointers for accurate highlighting.
+        var text = new StringBuilder();
+        var runs = new List<(int Offset, string Text, TextPointer Start)>();
+        TextPointer? position = Document.ContentStart;
+        while (position is not null && position.CompareTo(Document.ContentEnd) < 0)
+        {
+            var context = position.GetPointerContext(LogicalDirection.Forward);
+            if (context == TextPointerContext.Text)
+            {
+                var value = position.GetTextInRun(LogicalDirection.Forward);
+                runs.Add((text.Length, value, position));
+                text.Append(value);
+            }
+            else if (context == TextPointerContext.ElementEnd
+                && position.Parent is Paragraph or LineBreak)
+                text.Append('\n');
+            position = position.GetNextContextPosition(LogicalDirection.Forward);
+        }
+        var content = text.ToString();
+        for (var offset = 0; offset < content.Length;)
+        {
+            var match = content.IndexOf(SearchText, offset, StringComparison.OrdinalIgnoreCase);
+            if (match < 0) break;
+            var end = match + SearchText.Length;
+            foreach (var run in runs.Where(run => run.Offset < end && match < run.Offset + run.Text.Length))
+            {
+                var startPointer = run.Start.GetPositionAtOffset(Math.Max(0, match - run.Offset));
+                var endPointer = run.Start.GetPositionAtOffset(Math.Min(run.Text.Length, end - run.Offset));
+                if (startPointer is not null && endPointer is not null)
+                {
+                    var range = new TextRange(startPointer, endPointer);
+                    _searchHighlights.Add((range, range.GetPropertyValue(TextElement.BackgroundProperty)));
+                }
+            }
+            offset = end;
+        }
+        // Formatting splits runs, so resolve every pointer before applying it.
+        foreach (var highlight in _searchHighlights)
+            highlight.Range.ApplyPropertyValue(TextElement.BackgroundProperty, Brushes.Yellow);
+    }
 
     public static readonly DependencyProperty MarkdownProperty =
         DependencyProperty.Register(
@@ -122,6 +190,8 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
             : null;
         _preserveScrollPositionForPendingRender = false;
         Document = CreateDocument(_pendingMarkdown);
+        _searchHighlights.Clear();
+        UpdateSearchHighlights();
         _lastRenderAt = DateTimeOffset.Now;
         if (verticalOffset is { } offset)
         {
