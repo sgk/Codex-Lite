@@ -40,6 +40,7 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     private DateTimeOffset _lastRenderAt = DateTimeOffset.MinValue;
     private bool _preserveNextMarkdownChange;
     private bool _preserveScrollPositionForPendingRender;
+    private bool _hasPendingMarkdownRender;
     private readonly List<(TextRange Range, object Background)> _searchHighlights = new();
 
     public static readonly DependencyProperty SearchTextProperty = DependencyProperty.Register(
@@ -129,6 +130,11 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
         Document = CreateDocument("");
         _renderTimer = new DispatcherTimer { Interval = RenderInterval };
         _renderTimer.Tick += (_, _) => RenderPendingMarkdown();
+        Loaded += (_, _) =>
+        {
+            if (_hasPendingMarkdownRender) RenderPendingMarkdown();
+        };
+        Unloaded += (_, _) => _renderTimer.Stop();
         PreviewMouseWheel += MarkdownViewer_PreviewMouseWheel;
     }
 
@@ -168,6 +174,11 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     {
         _pendingMarkdown = markdown;
         _preserveScrollPositionForPendingRender = preserveScrollPosition;
+        _hasPendingMarkdownRender = true;
+        // XAML can set Markdown before wiring ImageRequested. Rendering at
+        // that point permanently turns otherwise valid images into links.
+        // Loaded runs after the template and its event handlers are attached.
+        if (!IsLoaded) return;
         var elapsed = DateTimeOffset.Now - _lastRenderAt;
         if (elapsed >= RenderInterval)
         {
@@ -185,6 +196,8 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
     private void RenderPendingMarkdown()
     {
         _renderTimer.Stop();
+        if (!IsLoaded || !_hasPendingMarkdownRender) return;
+        _hasPendingMarkdownRender = false;
         var verticalOffset = _preserveScrollPositionForPendingRender
             ? FindScrollViewer(this)?.VerticalOffset
             : null;
