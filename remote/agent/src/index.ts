@@ -26,6 +26,7 @@ import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon } from "./daemon.js";
 import { isCountableProgressEvent } from "./progress-sync.js";
 import { historyChunks } from "./history-chunks.js";
+import { ConnectionHealth } from "./connection-health.js";
 
 interface QueuedTask {
   operation: RemoteOperation;
@@ -47,6 +48,7 @@ let lastRevisionCheckErrorAt = 0;
 let catalogWatchStopped = false;
 let catalogSyncFailures = 0;
 let heartbeatRunning = false;
+const connectionHealth = new ConnectionHealth();
 const relayedRunIds = new Set<string>();
 const desktopRunWatchers = new Map<string, Promise<void>>();
 const ACTIVE_RUN_PROGRESS_INTERVAL_MS = 30_000;
@@ -73,7 +75,8 @@ try {
 }
 const processingTasks = new Set<string>();
 const queuedTasks = query(collection(deviceRef, "tasks"), where("status", "==", "queued"));
-const unsubscribe = onSnapshot(queuedTasks, (snapshot) => {
+const unsubscribe = onSnapshot(queuedTasks, { includeMetadataChanges: true }, (snapshot) => {
+  if (!snapshot.metadata.fromCache) reportTransportConfirmed("listen");
   for (const change of snapshot.docChanges()) {
     if (change.type !== "added" && change.type !== "modified") continue;
     if (processingTasks.has(change.doc.id)) continue;
@@ -82,7 +85,11 @@ const unsubscribe = onSnapshot(queuedTasks, (snapshot) => {
       .catch(reportBackgroundError)
       .finally(() => processingTasks.delete(change.doc.id));
   }
-}, reportBackgroundError);
+}, (error) => {
+  connectionHealth.listenerError();
+  reportSyncProgress({ state: "listener_failed", phase: "listen", error: safeErrorMessage(error) });
+  reportBackgroundError(error);
+});
 const heartbeat = setInterval(() => void heartbeatNow(), config.heartbeatSeconds * 1000);
 try {
   await syncCatalog();
@@ -333,6 +340,7 @@ function reconcileDesktopRunWatchers(projects: CatalogProject[]): void {
 async function syncCatalog(): Promise<void> {
   if (catalogSyncRunning) return;
   catalogSyncRunning = true;
+  connectionHealth.catalogStarted();
   let phase = "reading";
   reportSyncProgress({ state: "syncing", phase: "reading" });
   try {
@@ -349,6 +357,7 @@ async function syncCatalog(): Promise<void> {
       || changes.removedProjects.length > 0
       || changes.removedChats.length > 0;
     if (!hasChanges) {
+      connectionHealth.catalogCompleted();
       reportSyncProgress({
         state: "completed",
         phase: "writing",
@@ -468,6 +477,7 @@ async function syncCatalog(): Promise<void> {
         recordsSkipped: changes.unchangedRecords,
       });
     }
+    connectionHealth.catalogCompleted();
     reportSyncProgress({
       state: "completed",
       phase: "writing",
@@ -483,6 +493,7 @@ async function syncCatalog(): Promise<void> {
     lastCatalogRevision = catalog.revision;
     reconcileDesktopRunWatchers(catalog.projects);
   } catch (error) {
+    connectionHealth.catalogFailed();
     reportSyncProgress({ state: "failed", phase, error: safeErrorMessage(error) });
     throw error;
   } finally {
@@ -640,6 +651,7 @@ async function heartbeatNow(): Promise<void> {
   heartbeatRunning = true;
   try {
     await setDoc(deviceRef, { status: "online", lastSeenAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true });
+    reportTransportConfirmed("heartbeat");
   } catch (error) {
     reportBackgroundError(error);
   } finally {
@@ -656,6 +668,11 @@ async function shutdown(): Promise<void> {
   } finally {
     process.exit(0);
   }
+}
+
+function reportTransportConfirmed(phase: "listen" | "heartbeat"): void {
+  const progress = connectionHealth.confirmed(phase);
+  if (progress) reportSyncProgress(progress);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

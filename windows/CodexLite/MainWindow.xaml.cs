@@ -130,6 +130,9 @@ public partial class MainWindow : Window
         int RecordsWritten = 0,
         int RecordsSkipped = 0,
         string? Error = null);
+    private bool _remoteTransientWarning;
+    private bool _remoteSyncFailed;
+    private bool _remoteListenerFailed;
     private sealed record ModelChoice(string Model, string ReasoningEffort, bool IsRecent);
     private sealed class ChatHistoryCacheEntry
     {
@@ -1407,8 +1410,13 @@ public partial class MainWindow : Window
         if (_isClosing) return;
         _ = Dispatcher.BeginInvoke(() =>
         {
-            RemoteSyncStatusText.Text = "クラウド同期エラー";
-            RemoteSyncStatusText.Foreground = System.Windows.Media.Brushes.Firebrick;
+            var transient = IsTransientFirestoreWarning(line);
+            if (transient && (_remoteSyncFailed || _remoteListenerFailed)) return;
+            _remoteTransientWarning = transient;
+            if (!transient) _remoteSyncFailed = true;
+            RemoteSyncStatusText.Text = transient ? "クラウド通信の復旧待ち" : "クラウド同期エラー";
+            RemoteSyncStatusText.Foreground = transient
+                ? System.Windows.Media.Brushes.DarkOrange : System.Windows.Media.Brushes.Firebrick;
             RemoteSyncProgressBar.Visibility = Visibility.Collapsed;
             RemoteSyncDetailText.Text = detail;
         });
@@ -1420,6 +1428,9 @@ public partial class MainWindow : Window
         _nextRemoteReconnectAt = DateTimeOffset.MinValue;
         _ = Dispatcher.BeginInvoke(() =>
         {
+            _remoteTransientWarning = false;
+            _remoteSyncFailed = false;
+            _remoteListenerFailed = false;
             RemoteSyncStatusText.Text = "クラウド同期を再開しています...";
             RemoteSyncStatusText.Foreground = System.Windows.Media.Brushes.DarkOrange;
             _ = TryReconnectRemoteAsync();
@@ -1447,11 +1458,28 @@ public partial class MainWindow : Window
         return sanitized.Substring(0, Math.Min(240, sanitized.Length));
     }
 
+    private static bool IsTransientFirestoreWarning(string line) =>
+        line.Contains("@firebase/firestore", StringComparison.Ordinal)
+        && line.Contains("GrpcConnection RPC", StringComparison.Ordinal)
+        && (line.Contains("Code: 13 ", StringComparison.Ordinal)
+            || line.Contains("Code: 14 ", StringComparison.Ordinal));
+
     private void ApplyRemoteSyncProgress(RemoteSyncProgress progress)
     {
         switch (progress.State)
         {
+            case "transport_ready":
+                var listenerRecovered = progress.Phase == "listen" && _remoteListenerFailed;
+                if (progress.Phase == "listen") _remoteListenerFailed = false;
+                if ((!_remoteTransientWarning && !listenerRecovered) || _remoteSyncFailed || _remoteListenerFailed) break;
+                _remoteTransientWarning = false;
+                RemoteSyncStatusText.Text = "クラウド通信正常";
+                RemoteSyncStatusText.Foreground = System.Windows.Media.Brushes.ForestGreen;
+                RemoteSyncProgressBar.Visibility = Visibility.Collapsed;
+                RemoteSyncDetailText.Text = "クラウドとの通信が復旧しました。";
+                break;
             case "syncing" when progress.Phase == "reading":
+                if (_remoteListenerFailed) break;
                 RemoteSyncStatusText.Text = "同期中...";
                 RemoteSyncStatusText.Foreground = System.Windows.Media.Brushes.DarkOrange;
                 RemoteSyncProgressBar.IsIndeterminate = true;
@@ -1459,6 +1487,7 @@ public partial class MainWindow : Window
                 RemoteSyncDetailText.Text = "ローカルの会話を読み込んでいます。";
                 break;
             case "syncing":
+                if (_remoteListenerFailed) break;
                 RemoteSyncStatusText.Text = progress.RecordsTotal > 0
                     ? $"同期中... {progress.RecordsWritten}/{progress.RecordsTotal}"
                     : "同期中...";
@@ -1471,6 +1500,9 @@ public partial class MainWindow : Window
                 RemoteSyncDetailText.Text = $"{progress.ProjectsCompleted}/{progress.ProjectsTotal} プロジェクト・{progress.ChatsCompleted}/{progress.ChatsTotal} チャット（変更分のみ）";
                 break;
             case "completed":
+                _remoteSyncFailed = false;
+                _remoteTransientWarning = false;
+                if (_remoteListenerFailed) break;
                 RemoteSyncStatusText.Text = "同期完了";
                 RemoteSyncStatusText.Foreground = System.Windows.Media.Brushes.ForestGreen;
                 RemoteSyncProgressBar.IsIndeterminate = false;
@@ -1480,7 +1512,11 @@ public partial class MainWindow : Window
                     ? $"変更分をWebへ反映しました（{progress.RecordsSkipped}件は未変更のため省略）。"
                     : $"{progress.ProjectsTotal} プロジェクト・{progress.ChatsTotal} チャットをWebへ反映しました。";
                 break;
+            case "listener_failed":
             case "failed":
+                if (progress.State == "listener_failed") _remoteListenerFailed = true;
+                else _remoteSyncFailed = true;
+                _remoteTransientWarning = false;
                 RemoteSyncStatusText.Text = "同期失敗";
                 RemoteSyncStatusText.Foreground = System.Windows.Media.Brushes.Firebrick;
                 RemoteSyncProgressBar.IsIndeterminate = false;
