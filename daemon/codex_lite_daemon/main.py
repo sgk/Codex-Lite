@@ -410,9 +410,9 @@ def create_app(config: Config | None = None) -> Starlette:
     @get("/projects/{project_id}/chats/{chat_id}/messages/page")
     async def list_message_page(project_id: str, chat_id: str, limit: int = 200, before_created_at: str | None = None, before_id: str | None = None) -> dict:
         if use_app_server:
-            all_messages = await app_threads.list_messages(project_id, chat_id)
+            return await app_threads.list_message_page(project_id, chat_id, limit, before_created_at, before_id)
         else:
-            all_messages = messages.list_messages(project_id, chat_id)
+            all_messages = await asyncio.to_thread(messages.list_messages, project_id, chat_id)
         return message_page(all_messages, limit, before_created_at, before_id)
 
     @post("/projects/{project_id}/chats/{chat_id}/messages")

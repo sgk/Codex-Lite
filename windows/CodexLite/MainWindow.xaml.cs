@@ -4306,7 +4306,7 @@ public partial class MainWindow : Window
             _messageTotalCount = page?.TotalCount ?? loadedMessages.Count;
             SetChatUnloadedHistoryIndicator(chat.Id, _hasMoreOlderMessages);
             MarkSelectedConversationSeen();
-            SetHistorySpacer(Math.Max(0, _messageTotalCount - loadedMessages.Count));
+            SetHistorySpacer();
             await AddLoadedMessagesAndPositionAsync(loadedMessages, startedAt, chat.Title);
             if (_selectedProject?.Id != project.Id || _selectedChat?.Id != chat.Id)
             {
@@ -4316,7 +4316,7 @@ public partial class MainWindow : Window
             UpdateHistorySpacer();
             MarkCurrentChatHistoryLoaded();
             var elapsed = DateTimeOffset.Now - startedAt;
-            StatusText.Text = $"history loaded | {LoadedHistoryMessageCount()}/{_messageTotalCount} message(s) | {elapsed.TotalSeconds:F1}s";
+            StatusText.Text = $"history loaded | {LoadedHistoryMessageCount()} message(s) | {elapsed.TotalSeconds:F1}s";
             UpdateCommandButtonState();
         }
         catch (OperationCanceledException)
@@ -4490,7 +4490,11 @@ public partial class MainWindow : Window
             {
                 return;
             }
-            _hasMoreOlderMessages = page?.HasMoreBefore ?? _hasMoreOlderMessages;
+            // A newest-page poll must not resurrect an older-page indicator
+            // after the user has already loaded all preceding pages.
+            _hasMoreOlderMessages = LoadedHistoryMessageCount() == 0
+                ? page?.HasMoreBefore ?? false
+                : _hasMoreOlderMessages && (page?.HasMoreBefore ?? true);
             _messageTotalCount = page?.TotalCount ?? _messageTotalCount;
 
             var shouldFollowNewMessages = IsMessagesScrolledNearEnd();
@@ -4607,9 +4611,10 @@ public partial class MainWindow : Window
         SpacerHeight: height,
         SpacerIsLoading: _isLoadingOlderMessages);
 
-    private void SetHistorySpacer(int unloadedMessageCount)
+    private void SetHistorySpacer()
     {
-        var height = _hasMoreOlderMessages && unloadedMessageCount > 0
+        // Imported JSONL pages intentionally avoid a full scan for an exact count.
+        var height = _hasMoreOlderMessages
             ? UnloadedHistoryIndicatorHeight
             : 0;
         var existingIndex = _messages.ToList().FindIndex(message => message.Id == HistorySpacerMessageId);
@@ -4642,7 +4647,7 @@ public partial class MainWindow : Window
 
     private void UpdateHistorySpacer()
     {
-        SetHistorySpacer(Math.Max(0, _messageTotalCount - LoadedHistoryMessageCount()));
+        SetHistorySpacer();
     }
 
     private double HistorySpacerHeight()
@@ -4887,7 +4892,7 @@ public partial class MainWindow : Window
         var oldOffset = scrollViewer.VerticalOffset;
         try
         {
-            StatusText.Text = $"older history loading | {LoadedHistoryMessageCount()}/{_messageTotalCount}";
+            StatusText.Text = $"older history loading | {LoadedHistoryMessageCount()} message(s)";
             var page = await _client.ListMessagePageAsync(project.Id, chat.Id, OlderMessagePageSize, oldest.CreatedAt, oldest.Id);
             if (_selectedProject?.Id != project.Id || _selectedChat?.Id != chat.Id)
             {
@@ -4912,7 +4917,7 @@ public partial class MainWindow : Window
             await Dispatcher.Yield(DispatcherPriority.Background);
             var delta = scrollViewer.ExtentHeight - oldExtent;
             scrollViewer.ScrollToVerticalOffset(Math.Max(0, oldOffset + delta));
-            StatusText.Text = $"history loaded | {LoadedHistoryMessageCount()}/{_messageTotalCount} message(s)";
+            StatusText.Text = $"history loaded | {LoadedHistoryMessageCount()} message(s)";
             UpdateCurrentChatHistoryState();
         }
         catch (Exception ex)

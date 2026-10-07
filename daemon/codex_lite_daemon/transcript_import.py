@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -41,6 +44,8 @@ class TranscriptImportService:
         self.projects = projects
         self.chats = chats
         self.codex_state = codex_state
+        self._tail_cursor_lock = threading.Lock()
+        self._tail_cursors: OrderedDict = OrderedDict()
 
     def list_project_candidates(self) -> list[dict]:
         candidates: dict[Path, ProjectCandidate] = {}
@@ -211,7 +216,7 @@ class TranscriptImportService:
             return {}
         return {"id": session.id, "cwd": str(session.path), "timestamp": session.timestamp}
 
-    def _read_transcript_session(self, path: Path, allow_missing_cwd: bool = False) -> TranscriptSession | None:
+    def _read_transcript_session(self, path: Path, allow_missing_cwd: bool = False, metadata_only: bool = False) -> TranscriptSession | None:
         meta: dict[str, Any] | None = None
         last_timestamp: str | None = None
         try:
@@ -230,7 +235,9 @@ class TranscriptImportService:
                         found = _find_cwd_payload(item)
                         if found is not None:
                             meta = found
-            for line in _tail_lines(path):
+                    if metadata_only and meta is not None:
+                        break
+            for line in (() if metadata_only else _tail_lines(path)):
                 try:
                     item = json.loads(line)
                 except json.JSONDecodeError:
@@ -272,18 +279,90 @@ class TranscriptImportService:
         messages: list[dict] = []
         pending_calls: dict[str, dict[str, Any]] = {}
         try:
-            with transcript.open("r", encoding="utf-8", errors="replace") as handle:
-                for index, line in enumerate(handle):
+            with transcript.open("rb") as handle:
+                while True:
+                    offset = handle.tell()
+                    line = handle.readline()
+                    if not line:
+                        break
                     try:
-                        item = json.loads(line)
+                        item = json.loads(line.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
                         continue
-                    message = _transcript_message(chat_id, item, index, pending_calls)
+                    if not isinstance(item, dict):
+                        continue
+                    message = _transcript_message(chat_id, item, f"byte-{offset}", pending_calls)
                     if message is not None:
                         messages.append(message)
         except OSError:
             return []
         return messages
+
+    def read_message_tail(self, path: Path, chat_id: str, limit: int, before: tuple | None = None, include_activity: bool = True) -> tuple[list[dict], bool]:
+        """Read only the necessary suffix. Hidden tool/reasoning rows do not consume a page."""
+        result: list[dict] = []
+        stat = path.stat()
+        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        cache_key = (str(path), chat_id)
+        with self._tail_cursor_lock:
+            cached = self._tail_cursors.get(cache_key)
+            offsets = dict(cached[1]) if cached and cached[0] == signature else {}
+        end_offset = offsets.get(before[1]) if before else None
+        groups: dict[datetime, int] = {}
+        recent_items: list[tuple[int, dict]] = []
+        recent_complete = before is not None or not include_activity
+        boundary: datetime | None = None
+        for offset, line in _reverse_lines(path, end_offset=end_offset):
+            try:
+                item = json.loads(line.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            payload = item.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            is_assistant = item.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") == "assistant"
+            if not recent_complete:
+                if is_assistant:
+                    recent_complete = True
+                else:
+                    recent_items.append((offset, item))
+            visible = (item.get("type") == "event_msg" and payload.get("type") == "user_message") or (
+                is_assistant
+            )
+            if not visible:
+                continue
+            message = _transcript_message(chat_id, item, f"byte-{offset}")
+            if message is None:
+                continue
+            timestamp = _tail_timestamp(message)
+            groups[timestamp] = max(groups.get(timestamp, 0), offset + len(line))
+            if before is not None and (timestamp, message["id"]) >= before:
+                continue
+            result.append(message)
+            if boundary is not None and timestamp < boundary:
+                break
+            if len(result) == limit:
+                boundary = timestamp
+        # Include timestamp ties before applying the same cursor/ID ordering as the API.
+        result.reverse()
+        result.sort(key=lambda message: (_tail_timestamp(message), message["id"]))
+        for message in result:
+            offsets[message["id"]] = groups[_tail_timestamp(message)]
+        with self._tail_cursor_lock:
+            self._tail_cursors[cache_key] = (signature, dict(list(offsets.items())[-2048:]))
+            self._tail_cursors.move_to_end(cache_key)
+            while len(self._tail_cursors) > 32:
+                self._tail_cursors.popitem(last=False)
+        has_more = len(result) > limit
+        page = result[-limit:]
+        pending: dict[str, dict[str, Any]] = {}
+        for offset, item in reversed(recent_items):
+            message = _transcript_message(chat_id, item, f"byte-{offset}", pending)
+            if message is not None and message.get("role") == "status":
+                page.append(message)
+        return page, has_more
 
     def find_transcript_path(self, project_path: str, session_id: str, transcript_path: str | None = None, include_internal: bool = False) -> Path | None:
         if transcript_path:
@@ -329,7 +408,7 @@ class TranscriptImportService:
         allowed_roots = [home / child for home in homes for child in ("sessions", "archived_sessions")]
         if not any(resolved.is_relative_to(root) for root in allowed_roots):
             return None
-        session = self._read_transcript_session(resolved, allow_missing_cwd=not require_project_match)
+        session = self._read_transcript_session(resolved, allow_missing_cwd=not require_project_match, metadata_only=True)
         if session is None or session.id != session_id:
             return None
         if require_project_match:
@@ -395,7 +474,39 @@ def _find_cwd_payload(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def _transcript_message(chat_id: str, item: dict[str, Any], index: int, pending_calls: dict[str, dict[str, Any]] | None = None) -> dict | None:
+def _tail_timestamp(message: dict) -> datetime:
+    try:
+        timestamp = datetime.fromisoformat(str(message.get("createdAt") or "").replace("Z", "+00:00"))
+        return timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _reverse_lines(path: Path, block_size: int = 64 * 1024, end_offset: int | None = None):
+    """Yield (absolute byte offset, line) backwards, including unbounded/UTF-8 lines."""
+    with path.open("rb") as handle:
+        position = handle.seek(0, 2)
+        if end_offset is not None:
+            position = min(position, end_offset)
+        suffix = b""
+        while position:
+            size = min(position, block_size)
+            position -= size
+            handle.seek(position)
+            data = handle.read(size) + suffix
+            parts = data.split(b"\n")
+            offset = position + len(data)
+            for line in reversed(parts[1:]):
+                offset -= len(line)
+                if line:
+                    yield offset, line
+                offset -= 1
+            suffix = parts[0]
+        if suffix:
+            yield 0, suffix
+
+
+def _transcript_message(chat_id: str, item: dict[str, Any], index: int | str, pending_calls: dict[str, dict[str, Any]] | None = None) -> dict | None:
     timestamp = item.get("timestamp")
     created_at = timestamp if isinstance(timestamp, str) else ""
     item_type = item.get("type")
@@ -462,7 +573,7 @@ def _assistant_message_kind(payload: dict[str, Any]) -> str:
 def _transcript_function_call_message(
     chat_id: str,
     payload: dict[str, Any],
-    index: int,
+    index: int | str,
     created_at: str,
     pending_calls: dict[str, dict[str, Any]],
 ) -> dict | None:

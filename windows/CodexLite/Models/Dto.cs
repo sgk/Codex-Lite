@@ -226,7 +226,8 @@ public sealed record MessageDto(
 public sealed record MessagePageDto(
     IReadOnlyList<MessageDto> Messages,
     int TotalCount,
-    bool HasMoreBefore);
+    bool HasMoreBefore,
+    bool TotalCountIsExact = true);
 
 public sealed record MessageAttachmentDto(
     string Path,
