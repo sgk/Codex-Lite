@@ -165,7 +165,8 @@ public sealed record MessageDto(
     IReadOnlyList<MessageAttachmentDto>? Attachments = null,
     string? ActivityDetails = null,
     double SpacerHeight = 0,
-    bool SpacerIsLoading = false)
+    bool SpacerIsLoading = false,
+    long? HistorySequence = null)
 {
     public bool IsInlineStatus => Role.Equals("status", StringComparison.OrdinalIgnoreCase);
 

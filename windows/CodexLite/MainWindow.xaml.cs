@@ -4674,7 +4674,11 @@ public partial class MainWindow : Window
 
     private static IEnumerable<MessageDto> OrderMessages(IEnumerable<MessageDto> messages)
     {
-        return messages.OrderBy(MessageCreatedAt).ThenBy(message => message.Id, StringComparer.Ordinal);
+        var rows = messages.ToList();
+        return rows.All(message => message.HistorySequence.HasValue)
+            ? rows.OrderBy(message => message.HistorySequence)
+            : rows.OrderBy(MessageCreatedAt).ThenBy(message => message.HistorySequence ?? long.MaxValue)
+                .ThenBy(message => message.Id, StringComparer.Ordinal);
     }
 
     private static DateTimeOffset MessageCreatedAt(MessageDto message)
@@ -8462,7 +8466,9 @@ public partial class MainWindow : Window
         while (index < messages.Count)
         {
             var existing = messages[index];
-            var timeComparison = MessageCreatedAt(existing).CompareTo(messageTime);
+            var timeComparison = existing.HistorySequence.HasValue && message.HistorySequence.HasValue
+                ? existing.HistorySequence.Value.CompareTo(message.HistorySequence.Value)
+                : MessageCreatedAt(existing).CompareTo(messageTime);
             if (timeComparison > 0
                 || (timeComparison == 0 && string.Compare(existing.Id, message.Id, StringComparison.Ordinal) > 0))
             {

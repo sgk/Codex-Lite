@@ -18,6 +18,7 @@ from typing import Any
 from .app_server import SERVER_REQUEST_ID_KEY, AppServerClient, AppServerNotification
 from .deepseek import DEEPSEEK_PROVIDER, model_provider_for_model, read_deepseek_balance
 from .db import Database
+from .history_store import HistoryStore
 from .errors import AppError
 from .dynamic_tools import CodexLiteDynamicTools
 from .provider_context import PROVIDER_CONTEXT_PREFIX
@@ -62,11 +63,12 @@ class AppServerThreadService:
         self.app_server = app_server
         self.settings = settings
         self.dynamic_tools = dynamic_tools
+        self.history = HistoryStore(messages.db)
 
     async def list_chats(self, project_id: str, sync: bool = False) -> list[dict]:
         project = self.projects.get_project_row(project_id)
         if sync:
-            self.transcripts.index_project(project)
+            await asyncio.to_thread(self.transcripts.index_project, project)
         return self.chats.list_chats(project_id)
 
     async def get_chat(self, project_id: str, chat_id: str) -> dict:
@@ -176,35 +178,60 @@ class AppServerThreadService:
         return await asyncio.to_thread(self._read_messages, project_id, chat_id)
 
     def _read_messages(self, project_id: str, chat_id: str) -> list[dict]:
+        with self.history.lock(chat_id):
+            self._refresh_history(project_id, chat_id)
+            return self.history.all_messages(chat_id)
+
+    def _refresh_history(self, project_id: str, chat_id: str) -> None:
         project = self.projects.get_project_row(project_id)
         chat = self.chats.get_chat_row(project_id, chat_id)
         provider_threads = self.chats.list_provider_threads(project_id, chat_id)
-        transcript_messages: list[dict] = []
+        sources = []
         if provider_threads:
             for provider_thread in provider_threads:
-                transcript_messages.extend(
-                    self._list_transcript_messages(
-                        project_id,
-                        project["path"],
-                        chat_id,
-                        str(provider_thread["thread_id"]),
-                        provider_thread.get("transcript_path"),
-                        str(provider_thread["provider"]),
-                    )
-                )
+                session_id = str(provider_thread["thread_id"])
+                path = provider_thread.get("transcript_path")
+                if provider_thread["provider"] == "openai" and session_id == str(chat.get("codex_session_id") or chat_id):
+                    path = path or chat.get("transcript_path")
+                sources.append((session_id, path, str(provider_thread["provider"])))
         else:
-            session_ids = [chat_id]
-            codex_session_id = chat.get("codex_session_id")
-            if codex_session_id and codex_session_id not in session_ids:
-                session_ids.append(str(codex_session_id))
-            transcript_messages = [
-                message
-                for session_id in session_ids
-                for message in self._list_transcript_messages(project_id, project["path"], chat_id, session_id, chat.get("transcript_path"), "openai")
-            ]
+            session_ids = [str(chat.get("codex_session_id") or chat_id)]
+            sources = [(session_id, chat.get("transcript_path"), "openai") for session_id in session_ids]
+        active_paths = set()
+        for session_id, path, provider in sources:
+            resolved = self._resolve_transcript_path(project_id, project["path"], chat_id, session_id, path, provider)
+            if resolved is not None:
+                active_paths.add(str(resolved))
+                self.history.import_source(chat_id, resolved)
+        # A provider path may change after archival/rotation. Do not keep its
+        # former messages as a second, stale source.
+        for row in self.messages.db.fetchall("SELECT path FROM history_sources WHERE chat_id = ?", (chat_id,)):
+            if row["path"] not in active_paths:
+                with self.messages.db.transaction():
+                    self.messages.db.execute("DELETE FROM history_sources WHERE chat_id = ? AND path = ?", (chat_id, row["path"]))
+                    self.messages.db.execute("DELETE FROM history_transcript_messages WHERE chat_id = ? AND path = ?", (chat_id, row["path"]))
+                    self.messages.db.execute("UPDATE history_checkpoint SET revision = -1 WHERE chat_id = ?", (chat_id,))
+        revision_row = self.messages.db.fetchone("SELECT * FROM history_revision WHERE chat_id = ?", (chat_id,)) or {}
+        revision = revision_row.get("revision", 0)
+        event_reset = revision_row.get("event_reset", 0)
+        checkpoint = self.messages.db.fetchone("SELECT * FROM history_checkpoint WHERE chat_id = ?", (chat_id,))
+        if checkpoint and checkpoint["revision"] == revision and checkpoint["event_reset"] == event_reset:
+            return
+        transcript_messages = self.history.transcripts(chat_id)
         all_local_messages = self.messages.list_messages(project_id, chat_id)
         all_local_messages = _recover_truncated_local_conclusions(transcript_messages, all_local_messages)
-        run_activity_messages, run_activity_windows = _persisted_run_activity_messages(self.messages.db, chat_id)
+        states = {}
+        event_offset = 0
+        if checkpoint and checkpoint["event_reset"] == event_reset:
+            event_offset = checkpoint["event_offset"]
+            states = {tuple(json.loads(row["state_key"])): json.loads(row["payload"]) for row in self.messages.db.fetchall(
+                "SELECT state_key, payload FROM history_activity_state WHERE chat_id = ?", (chat_id,))}
+        upper = self.messages.db.fetchone("SELECT COALESCE(MAX(rowid), 0) AS n FROM run_events")["n"]
+        run_activity_messages, _ = _persisted_run_activity_messages(self.messages.db, chat_id, states=states, event_after=event_offset, event_until=upper)
+        run_activity_windows = [(_parse_message_timestamp(str(row["started_at"] or "")),
+                                _parse_message_timestamp(str(row["finished_at"])) if row["finished_at"] else datetime.now(timezone.utc))
+                               for row in self.messages.db.fetchall("""SELECT started_at, finished_at FROM runs
+                                   WHERE chat_id = ? AND EXISTS (SELECT 1 FROM run_events WHERE run_id = runs.id AND event = 'progress')""", (chat_id,))]
         if run_activity_messages:
             transcript_messages = [
                 message
@@ -234,61 +261,19 @@ class AppServerThreadService:
                 for message in all_local_messages
                 if str(message.get("role") or "").lower() != "assistant"
             ]
-        return _merge_messages(transcript_messages, [*local_messages, *run_activity_messages])
+        merged = _merge_messages(transcript_messages, [*local_messages, *run_activity_messages])
+        self.history.replace_projection(chat_id, merged, revision, upper, event_reset, states)
 
     async def list_message_page(self, project_id: str, chat_id: str, limit: int, before_created_at: str | None, before_id: str | None) -> dict:
         # File I/O/JSON decoding must not block run notifications or submissions.
         return await asyncio.to_thread(self._read_message_page, project_id, chat_id, limit, before_created_at, before_id)
 
     def _read_message_page(self, project_id: str, chat_id: str, limit: int, before_created_at: str | None, before_id: str | None) -> dict:
-        limit = max(1, min(limit, 500))
-        cursor = (_parse_message_timestamp(before_created_at), before_id or "") if before_created_at else None
-        key = lambda message: (_message_timestamp(message), str(message.get("id") or ""))
-        project = self.projects.get_project_row(project_id)
-        chat = self.chats.get_chat_row(project_id, chat_id)
-        local = self.messages.list_messages(project_id, chat_id)
-        canonical = any(message.get("role") == "user" and message.get("runId") for message in local)
-        prose = [message for message in local if message.get("role") != "status" and message.get("kind") not in {"status", "activity"}]
-        eligible = [message for message in prose if cursor is None or key(message) < cursor]
-        selected_local = sorted(eligible, key=key)[-limit - 1:]
-        transcript: list[dict] = []
-        more_transcript = False
-        threads = self.chats.list_provider_threads(project_id, chat_id)
-        sources = [(str(row["thread_id"]), row.get("transcript_path"), str(row["provider"])) for row in threads]
-        if not sources:
-            sources = [(str(chat.get("codex_session_id") or chat_id), chat.get("transcript_path"), "openai")]
-        for session_id, path, provider in sources:
-            resolved = self._resolve_transcript_path(project_id, project["path"], chat_id, session_id, path, provider)
-            if resolved is not None:
-                tail, more = self.transcripts.read_message_tail(resolved, chat_id, limit + 1, cursor, include_activity=not canonical)
-                transcript.extend(tail)
-                more_transcript = more_transcript or more
-        if canonical:
-            candidates = _recover_truncated_local_conclusions(transcript, selected_local)
-            total = len(prose)
-            exact = True
-        else:
-            candidates = _merge_messages([message for message in transcript if message.get("role") != "status"], [message for message in eligible if message.get("role") != "assistant"])
-            # Exact imported counts require a full scan; this is a lower bound.
-            total = len(candidates)
-            exact = False
-        ordered = sorted(candidates, key=key)
-        has_more = len(ordered) > limit or (not canonical and more_transcript)
-        page = ordered[-limit:]
-        if cursor is None and canonical:
-            newest_prose = max((_message_timestamp(message) for message in prose if message.get("role") == "assistant"), default=datetime.min.replace(tzinfo=timezone.utc))
-            activity, _ = _persisted_run_activity_messages(self.messages.db, chat_id, newest_prose)
-            page = sorted([*page, *activity], key=key)
-        elif cursor is None:
-            newest_prose = max((_message_timestamp(message) for message in candidates if message.get("role") == "assistant"), default=datetime.min.replace(tzinfo=timezone.utc))
-            page = sorted([*page, *(message for message in transcript if message.get("role") == "status" and _message_timestamp(message) > newest_prose)], key=key)
-        return {"messages": page, "totalCount": total, "totalCountIsExact": exact, "hasMoreBefore": has_more}
-
-    def _list_transcript_messages(self, project_id: str, project_path: str, chat_id: str, session_id: str, transcript_path: Any, provider: str = "openai") -> list[dict]:
-        resolved_path = self._resolve_transcript_path(project_id, project_path, chat_id, session_id, transcript_path, provider)
-        if resolved_path is None:
-            return []
-        return self.transcripts.list_messages(project_path, session_id, chat_id, str(resolved_path), include_internal=provider == DEEPSEEK_PROVIDER)
+        if before_created_at and not before_id:
+            raise AppError("validation_error", "過去ページの取得にはメッセージIDが必要です。", 400)
+        with self.history.lock(chat_id):
+            self._refresh_history(project_id, chat_id)
+            return self.history.page(chat_id, max(1, min(limit, 500)), before_id)
 
     def _resolve_transcript_path(self, project_id: str, project_path: str, chat_id: str, session_id: str, transcript_path: Any, provider: str) -> Path | None:
         saved_path = str(transcript_path) if transcript_path else None
@@ -299,10 +284,9 @@ class AppServerThreadService:
         if provider == "openai":
             if saved_path != str(resolved_path):
                 self.chats.update_chat_transcript_path(project_id, chat_id, str(resolved_path))
-        else:
-            provider_thread = self.chats.get_provider_thread(project_id, chat_id, provider)
-            if provider_thread is not None and saved_path != str(resolved_path):
-                self.chats.update_provider_thread_transcript_path(project_id, chat_id, provider, str(resolved_path))
+        provider_thread = self.chats.get_provider_thread(project_id, chat_id, provider)
+        if provider_thread is not None and provider_thread.get("transcript_path") != str(resolved_path):
+            self.chats.update_provider_thread_transcript_path(project_id, chat_id, provider, str(resolved_path))
         return resolved_path
 
     async def ensure_provider_thread(self, project_id: str, chat_id: str, project_path: str, settings: AppServerRuntimeSettings) -> dict:
@@ -2251,23 +2235,24 @@ def _chat_out(project_id: str, thread: dict[str, Any]) -> dict:
     }
 
 
-def _persisted_run_activity_messages(db: Database, chat_id: str, after: datetime | None = None) -> tuple[list[dict], list[tuple[datetime, datetime]]]:
+def _persisted_run_activity_messages(db: Database, chat_id: str, after: datetime | None = None, *, states: dict | None = None, event_after: int = 0, event_until: int = 9223372036854775807) -> tuple[list[dict], list[tuple[datetime, datetime]]]:
     rows = db.fetchall(
         """
         SELECT re.run_id, re.sequence, re.data_json, re.created_at,
                p.path AS project_path,
                r.started_at, r.finished_at, r.status
         FROM run_events re
-        JOIN runs r ON r.id = re.run_id
+        CROSS JOIN runs r ON r.id = re.run_id
         JOIN chats c ON c.id = r.chat_id
         JOIN projects p ON p.id = c.project_id
         WHERE r.chat_id = ? AND re.event = 'progress'
+          AND re.rowid > ? AND re.rowid <= ?
           AND (? IS NULL OR julianday(re.created_at) >= julianday(?))
         ORDER BY re.created_at, re.run_id, re.sequence
         """,
-        (chat_id, after.isoformat() if after else None, after.isoformat() if after else None),
+        (chat_id, event_after, event_until, after.isoformat() if after else None, after.isoformat() if after else None),
     )
-    activities: dict[tuple[str, str], dict[str, Any]] = {}
+    activities: dict[tuple[str, str], dict[str, Any]] = states if states is not None else {}
     windows_by_run: dict[str, tuple[datetime, datetime]] = {}
     now = datetime.now(timezone.utc)
 

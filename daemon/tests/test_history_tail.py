@@ -62,10 +62,11 @@ def test_reverse_lines_preserves_offsets_long_utf8_and_unterminated_lines(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_initial_page_never_parses_old_bulk_or_calls_full_reader(history, monkeypatch):
+async def test_indexed_page_never_reparses_old_bulk_or_calls_full_reader(history, monkeypatch):
     service, transcripts, _, _, project_id, path, meta = history
     old = {"type": "response_item", "payload": {"type": "function_call_output", "output": "x" * 4096}}
     write_lines(path, [meta, *[old for _ in range(2000)], *[assistant(i) for i in range(60)]])
+    await service.list_message_page(project_id, "thread-tail", 10, None, None)
     original = transcript_import.json.loads
     decoded = []
 
@@ -77,7 +78,7 @@ async def test_initial_page_never_parses_old_bulk_or_calls_full_reader(history, 
     monkeypatch.setattr(transcripts, "list_messages", lambda *a, **k: pytest.fail("full transcript scan"))
     page = await service.list_message_page(project_id, "thread-tail", 10, None, None)
     assert [m["content"] for m in page["messages"]] == [f"回答{i}" for i in range(50, 60)]
-    assert page["hasMoreBefore"] and not page["totalCountIsExact"]
+    assert page["hasMoreBefore"] and page["totalCountIsExact"] and page["totalCount"] == 60
     assert len(decoded) < 20
 
 
@@ -167,8 +168,10 @@ async def test_local_authority_repairs_selected_conclusion_and_loads_only_curren
     for sequence, timestamp in [(1, "2026-10-01T00:00:02Z"), (2, "2026-10-01T00:00:04Z")]:
         data = {"method": "item/reasoning/textDelta", "summary": "reasoning", "details": json.dumps({"itemId": f"reasoning-{sequence}", "delta": "途中経過"})}
         db.execute("INSERT INTO run_events(run_id, sequence, event, data_json, created_at) VALUES ('run-tail', ?, 'progress', ?, ?)", (sequence, json.dumps(data), timestamp))
-    # Old malformed details would fail if the hidden row were decoded at all.
+    # A malformed historical event is skipped on import, not decoded again on
+    # subsequent SQL page reads.
     db.execute("UPDATE run_events SET data_json = 'not-json' WHERE sequence = 1")
+    await service.list_message_page(project_id, "thread-tail", 2, None, None)
     original = json.loads
 
     def reject_old_details(value, *args, **kwargs):

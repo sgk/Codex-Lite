@@ -507,8 +507,8 @@ class ChatService:
     def update_provider_thread_transcript_path(self, project_id: str, chat_id: str, provider: str, transcript_path: str) -> None:
         self.get_chat_row(project_id, chat_id)
         self.db.execute(
-            "UPDATE chat_provider_threads SET transcript_path = ?, updated_at = ? WHERE chat_id = ? AND provider = ?",
-            (transcript_path, utc_now(), chat_id, provider),
+            "UPDATE chat_provider_threads SET transcript_path = ? WHERE chat_id = ? AND provider = ?",
+            (transcript_path, chat_id, provider),
         )
 
     def touch_provider_thread(self, chat_id: str, provider: str) -> None:

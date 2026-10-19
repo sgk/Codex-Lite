@@ -258,6 +258,8 @@ class Database:
             if self.fetchone("SELECT version FROM schema_version WHERE version = 1") is None:
                 self.execute("INSERT INTO schema_version(version, applied_at) VALUES (1, datetime('now'))")
             self._conn.commit()
+            from .history_store import HISTORY_SCHEMA
+            self._conn.executescript(HISTORY_SCHEMA)
 
     def _migrate_automation_schedule_kinds(self) -> None:
         self._conn.executescript(
