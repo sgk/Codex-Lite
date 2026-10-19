@@ -23,6 +23,7 @@ from .automation_service import AutomationService, run_automation_scheduler
 from .app_server import AppServerClientPool
 from .app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService
 from .config import Config, load_config
+from .daemon_instance import DaemonInstance
 from .codex_state import CodexStateService
 from .deepseek import deepseek_model_ids, deepseek_reasoning_efforts, model_provider_for_model
 from .db import Database
@@ -138,6 +139,7 @@ def create_app(config: Config | None = None) -> Starlette:
         process_env = codex_process_env(cfg)
         return {
             "daemonPid": __import__("os").getpid(),
+            "daemonLogPath": str(cfg.app_data_dir / "daemon.log"),
             "pythonVersion": sys.version,
             "platform": platform.platform(),
             "databasePath": str(cfg.database_path),
@@ -1049,6 +1051,17 @@ def _message_timestamp(value: str) -> datetime:
 
 def main() -> None:
     cfg = load_config()
+    instance = DaemonInstance(cfg)
+    try:
+        if instance.acquire():
+            _serve_daemon(cfg, instance)
+        else:
+            instance.attach(sys.stdin, sys.stdout)
+    finally:
+        instance.close()
+
+
+def _serve_daemon(cfg: Config, instance: DaemonInstance) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((cfg.host, cfg.port))
@@ -1066,8 +1079,21 @@ def main() -> None:
         encoding="utf-8",
     )
     endpoint_path.chmod(0o600)
-    threading.Thread(target=_request_shutdown_on_stdin_eof, args=(server,), daemon=True).start()
-    print(json.dumps({"event": "ready", "host": host, "port": port}), flush=True)
+    ready = {"event": "ready", "host": host, "port": port, "pid": os.getpid()}
+    instance.serve_clients(ready, lambda: setattr(server, "should_exit", True))
+    threading.Thread(target=_release_client_on_stdin_eof, args=(instance,), daemon=True).start()
+    print(json.dumps(ready), flush=True)
+    # A shared owner may outlive the desktop that launched it. Never leave log
+    # writers attached to that desktop's pipes, which can close or fill up.
+    log_path = cfg.app_data_dir / "daemon.log"
+    log_fd = os.open(log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    try:
+        os.fchmod(log_fd, 0o600)
+        print(f"codex-lite-daemon-log: {log_path}", file=sys.stderr, flush=True)
+        os.dup2(log_fd, sys.stdout.fileno())
+        os.dup2(log_fd, sys.stderr.fileno())
+    finally:
+        os.close(log_fd)
     try:
         server.run(sockets=[sock])
     finally:
@@ -1079,10 +1105,10 @@ def main() -> None:
             pass
 
 
-def _request_shutdown_on_stdin_eof(server: uvicorn.Server) -> None:
+def _release_client_on_stdin_eof(instance: DaemonInstance) -> None:
     for _ in sys.stdin.buffer:
         pass
-    server.should_exit = True
+    instance.release_client()
 
 
 if __name__ == "__main__":

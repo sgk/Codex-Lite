@@ -61,6 +61,7 @@ public sealed class DaemonClient
     private HttpClient _http = CreateHttpClient();
     private readonly StringBuilder _daemonErrors = new();
     private Process? _daemonProcess;
+    private readonly SemaphoreSlim _daemonLifecycle = new(1, 1);
 
     public event Action<string>? StatusChanged;
 
@@ -131,10 +132,31 @@ public sealed class DaemonClient
 
     public async Task EnsureDaemonAsync(string distroName, CancellationToken cancellationToken = default)
     {
+        await _daemonLifecycle.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureDaemonCoreAsync(distroName, cancellationToken);
+        }
+        finally
+        {
+            _daemonLifecycle.Release();
+        }
+    }
+
+    private async Task EnsureDaemonCoreAsync(string distroName, CancellationToken cancellationToken = default)
+    {
         if (_http.BaseAddress is not null && await TryHealthAsync(cancellationToken) is not null)
         {
             return;
         }
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_http.BaseAddress is not null)
+        {
+            ResetHttpClient();
+        }
+        var previousProcess = _daemonProcess;
+        _daemonProcess = null;
+        await StopDaemonProcessAsync(previousProcess);
         DaemonReady ready;
         _daemonProcess = StartDaemonProcess(distroName);
         try
@@ -167,36 +189,44 @@ public sealed class DaemonClient
 
     public async Task<bool> EnsureHealthyOrRestartAsync(string distroName, CancellationToken healthCheckCancellationToken = default)
     {
-        if (await ProbeHealthAsync(healthCheckCancellationToken) is not null)
+        await _daemonLifecycle.WaitAsync(healthCheckCancellationToken);
+        try
         {
-            return false;
-        }
+            if (await ProbeHealthAsync(healthCheckCancellationToken) is not null)
+            {
+                return false;
+            }
+            healthCheckCancellationToken.ThrowIfCancellationRequested();
 
-        await StopDaemonProcessAsync(_daemonProcess);
-        _daemonProcess = null;
-        ResetHttpClient();
-        await EnsureDaemonAsync(distroName);
-        return true;
+            var previousProcess = _daemonProcess;
+            _daemonProcess = null;
+            await StopDaemonProcessAsync(previousProcess);
+            ResetHttpClient();
+            await EnsureDaemonCoreAsync(distroName, healthCheckCancellationToken);
+            return true;
+        }
+        finally
+        {
+            _daemonLifecycle.Release();
+        }
     }
 
     public async Task ShutdownDaemonAsync()
     {
-        var process = _daemonProcess;
-        _daemonProcess = null;
-        if (_http.BaseAddress is not null)
+        await _daemonLifecycle.WaitAsync();
+        try
         {
-            try
-            {
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                await PostAsync<object>("/shutdown", new { }, timeout.Token);
-            }
-            catch
-            {
-            }
+            var process = _daemonProcess;
+            _daemonProcess = null;
+            // Closing this launcher's stdin releases only this desktop's lease.
+            // Other desktops may still be using the shared daemon and its turns.
+            await StopDaemonProcessAsync(process);
+            ResetHttpClient();
         }
-
-        await StopDaemonProcessAsync(process);
-        ResetHttpClient();
+        finally
+        {
+            _daemonLifecycle.Release();
+        }
     }
 
     private static HttpClient CreateHttpClient() => new() { Timeout = TimeSpan.FromSeconds(35) };
@@ -404,12 +434,11 @@ public sealed class DaemonClient
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             await process.WaitForExitAsync(timeout.Token);
         }
-        catch
+        catch (OperationCanceledException)
         {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
+            // The owner remains alive while another desktop holds a lease.
+            // Never kill its process tree (including other desktops' runs).
+            Debug.WriteLine("Daemon client stdin closed; shared daemon or graceful shutdown is still active.");
         }
         finally
         {
