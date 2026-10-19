@@ -90,7 +90,9 @@ function Request-CodexLiteShutdown {
 function Wait-CodexLiteExit {
     param([int]$ProcessId)
 
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    # Shutdown serializes with daemon initialization (up to 180 seconds).
+    # Allow that operation to finish without killing the parent process tree.
+    $deadline = [DateTime]::UtcNow.AddSeconds(240)
     while ([DateTime]::UtcNow -lt $deadline) {
         if ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
             Write-Host "Codex Lite PID $ProcessId exited gracefully"
