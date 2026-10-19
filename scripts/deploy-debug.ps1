@@ -101,6 +101,49 @@ function Wait-CodexLiteExit {
     throw "Codex Lite PID $ProcessId did not exit after its graceful deploy request."
 }
 
+function Get-CodexLiteWslChildren {
+    # wslhost can retain the inherited Windows working directory after the
+    # client window closes. Observe only this app's descendants, never stop
+    # unrelated WSL sessions or restart the distribution.
+    $snapshot = @(Get-CimInstance Win32_Process)
+    $owners = @{}
+    foreach ($item in $snapshot) {
+        if ($item.Name -eq "CodexLite.exe") {
+            $owners[[int]$item.ProcessId] = $true
+        }
+    }
+    do {
+        $changed = $false
+        foreach ($item in $snapshot) {
+            if ($owners.ContainsKey([int]$item.ParentProcessId) -and -not $owners.ContainsKey([int]$item.ProcessId)) {
+                $owners[[int]$item.ProcessId] = $true
+                $changed = $true
+            }
+        }
+    } while ($changed)
+    return @($snapshot | Where-Object {
+        $owners.ContainsKey([int]$_.ProcessId) -and $_.Name -in @("wsl.exe", "wslhost.exe")
+    })
+}
+
+function Wait-CodexLiteWslChildrenExit {
+    param([object[]]$Children)
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    do {
+        $remaining = @($Children | Where-Object {
+            $observed = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.ProcessId)"
+            $null -ne $observed -and $observed.CreationDate -eq $_.CreationDate
+        })
+        if ($remaining.Count -eq 0) {
+            Write-Host "Codex Lite WSL children exited; deployment directory is no longer their working directory"
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Codex Lite WSL children still own the deployment directory after 60 seconds: $($remaining.ProcessId -join ',')"
+}
+
 function Stop-RemainingLocalDaemon {
     param([string]$EndpointPath)
 
@@ -164,8 +207,10 @@ $protectedIds = @(
     $ProtectedProcessIds.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries) |
         ForEach-Object { [int]$_ }
 )
+$wslChildren = @(Get-CodexLiteWslChildren)
 Stop-UnprotectedCodexLite -ProtectedIds $protectedIds
 Stop-RemainingLocalDaemon -EndpointPath $DaemonEndpointPath
+Wait-CodexLiteWslChildrenExit -Children $wslChildren
 
 if (Test-Path -LiteralPath $previousDirectory) {
     Remove-Item -LiteralPath $previousDirectory -Recurse -Force

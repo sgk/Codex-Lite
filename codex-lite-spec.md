@@ -136,6 +136,8 @@ Windowsアプリは `wsl.exe -d <ディストリビューション> -- bash -c .
 
 開発ビルドでは `windows/CodexLite/bin` をビルド成果物、Windowsデスクトップ直下の `Codex Lite` フォルダーを実行用配置先として分離する。ビルドが成功するまでは実行中クライアントを停止しない。成功後の配置は独立したWindowsプロセスへ引き渡し、デスクトップ上の隣接ディレクトリへのコピー完了後にクライアントを正常終了して `Codex Lite` フォルダーを入れ替え、最新クライアントを起動する。デスクトップの `Codex Lite` ショートカットはこの実行用配置先を参照する。以後のデプロイ、配置、更新はこのフォルダー内容を更新する。
 
+配置前にクライアント配下のWSL子プロセスを記録し、クライアント・デーモンの正常終了後、それらも終了したことを最大60秒待ってからフォルダーを入れ替える。PID再利用は作成日時で区別する。別のWSLセッションは待機・停止の対象にせず、強制終了やWSL全体の再起動は行わない。待機時間を超過した場合は残存PIDを明示して配置を停止する。
+
 WindowsのRemote同期対応ビルドと配布ZIPには、Firebase SDKを含むRemote Agentを単一のNode用JavaScriptへバンドルし、Firebase公開設定およびAgent既定値とともに `remote-agent/` へ同梱する。OAuthクライアントIDとクライアントシークレットはリポジトリ直下のGit管理外 `.env` だけで管理し、ビルド時に一時設定へ変換してパッケージへ同梱する。`.env` 自体は同梱しない。`GOOGLE_OAUTH_CLIENT_SECRET` が無い場合、Remote AgentとOAuth設定を同梱せず、WindowsアプリのRemote同期UIおよび自動接続を無効にしたビルドを生成する。Windowsアプリは `AppContext.BaseDirectory/remote-agent/index.js` だけをWSLのNode.jsで起動し、開発リポジトリ、ソース版 `remote/`、`node_modules`を探索しない。Firebase同期先は同梱 `firebase-config.json` の `projectId`、`apiKey`、`appId`で決定する。OAuthクライアント設定はGoogleログインにだけ使い、同期先の決定には使わない。
 
 Remote Agentの端末IDはビルドへ固定せず、各PCの初回起動時にランダムIDとPC表示名をWSL ext4側 `~/.local/share/codex-lite/remote-device.json` へ所有者限定で保存する。以後はこのファイルだけを正本とし、ホスト名や同梱設定へフォールバックしない。ファイルが存在するのに不正な場合は新しいIDで置き換えず、同期を停止してエラーを表示する。
