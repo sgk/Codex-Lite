@@ -185,6 +185,8 @@ class AppServerThreadService:
     def _refresh_history(self, project_id: str, chat_id: str) -> None:
         project = self.projects.get_project_row(project_id)
         chat = self.chats.get_chat_row(project_id, chat_id)
+        if chat.get("archived_at") is not None:
+            raise AppError("chat_archived", "アーカイブ済みチャットの履歴は取り込みません。", 409)
         provider_threads = self.chats.list_provider_threads(project_id, chat_id)
         sources = []
         if provider_threads:
@@ -203,6 +205,7 @@ class AppServerThreadService:
             if resolved is not None:
                 active_paths.add(str(resolved))
                 self.history.import_source(chat_id, resolved)
+        self.history.retention.prune_chat(chat_id)
         # A provider path may change after archival/rotation. Do not keep its
         # former messages as a second, stale source.
         for row in self.messages.db.fetchall("SELECT path FROM history_sources WHERE chat_id = ?", (chat_id,)):
@@ -1441,6 +1444,15 @@ class AppServerRunService:
                     continue
                 if notification.method == "turn/completed" and run.replacing_idle_turn:
                     continue
+                compaction_item = notification.params.get("item")
+                if notification.method == "thread/compacted" or (
+                    notification.method == "item/completed"
+                    and isinstance(compaction_item, dict)
+                    and compaction_item.get("type") == "contextCompaction"
+                ):
+                    await flush_reasoning_progress()
+                    await self.events.flush()
+                    self.threads.history.retention.record_compaction(run.chat_id, utc_now())
                 if SERVER_REQUEST_ID_KEY in notification.params:
                     raw_request_id = notification.params[SERVER_REQUEST_ID_KEY]
                     request_id = str(raw_request_id)
@@ -2241,8 +2253,8 @@ def _persisted_run_activity_messages(db: Database, chat_id: str, after: datetime
         SELECT re.run_id, re.sequence, re.data_json, re.created_at,
                p.path AS project_path,
                r.started_at, r.finished_at, r.status
-        FROM run_events re
-        CROSS JOIN runs r ON r.id = re.run_id
+        FROM runs r
+        CROSS JOIN run_events re ON re.run_id = r.id
         JOIN chats c ON c.id = r.chat_id
         JOIN projects p ON p.id = c.project_id
         WHERE r.chat_id = ? AND re.event = 'progress'

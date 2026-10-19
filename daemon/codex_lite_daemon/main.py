@@ -30,6 +30,7 @@ from .db import Database
 from .dynamic_tools import CodexLiteDynamicTools
 from .errors import AppError
 from .file_service import FileService
+from .history_retention import run_history_maintenance
 from .process_env import codex_process_env
 from .remote_gateway import RemoteGateway
 from .run_service import RunService
@@ -85,8 +86,10 @@ def create_app(config: Config | None = None) -> Starlette:
     async def lifespan(_: Starlette):
         scheduler_stop = asyncio.Event()
         scheduler_task: asyncio.Task | None = None
+        maintenance_task: asyncio.Task | None = None
         try:
             scheduler_task = asyncio.create_task(run_automation_scheduler(automations, automation_runner, scheduler_stop))
+            maintenance_task = asyncio.create_task(run_history_maintenance(db, scheduler_stop))
             yield
         finally:
             scheduler_stop.set()
@@ -100,6 +103,8 @@ def create_app(config: Config | None = None) -> Starlette:
             await app_servers.close()
             await app_runs.flush_events()
             await runs.flush_events()
+            if maintenance_task is not None:
+                await maintenance_task
             db.close()
 
     app = Starlette(lifespan=lifespan)

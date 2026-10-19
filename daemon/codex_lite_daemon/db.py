@@ -182,6 +182,7 @@ CREATE INDEX IF NOT EXISTS idx_chat_provider_threads_thread ON chat_provider_thr
 CREATE INDEX IF NOT EXISTS idx_model_reasoning_history_used ON model_reasoning_history(used_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_chat_started ON runs(chat_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_run_events_run_sequence ON run_events(run_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_run_events_run_event ON run_events(run_id, event);
 CREATE INDEX IF NOT EXISTS idx_token_usage_samples_recorded ON token_usage_samples(provider, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_token_usage_samples_chat ON token_usage_samples(chat_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_automations_chat ON automations(project_id, chat_id);
@@ -195,10 +196,14 @@ class Database:
         self.path = path
         self._lock = threading.RLock()
         self._in_transaction = False
+        self.history_readers = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        new_database = not self.path.exists() or self.path.stat().st_size == 0
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        if new_database:
+            self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
 
     def migrate(self) -> None:
         with self._lock:
@@ -260,6 +265,44 @@ class Database:
             self._conn.commit()
             from .history_store import HISTORY_SCHEMA
             self._conn.executescript(HISTORY_SCHEMA)
+            from .history_retention import SCHEMA as RETENTION_SCHEMA
+            self._conn.executescript(RETENTION_SCHEMA)
+
+    @contextmanager
+    def history_reader(self):
+        with self._lock:
+            self.history_readers += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self.history_readers -= 1
+
+    def reclaim_unused_space(self, pages: int = 4096) -> bool:
+        """Reclaim disk pages only between runs and history readers.
+
+        Existing non-auto-vacuum databases require one VACUUM to enable
+        incremental reclamation. This is never called by startup or a request.
+        """
+        with self._lock:
+            if self._in_transaction or self.history_readers:
+                return False
+            if self.fetchone("SELECT 1 FROM runs WHERE status IN ('queued','running') LIMIT 1"):
+                return False
+            free = self._conn.execute("PRAGMA freelist_count").fetchone()[0]
+            if not free:
+                return False
+            mode = self._conn.execute("PRAGMA auto_vacuum").fetchone()[0]
+            if mode != 2:
+                self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+                self._conn.execute("VACUUM")
+                # VACUUM may renumber implicit run_events rowids. Invalidate
+                # all high-water marks, not just the chat that freed space.
+                self._conn.execute("UPDATE history_checkpoint SET event_offset=0, event_reset=-1")
+                self._conn.commit()
+            else:
+                self._conn.execute(f"PRAGMA incremental_vacuum({max(1, int(pages))})").fetchall()
+            return True
 
     def _migrate_automation_schedule_kinds(self) -> None:
         self._conn.executescript(

@@ -113,19 +113,25 @@ class EventHub:
             return
         try:
             run_ids = {item[0] for item in pending}
-            existing_run_ids = {
-                run_id
-                for run_id in run_ids
-                if self._db.fetchone("SELECT id FROM runs WHERE id = ?", (run_id,)) is not None
-            }
-            valid_pending = [item for item in pending if item[0] in existing_run_ids]
+            run_rows = {run_id: self._db.fetchone("""SELECT r.id, c.archived_at, h.compacted_at
+                FROM runs r JOIN chats c ON c.id=r.chat_id
+                LEFT JOIN history_retention h ON h.chat_id=c.id WHERE r.id=?""", (run_id,)) for run_id in run_ids}
+            from .history_retention import timestamp
+            valid_pending = []
+            for item in pending:
+                row = run_rows[item[0]]
+                if row is None or row["archived_at"] is not None:
+                    continue
+                if item[2] == "progress" and row["compacted_at"] and timestamp(item[4]) <= row["compacted_at"]:
+                    continue
+                valid_pending.append(item)
             if valid_pending:
                 self._db.executemany(
                     "INSERT OR REPLACE INTO run_events(run_id, sequence, event, data_json, created_at) VALUES (?, ?, ?, ?, ?)",
                     valid_pending,
                 )
-            # Only the memory cache is bounded. Durable events are needed for
-            # cursor replay until the user deletes the associated conversation.
+            # Durable replay is retained until compaction/archival removes
+            # obsolete progress. Delayed flushes must not resurrect it.
             self._last_persistence_error = None
         except Exception as exc:
             # Event persistence is diagnostic/replay support. It must never

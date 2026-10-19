@@ -5,11 +5,13 @@ import hashlib
 import json
 import os
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from .db import Database
 from .errors import AppError
 from .transcript_import import _transcript_message
+from .history_retention import HistoryRetention, timestamp
 
 
 HISTORY_SCHEMA = """
@@ -94,6 +96,11 @@ BEGIN
   INSERT INTO history_revision(chat_id, revision) VALUES (NEW.chat_id, 1)
   ON CONFLICT(chat_id) DO UPDATE SET revision = revision + 1;
 END;
+CREATE TRIGGER IF NOT EXISTS history_event_highwater_deleted AFTER DELETE ON run_events
+WHEN OLD.rowid > COALESCE((SELECT MAX(rowid) FROM run_events), 0)
+BEGIN
+  UPDATE history_checkpoint SET event_offset=0, event_reset=-1;
+END;
 """
 
 
@@ -104,10 +111,13 @@ def encoded(value) -> str:
 class HistoryStore:
     def __init__(self, db: Database):
         self.db = db
+        self.retention = HistoryRetention(db)
         self.locks = [threading.RLock() for _ in range(32)]
 
+    @contextmanager
     def lock(self, chat_id: str):
-        return self.locks[hash(chat_id) % len(self.locks)]
+        with self.db.history_reader(), self.locks[hash(chat_id) % len(self.locks)]:
+            yield
 
     def import_source(self, chat_id: str, path: Path) -> bool:
         """Read only appended bytes; commit messages and cursor atomically.
@@ -133,6 +143,8 @@ class HistoryStore:
             pending = {} if reset else json.loads(saved["pending_json"])
             handle.seek(offset)
             records = []
+            activity_records = []
+            compacted_at = None
             # Snapshot the file length so a busy writer cannot extend this job
             # indefinitely. Subsequent appended bytes belong to the next pass.
             while handle.tell() < stat.st_size:
@@ -146,12 +158,25 @@ class HistoryStore:
                     offset = handle.tell()
                     continue
                 if isinstance(item, dict):
+                    if item.get("type") == "compacted":
+                        marker_time = timestamp(str(item.get("timestamp") or ""))
+                        compacted_at = max(compacted_at or marker_time, marker_time)
+                        pending.clear()
                     message = _transcript_message(chat_id, item, f"byte-{start}", pending)
                     if message is not None:
-                        records.append((chat_id, str(path), message["id"], start, encoded(message)))
+                        record = (chat_id, str(path), message["id"], start, encoded(message))
+                        if message.get("role") == "status":
+                            activity_records.append((record, message.get("createdAt")))
+                        else:
+                            records.append(record)
                 offset = handle.tell()
             handle.seek(max(0, offset - 4096))
             boundary_hash = hashlib.sha256(handle.read(min(offset, 4096))).hexdigest()
+        cutoff = self.retention.cutoff(chat_id)
+        if compacted_at:
+            cutoff = max(cutoff or compacted_at, compacted_at)
+        records.extend(record for record, created_at in activity_records
+                       if not cutoff or not created_at or timestamp(created_at) > cutoff)
         with self.db.transaction():
             if reset:
                 self.db.execute("DELETE FROM history_transcript_messages WHERE chat_id = ? AND path = ?", (chat_id, str(path)))
@@ -161,6 +186,15 @@ class HistoryStore:
                             (chat_id, str(path), identity, offset, stat.st_mtime_ns, stat.st_size, boundary_hash, encoded(pending)))
             self.db.execute("""INSERT INTO history_revision(chat_id, revision) VALUES (?, 1)
                 ON CONFLICT(chat_id) DO UPDATE SET revision=revision+1""", (chat_id,))
+            if compacted_at is not None:
+                # The cursor and compaction watermark must survive together.
+                self.retention.record_compaction(chat_id, compacted_at)
+        # A source reset must not resurrect pre-compaction activity.
+        cutoff = self.retention.cutoff(chat_id)
+        if cutoff:
+            self.db.execute("""DELETE FROM history_transcript_messages WHERE chat_id=? AND path=?
+                AND json_extract(payload, '$.role')='status'
+                AND julianday(json_extract(payload, '$.createdAt')) <= julianday(?)""", (chat_id, str(path), cutoff))
         return True
 
     def transcripts(self, chat_id: str) -> list[dict]:
@@ -168,6 +202,13 @@ class HistoryStore:
             "SELECT payload FROM history_transcript_messages WHERE chat_id = ? ORDER BY path, byte_offset", (chat_id,))]
 
     def replace_projection(self, chat_id: str, messages: list[dict], revision: int, event_offset: int, event_reset: int, states: dict) -> None:
+        cutoff = self.retention.cutoff(chat_id)
+        if cutoff:
+            messages = [message for message in messages if not (
+                (message.get("role") == "status" or message.get("kind") in {"status", "activity"})
+                and message.get("createdAt") and timestamp(message["createdAt"]) <= cutoff)]
+            states = {key: state for key, state in states.items()
+                      if not state.get("created_at") or timestamp(state["created_at"]) > cutoff}
         existing = {row["id"]: row for row in self.db.fetchall("SELECT id, payload FROM history_messages WHERE chat_id = ?", (chat_id,))}
         changed = []
         for position, message in enumerate(messages, 1):
