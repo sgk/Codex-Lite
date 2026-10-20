@@ -73,10 +73,11 @@ function Request-CodexLiteShutdown {
     $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(".", "CodexLite-Deploy-Control", [System.IO.Pipes.PipeDirection]::Out, [System.IO.Pipes.PipeOptions]::Asynchronous)
     try {
         $pipe.Connect(3000)
-        $writer = New-Object System.IO.StreamWriter($pipe)
-        $writer.AutoFlush = $true
-        $writer.WriteLine("restart-for-deploy")
-        $writer.Dispose()
+        # Send one complete frame. StreamWriter.AutoFlush plus Dispose can
+        # flush again after the server has read the command and closed its
+        # pipe, incorrectly reporting a broken pipe for accepted shutdowns.
+        $commandBytes = [System.Text.Encoding]::UTF8.GetBytes("restart-for-deploy`n")
+        $pipe.Write($commandBytes, 0, $commandBytes.Length)
         Write-Host "requested graceful self-stop for Codex Lite PID $ProcessId"
     }
     catch {
