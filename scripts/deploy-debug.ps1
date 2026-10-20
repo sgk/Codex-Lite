@@ -111,14 +111,20 @@ function Get-CodexLiteWslChildren {
     $owners = @{}
     foreach ($item in $snapshot) {
         if ($item.Name -eq "CodexLite.exe") {
-            $owners[[int]$item.ProcessId] = $true
+            $owners[[int]$item.ProcessId] = $item.CreationDate
         }
     }
     do {
         $changed = $false
         foreach ($item in $snapshot) {
-            if ($owners.ContainsKey([int]$item.ParentProcessId) -and -not $owners.ContainsKey([int]$item.ProcessId)) {
-                $owners[[int]$item.ProcessId] = $true
+            # ParentProcessId can refer to a newer, unrelated process after PID
+            # reuse. A real descendant cannot predate its observed parent.
+            if ($owners.ContainsKey([int]$item.ParentProcessId) -and
+                $null -ne $item.CreationDate -and
+                $null -ne $owners[[int]$item.ParentProcessId] -and
+                $item.CreationDate -ge $owners[[int]$item.ParentProcessId] -and
+                -not $owners.ContainsKey([int]$item.ProcessId)) {
+                $owners[[int]$item.ProcessId] = $item.CreationDate
                 $changed = $true
             }
         }
