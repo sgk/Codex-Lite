@@ -12,7 +12,6 @@ from .util.ids import new_id
 from .util.time import utc_now
 
 
-CODEX_INDEX_VISIBILITY_GRACE_SECONDS = 120
 
 
 class ProjectService:
@@ -523,26 +522,21 @@ class ChatService:
         self.db.execute("UPDATE chats SET archived_at = ?, updated_at = ? WHERE id = ?", (now, now, chat_id))
         return self.get_chat(project_id, chat_id)
 
-    def archive_stale_imported_chats(self, project_id: str, active_chat_ids: set[str]) -> int:
+    def archive_confirmed_imported_chats(self, project_id: str, confirmed_chat_ids: set[str]) -> int:
         self.projects.get_project_row(project_id)
+        if not confirmed_chat_ids:
+            return 0
         now = utc_now()
-        active_filter = ""
-        params: list[object] = [now, now, project_id]
-        if active_chat_ids:
-            placeholders = ", ".join("?" for _ in active_chat_ids)
-            active_filter = f"AND id NOT IN ({placeholders})"
-            params.extend(sorted(active_chat_ids))
+        placeholders = ", ".join("?" for _ in confirmed_chat_ids)
         cursor = self.db.execute(
             f"""
             UPDATE chats
             SET archived_at = ?, updated_at = ?
             WHERE project_id = ?
               AND archived_at IS NULL
-              {active_filter}
-              AND (codex_session_id IS NOT NULL OR transcript_path IS NOT NULL)
-              AND julianday(created_at) <= julianday(?) - (? / 86400.0)
+              AND (id IN ({placeholders}) OR codex_session_id IN ({placeholders}))
             """,
-            (*params, now, CODEX_INDEX_VISIBILITY_GRACE_SECONDS),
+            (now, now, project_id, *sorted(confirmed_chat_ids), *sorted(confirmed_chat_ids)),
         )
         return int(cursor.rowcount or 0)
 

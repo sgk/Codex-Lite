@@ -2918,6 +2918,10 @@ async def test_first_provider_context_excludes_work_messages_and_nested_context_
     context = await threads.context_for_provider(project_id, chat_id, "deepseek")
 
     assert context == "User: question\n\nAssistant: final answer"
+    accepted = messages.insert_message(chat_id, "user", "new request\n\n添付: picture.png", kind="instruction")
+    context = await threads.context_for_provider(project_id, chat_id, "deepseek",
+                                                 exclude_content="new request", exclude_message_id=accepted["id"])
+    assert context == "User: question\n\nAssistant: final answer"
     db.close()
 
 
@@ -4386,7 +4390,9 @@ def test_codex_state_threads_are_indexed_and_archived_threads_are_hidden(linux_t
     db.close()
 
 
-def test_codex_state_hides_provider_context_threads(linux_tmp_path: Path) -> None:
+@pytest.mark.parametrize("secondary", [False, True])
+@pytest.mark.parametrize("prefix_field", ["title", "first_user_message"])
+def test_codex_state_context_text_does_not_determine_thread_visibility(linux_tmp_path: Path, secondary: bool, prefix_field: str) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
     cfg = make_test_config(linux_tmp_path)
@@ -4411,6 +4417,10 @@ def test_codex_state_hides_provider_context_threads(linux_tmp_path: Path) -> Non
             )
         ],
     )
+    if prefix_field == "first_user_message":
+        with sqlite3.connect(cfg.codex_sqlite_home / "state_5.sqlite") as state:
+            state.execute("ALTER TABLE threads ADD COLUMN first_user_message TEXT")
+            state.execute("UPDATE threads SET first_user_message=title, title='normal title'")
     db = Database(cfg.database_path)
     db.migrate()
     projects = ProjectService(db, cfg)
@@ -4418,10 +4428,22 @@ def test_codex_state_hides_provider_context_threads(linux_tmp_path: Path) -> Non
     transcripts = TranscriptImportService(cfg, projects, chats, CodexStateService(cfg))
 
     project = projects.create_project(str(project_dir))
+    if secondary:
+        chats.upsert_chat_index(project["id"], "primary", "visible chat", "primary", utc_now(), utc_now())
+        chats.upsert_provider_thread(project["id"], "primary", "openai", "internal_thread")
+    else:
+        # A primary thread may contain the exact same context prefix, and
+        # may already have been erroneously archived by the old importer.
+        chats.upsert_chat_index(project["id"], "internal_thread", "visible chat", "internal_thread",
+                                "2026-06-26T00:00:00Z", "2026-06-26T00:00:00Z")
+        chats.upsert_provider_thread(project["id"], "internal_thread", "openai", "internal_thread")
+        chats.archive_chat(project["id"], "internal_thread")
+    transcripts.index_project(project)
     transcripts.index_project(project)
 
-    assert chats.list_chats(project["id"]) == []
-    assert db.fetchone("SELECT id FROM chats WHERE id = ?", ("internal_thread",)) is None
+    assert [chat["id"] for chat in chats.list_chats(project["id"])] == (["primary"] if secondary else ["internal_thread"])
+    if secondary:
+        assert db.fetchone("SELECT id FROM chats WHERE id = ?", ("internal_thread",)) is None
     db.close()
 
 
@@ -4524,7 +4546,7 @@ def test_codex_state_sync_ignores_jsonl_only_sessions_when_db_is_available(linux
     db.close()
 
 
-def test_codex_state_sync_archives_stale_imported_rows(linux_tmp_path: Path) -> None:
+def test_codex_state_sync_keeps_missing_imported_rows(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
     cfg = make_test_config(linux_tmp_path)
@@ -4563,7 +4585,7 @@ def test_codex_state_sync_archives_stale_imported_rows(linux_tmp_path: Path) -> 
     visible = chats.list_chats(project["id"])
     assert [chat["id"] for chat in visible] == ["thr_active"]
     stale = db.fetchone("SELECT archived_at FROM chats WHERE id = ?", ("thr_old_jsonl",))
-    assert stale is not None and stale["archived_at"] is not None
+    assert stale is not None and stale["archived_at"] is None
     db.close()
 
 
@@ -4604,7 +4626,7 @@ def test_codex_state_sync_keeps_recent_local_thread_until_state_db_catches_up(li
     db.close()
 
 
-def test_codex_state_sync_archives_stale_continuable_rows(linux_tmp_path: Path) -> None:
+def test_codex_state_sync_keeps_missing_continuable_rows(linux_tmp_path: Path) -> None:
     project_dir = linux_tmp_path / "project"
     project_dir.mkdir()
     cfg = make_test_config(linux_tmp_path)
@@ -4641,9 +4663,9 @@ def test_codex_state_sync_archives_stale_continuable_rows(linux_tmp_path: Path) 
     transcripts.index_project(project)
 
     visible = chats.list_chats(project["id"])
-    assert [chat["id"] for chat in visible] == ["thr_active"]
+    assert {chat["id"] for chat in visible} == {"thr_active", "thr_stale"}
     stale = db.fetchone("SELECT archived_at FROM chats WHERE id = ?", ("thr_stale",))
-    assert stale is not None and stale["archived_at"] is not None
+    assert stale is not None and stale["archived_at"] is None
     db.close()
 
 

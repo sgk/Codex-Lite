@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 from .codex_state import CodexStateService, CodexThreadMetadata
 from .config import Config
+from .provider_context import visible_user_request
 from .services import ChatService, ProjectService
 
 
@@ -98,9 +99,12 @@ class TranscriptImportService:
         if not sessions:
             project_key = _path_key(project_path)
             sessions = [session for path, path_sessions in all_sessions.items() if _path_key(path) == project_key for session in path_sessions]
-        active_session_ids = {session.id for session in sessions if session.can_continue and not session.hidden}
+        # Absence from a filtered/temporarily incomplete snapshot is not an
+        # archive instruction. Only explicit metadata may hide existing rows.
+        confirmed_hidden_ids = {session.id for session in sessions
+                                if session.hidden or (session.archived_state_known and session.archived)}
         for session in sessions:
-            if session.hidden or not session.can_continue:
+            if session.hidden or session.archived or not session.can_continue:
                 continue
             self.chats.upsert_chat_index(
                 project["id"],
@@ -116,8 +120,7 @@ class TranscriptImportService:
                 session.continue_disabled_reason,
             )
             indexed += 1
-        if sessions and self.codex_state is not None and self.codex_state.diagnostics().get("ok"):
-            self.chats.archive_stale_imported_chats(project["id"], active_session_ids)
+        self.chats.archive_confirmed_imported_chats(project["id"], confirmed_hidden_ids)
         return indexed
 
     def _candidates_from_paths(self, paths: list[str]) -> list[dict]:
@@ -156,9 +159,16 @@ class TranscriptImportService:
             return list(sessions_by_id.values())
         if self.codex_state is not None:
             codex_sessions: dict[str, TranscriptSession] = {}
+            # Alternate provider threads are implementation details of a
+            # known Lite chat. Identify them by ownership, never prompt text.
+            internal_ids = {row["thread_id"] for row in self.chats.db.fetchall("""
+                SELECT t.thread_id FROM chat_provider_threads t JOIN chats c ON c.id=t.chat_id
+                WHERE t.provider='openai' AND t.thread_id<>c.id
+                  AND t.thread_id<>COALESCE(c.codex_session_id, '')""")}
             for thread in self.codex_state.list_threads():
                 session = self._session_from_codex_thread(thread, None)
                 if session is not None:
+                    session.hidden = session.hidden or session.id in internal_ids
                     codex_sessions[session.id] = session
             return list(codex_sessions.values())
 
@@ -514,7 +524,7 @@ def _transcript_message(chat_id: str, item: dict[str, Any], index: int | str, pe
     if item_type == "event_msg" and isinstance(payload, dict) and payload.get("type") == "user_message":
         content = payload.get("message")
         if isinstance(content, str) and content.strip():
-            clean_content, attachments = _extract_user_message_attachments(content)
+            clean_content, attachments = _extract_user_message_attachments(visible_user_request(content))
             return {
                 "id": str(payload.get("client_id") or f"{chat_id}-user-{index}"),
                 "chatId": chat_id,

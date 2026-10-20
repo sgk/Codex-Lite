@@ -349,7 +349,7 @@ class AppServerThreadService:
             pass
         return self.chats.upsert_provider_thread(project_id, chat_id, provider, thread_id, history_initialized=False)
 
-    async def context_for_provider(self, project_id: str, chat_id: str, provider: str, exclude_content: str | None = None) -> str:
+    async def context_for_provider(self, project_id: str, chat_id: str, provider: str, exclude_content: str | None = None, exclude_message_id: str | None = None) -> str:
         target_thread = self.chats.get_provider_thread(project_id, chat_id, provider)
         if target_thread is None:
             # A provider used for the first time needs the existing visible
@@ -370,6 +370,8 @@ class AppServerThreadService:
         excluded = _message_content_key(exclude_content or "")
         entries: list[str] = []
         for message in messages:
+            if exclude_message_id is not None and message.get("id") == exclude_message_id:
+                continue
             role = str(message.get("role") or "").lower()
             if role not in {"user", "assistant"}:
                 continue
@@ -665,7 +667,10 @@ class AppServerRunService:
         # actually sent, regardless of whether the user changed the dropdown
         # immediately beforehand.
         self.chats.record_model_reasoning_choice(run_settings.model, run_settings.reasoning_effort)
-        prior_context = await self.threads.context_for_provider(project_id, chat_id, provider, exclude_content=content)
+        prior_context = await self.threads.context_for_provider(
+            project_id, chat_id, provider, exclude_content=content,
+            exclude_message_id=accepted_message.get("id") if accepted_message else None,
+        )
         provider_rows_before = self.chats.list_provider_threads(project_id, chat_id)
         last_provider = _latest_provider(provider_rows_before)
         if accepted_run_id is None:
