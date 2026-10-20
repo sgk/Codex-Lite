@@ -196,6 +196,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $BuildDirectory "CodexLite.dll") -Pa
 }
 
 $desktopDirectory = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath("Desktop"))
+# The independent helper must not retain the directory it is about to rename,
+# even if its launcher inherited that native Windows working directory.
+Write-Host "deployment helper native working directory: $([Environment]::CurrentDirectory)"
+[Environment]::CurrentDirectory = $desktopDirectory
+Set-Location -LiteralPath $desktopDirectory
 $deploymentParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $DeploymentDirectory))
 if (-not [string]::Equals($deploymentParent, $desktopDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to deploy outside the Windows desktop: $DeploymentDirectory"
