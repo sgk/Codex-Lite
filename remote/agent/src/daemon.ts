@@ -6,8 +6,6 @@ interface EndpointFile { host: string; port: number; pid: number }
 export interface SseEvent { sequence: number; event: string; data: unknown; observedAt?: string }
 
 export class LocalDaemon {
-  private baseUrl = "";
-
   constructor(private readonly config: AgentConfig) {}
 
   async connect(): Promise<void> {
@@ -15,7 +13,6 @@ export class LocalDaemon {
     while (Date.now() < deadline) {
       const endpoint = await this.readHealthyEndpoint();
       if (endpoint) {
-        this.baseUrl = endpoint;
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -92,7 +89,7 @@ export class LocalDaemon {
   }
 
   async *events(runId: string, afterSequence?: number): AsyncGenerator<SseEvent> {
-    const response = await fetch(`${this.baseUrl}${runEventsPath(runId, afterSequence)}`);
+    const response = await this.request(runEventsPath(runId, afterSequence));
     if (!response.ok || !response.body) throw new Error(`イベント接続に失敗しました（HTTP ${response.status}）。`);
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = "";
@@ -113,9 +110,7 @@ export class LocalDaemon {
 
   private async readHealthyEndpoint(): Promise<string | undefined> {
     try {
-      const endpoint = JSON.parse(await readFile(this.config.endpointFile, "utf8")) as EndpointFile;
-      if (endpoint.host !== "127.0.0.1" || !Number.isInteger(endpoint.port)) return undefined;
-      const baseUrl = `http://127.0.0.1:${endpoint.port}`;
+      const baseUrl = await this.readEndpoint();
       const response = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1000) });
       return response.ok ? baseUrl : undefined;
     } catch {
@@ -123,8 +118,35 @@ export class LocalDaemon {
     }
   }
 
+  private async readEndpoint(): Promise<string> {
+    let endpoint: EndpointFile;
+    try {
+      endpoint = JSON.parse(await readFile(this.config.endpointFile, "utf8")) as EndpointFile;
+    } catch {
+      throw new Error("daemon接続先ファイルを読み取れません。");
+    }
+    if (!endpoint || endpoint.host !== "127.0.0.1" || !Number.isInteger(endpoint.port)
+        || endpoint.port < 1 || endpoint.port > 65535) {
+      throw new Error("daemon接続先ファイルのhostまたはportが不正です。");
+    }
+    return `http://127.0.0.1:${endpoint.port}`;
+  }
+
+  private async request(path: string, init?: RequestInit): Promise<Response> {
+    // The endpoint file is authoritative for every request, including SSE.
+    // Never replay a failed POST/PATCH: it may already have been accepted.
+    const baseUrl = await this.readEndpoint();
+    try {
+      return await fetch(`${baseUrl}${path}`, init);
+    } catch (error) {
+      const cause = error instanceof Error ? error.cause as { code?: unknown } | undefined : undefined;
+      const code = typeof cause?.code === "string" && /^[A-Z0-9_]+$/.test(cause.code) ? cause.code : "FETCH_FAILED";
+      throw new Error(`daemon接続失敗 (${baseUrl}, ${code})`, { cause: error });
+    }
+  }
+
   private async json<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, init);
+    const response = await this.request(path, init);
     const text = await response.text();
     if (!response.ok) throw new Error(`daemon HTTP ${response.status}: ${text.slice(0, 1000)}`);
     return JSON.parse(text) as T;

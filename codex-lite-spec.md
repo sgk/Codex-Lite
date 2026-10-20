@@ -201,7 +201,7 @@ Run完了後の保存済み結論取得は、ストリームで受信済みの�
 
 ### 5.4 HTTP API
 
-APIはWindowsクライアントおよび同一PC上のRemote Agent用のローカルAPIであり、外部公開しない。daemonは起動中のhost、port、PIDをWSL側の `~/.local/share/codex-lite/daemon-endpoint.json` に所有者だけが読める権限で記録し、正常終了時に自分のPIDと一致する場合だけ削除する。Remote Agentはこのファイルを使って既存daemonを発見し、見つからない場合だけ同梱起動スクリプトから遅延起動する。
+APIはWindowsクライアントおよび同一PC上のRemote Agent用のローカルAPIであり、外部公開しない。daemonは起動中のhost、port、PIDをWSL側の `~/.local/share/codex-lite/daemon-endpoint.json` に所有者だけが読める権限で記録し、正常終了時に自分のPIDと一致する場合だけ削除する。Remote Agentはこのファイルを使って既存daemonを発見し、見つからない場合だけ同梱起動スクリプトから遅延起動する。Agentは通常API・SSEともリクエスト開始ごとにこの正規ファイルを読み、デーモン再起動前の接続先を保持しない。ファイル欠落・不正時は旧接続先を使わず、その処理を失敗させる。失敗した更新要求の自動再送は行わない。接続失敗にはローカル接続先と通信エラーコードを残す。
 
 | 分類 | 主なAPI |
 |---|---|
