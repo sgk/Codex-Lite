@@ -27,6 +27,8 @@ class AppServerClient:
     REQUEST_TIMEOUT_SECONDS = 20
     STDIO_LIMIT_BYTES = 64 * 1024 * 1024
     IDLE_SHUTDOWN_SECONDS = 15 * 60
+    IDLE_RECHECK_SECONDS = 30
+    THREAD_RELEASE_TIMEOUT_SECONDS = 2
 
     def __init__(self, config: Config, codex_runner: CodexRunner, model_provider: str | None = None) -> None:
         self.config = config
@@ -46,6 +48,9 @@ class AppServerClient:
         self._stderr_task: asyncio.Task | None = None
         self._active_run_count = 0
         self._idle_shutdown_task: asyncio.Task | None = None
+        self._requests_in_flight = 0
+        self.lifecycle_error: str | None = None
+        self._unsubscribed_threads: set[str] = set()
 
     @property
     def is_running(self) -> bool:
@@ -56,26 +61,40 @@ class AppServerClient:
         return list(self._stderr_tail[-40:])
 
     async def request(self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> dict[str, Any]:
-        self._cancel_idle_shutdown()
-        await self.ensure_started()
+        self._requests_in_flight += 1
         try:
-            return await asyncio.wait_for(self._request_started(method, params), timeout=timeout or self.REQUEST_TIMEOUT_SECONDS)
+            await self.ensure_started()
+            return await asyncio.wait_for(self._request_subscribed(method, params), timeout=timeout or self.REQUEST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
             raise AppError("app_server_timeout", f"Codex app-server request timed out: {method}", 504) from exc
         finally:
+            self._requests_in_flight -= 1
             self._schedule_idle_shutdown()
 
     async def request_if_running(self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> dict[str, Any]:
         """Send a diagnostic request without starting or replacing app-server."""
-        self._cancel_idle_shutdown()
         if not self.is_running:
             raise AppError("app_server_not_running", "Codex app-server is not running.", 503)
+        self._requests_in_flight += 1
         try:
             return await asyncio.wait_for(self._request_started(method, params), timeout=timeout or self.REQUEST_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as exc:
             raise AppError("app_server_timeout", f"Codex app-server request timed out: {method}", 504) from exc
         finally:
+            self._requests_in_flight -= 1
             self._schedule_idle_shutdown()
+
+    async def _request_subscribed(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        thread_id = (params or {}).get("threadId")
+        if method == "turn/start" and thread_id in self._unsubscribed_threads:
+            # An unloaded thread and an unsubscribed-but-still-loaded thread
+            # are different. Rejoin explicitly before expecting notifications.
+            await self._request_started("thread/resume", {"threadId": thread_id, "excludeTurns": True})
+            self._unsubscribed_threads.discard(thread_id)
+        response = await self._request_started(method, params)
+        if method == "thread/resume":
+            self._unsubscribed_threads.discard(thread_id)
+        return response
 
     async def _request_started(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         assert self._process is not None
@@ -85,15 +104,19 @@ class AppServerClient:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[request_id] = future
-        await self._write({"id": request_id, "method": method, "params": params or {}})
-        return await future
+        try:
+            await self._write({"id": request_id, "method": method, "params": params or {}})
+            return await future
+        finally:
+            self._pending.pop(request_id, None)
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        self._cancel_idle_shutdown()
-        await self.ensure_started()
+        self._requests_in_flight += 1
         try:
+            await self.ensure_started()
             await self._write({"method": method, "params": params or {}})
         finally:
+            self._requests_in_flight -= 1
             self._schedule_idle_shutdown()
 
     async def respond_server_request(self, request_id: int | str, result: dict[str, Any]) -> None:
@@ -127,8 +150,64 @@ class AppServerClient:
 
     def unsubscribe_queue(self, queue: asyncio.Queue[AppServerNotification]) -> None:
         self._subscribers.pop(queue, None)
+        while not queue.empty():
+            queue.get_nowait()
+
+    async def release_thread_if_unused(self, thread_id: str) -> bool:
+        """Caller serializes this with turn start. Unsubscribe is not a kill."""
+        if not self.is_running or any(route and route[0] == thread_id for route in self._subscribers.values()):
+            return False
+        try:
+            async with asyncio.timeout(self.THREAD_RELEASE_TIMEOUT_SECONDS):
+                if not await self._thread_is_idle(thread_id):
+                    return False
+                # Once sent, an RPC can take effect even if its reply times
+                # out. The next turn must rejoin in either outcome.
+                self._unsubscribed_threads.add(thread_id)
+                response = await self.request_if_running("thread/unsubscribe", {"threadId": thread_id})
+                if response.get("status") not in {"unsubscribed", "notSubscribed", "notLoaded"}:
+                    raise RuntimeError(f"Unexpected thread/unsubscribe status: {response.get('status')}")
+            self.lifecycle_error = None
+            return True
+        except Exception as exc:
+            self.lifecycle_error = f"thread release: {type(exc).__name__}: {exc}"
+            return False
+
+    async def _thread_is_idle(self, thread_id: str) -> bool:
+        response = await self.request_if_running("thread/read", {"threadId": thread_id, "includeTurns": False})
+        status = response.get("thread", {}).get("status", {})
+        if status.get("type") == "notLoaded":
+            return True
+        if status.get("type") != "idle":
+            return False
+        terminals = await self.request_if_running("thread/backgroundTerminals/list", {"threadId": thread_id, "limit": 1})
+        if not isinstance(terminals.get("data"), list):
+            raise RuntimeError("thread/backgroundTerminals/list did not return data")
+        return not terminals["data"] and not terminals.get("nextCursor")
+
+    async def _can_close_idle(self) -> bool:
+        if self._active_run_count or self._requests_in_flight or self._pending:
+            return False
+        cursor = None
+        while True:
+            response = await self.request_if_running("thread/loaded/list", {"limit": 100, "cursor": cursor})
+            threads = response.get("data")
+            if not isinstance(threads, list) or not all(isinstance(item, str) for item in threads):
+                raise RuntimeError("thread/loaded/list did not return thread IDs")
+            for thread_id in threads:
+                if not await self._thread_is_idle(thread_id):
+                    return False
+            next_cursor = response.get("nextCursor")
+            if not next_cursor:
+                break
+            if next_cursor == cursor:
+                raise RuntimeError("thread/loaded/list repeated its cursor")
+            cursor = next_cursor
+        return not self._active_run_count and not self._requests_in_flight and not self._pending
 
     async def _dispatch_notification(self, notification: AppServerNotification) -> None:
+        if notification.method == "thread/closed":
+            self._unsubscribed_threads.discard(notification.params.get("threadId"))
         for queue, route in list(self._subscribers.items()):
             if route is None or notification.method == "app_server/exited" or _notification_matches_route(notification, route):
                 await queue.put(notification)
@@ -179,7 +258,6 @@ class AppServerClient:
 
     async def prepare(self) -> None:
         """Start and initialize app-server, then retain the normal idle lifecycle."""
-        self._cancel_idle_shutdown()
         try:
             await self.ensure_started()
         finally:
@@ -224,6 +302,7 @@ class AppServerClient:
         process = self._process
         self._process = None
         self._active_model_provider = None
+        self._unsubscribed_threads.clear()
         for future in self._pending.values():
             if not future.done():
                 future.cancel()
@@ -263,10 +342,21 @@ class AppServerClient:
     async def _close_after_idle(self) -> None:
         try:
             await asyncio.sleep(self.IDLE_SHUTDOWN_SECONDS)
-            if self._active_run_count == 0:
-                await self.close()
+            while self.is_running and self._active_run_count == 0:
+                try:
+                    if await self._can_close_idle():
+                        await self.close()
+                        return
+                    self.lifecycle_error = None
+                except Exception as exc:
+                    # Unknown state must protect live work, never guess idle.
+                    self.lifecycle_error = f"idle shutdown: {exc}"
+                await asyncio.sleep(self.IDLE_RECHECK_SECONDS)
         except asyncio.CancelledError:
             return
+        finally:
+            if self._idle_shutdown_task is asyncio.current_task():
+                self._idle_shutdown_task = None
 
     async def _write(self, payload: dict[str, Any]) -> None:
         process = self._process
@@ -382,6 +472,12 @@ class AppServerClient:
             "sshAgentSocketExists": bool(sock and Path(sock).exists()),
             "provider": self.provider or self._active_model_provider or self._desired_model_provider,
             "activeRunCount": self._active_run_count,
+            "pendingRequestCount": len(self._pending),
+            "subscriptionCount": len(self._subscribers),
+            "notificationQueueDepth": sum(queue.qsize() for queue in self._subscribers),
+            "unsubscribedThreadCount": len(self._unsubscribed_threads),
+            "idleShutdownScheduled": self._idle_shutdown_task is not None,
+            "lifecycleError": self.lifecycle_error,
         }
 
 

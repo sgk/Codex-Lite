@@ -256,7 +256,7 @@ async def test_app_server_prepare_initializes_and_restores_idle_lifecycle(linux_
 
     await client.prepare()
 
-    assert calls == ["cancel-idle", "started", "schedule-idle"]
+    assert calls == ["started", "schedule-idle"]
 
 
 @pytest.mark.asyncio
@@ -528,6 +528,9 @@ async def test_app_server_client_closes_after_idle_run_window(linux_tmp_path: Pa
 
     monkeypatch.setattr(type(client), "is_running", property(lambda self: True))
     monkeypatch.setattr(client, "close", fake_close)
+    async def can_close() -> bool:
+        return True
+    monkeypatch.setattr(client, "_can_close_idle", can_close)
     client.IDLE_SHUTDOWN_SECONDS = 0.01
 
     await client.release_run()
@@ -3136,6 +3139,47 @@ async def test_app_server_exit_finishes_stream_with_error(linux_tmp_path: Path) 
 
     assert any('"code": "app_server_closed"' in event for event in events)
     assert runs.get_run(result["runId"])["status"] == "failed"
+    db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "interrupted", "failed", "exited"])
+async def test_run_terminal_paths_release_thread_and_queue(linux_tmp_path: Path, terminal: str) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+
+    class ReleasingServer(TurnStartAppServer):
+        def __init__(self):
+            super().__init__()
+            self.released = []
+            self.release_done = asyncio.Event()
+
+        async def release_thread_if_unused(self, thread_id):
+            assert not self.subscribers
+            self.released.append(thread_id)
+
+        async def release_run(self):
+            self.release_done.set()
+
+    server = ReleasingServer()
+    threads = AppServerThreadService(projects, chats, messages, TranscriptImportService(cfg, projects, chats), server, make_runtime_settings())
+    runs = AppServerRunService(projects, threads, messages, server, 1, make_runtime_settings())
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "test", "thread_1", utc_now(), utc_now())["id"]
+    result = await runs.start_message_run(project_id, chat_id, "test")
+    event = AppServerNotification("app_server/exited", {}) if terminal == "exited" else AppServerNotification(
+        "turn/completed", {"threadId": "thread_1", "turn": {"id": "turn_1", "status": terminal}})
+    await server.subscribers[-1].put(event)
+    await asyncio.wait_for(server.release_done.wait(), 2)
+    assert server.released == ["thread_1"]
+    assert runs.runs[result["runId"]].notification_queue is None
+    assert runs.runs[result["runId"]].lease_released
     db.close()
 
 

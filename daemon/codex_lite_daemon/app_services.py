@@ -688,6 +688,7 @@ class AppServerRunService:
             self._finish_run_row(run_id, "failed", str(exc), "app_server_start_failed")
             raise
         notification_queue: asyncio.Queue[AppServerNotification] | None = None
+        thread_id: str | None = None
         try:
             async with self._provider_turn_start_locks.setdefault(provider, asyncio.Lock()):
                 provider_thread = await self.threads.ensure_provider_thread(project_id, chat_id, project["path"], run_settings)
@@ -724,14 +725,22 @@ class AppServerRunService:
         except (Exception, asyncio.CancelledError) as exc:
             if notification_queue is not None:
                 app_server.unsubscribe_queue(notification_queue)
-            await _release_run_lease(app_server)
+            try:
+                if thread_id:
+                    await self._release_unused_thread(app_server, provider, thread_id)
+            finally:
+                await _release_run_lease(app_server)
             self._finish_run_row(run_id, "failed", str(exc))
             raise
         turn_id = _turn_id_from_response(response)
         if not turn_id or notification_queue is None:
             if notification_queue is not None:
                 app_server.unsubscribe_queue(notification_queue)
-            await _release_run_lease(app_server)
+            try:
+                if thread_id:
+                    await self._release_unused_thread(app_server, provider, thread_id)
+            finally:
+                await _release_run_lease(app_server)
             self._finish_run_row(run_id, "failed", "turn/start did not return a turn id.")
             raise AppError("app_server_error", "turn/start did not return a turn id.", 502)
         app_server.bind_queue(notification_queue, thread_id, turn_id)
@@ -1224,7 +1233,7 @@ class AppServerRunService:
                 raise AppError("run_not_found", "Run was not found.", 404)
             terminal_seen = False
             sequence = after_sequence or 0
-            for item in self.events.replay_history(run_id, after_sequence=after_sequence):
+            for item in self.events.iter_replay_history(run_id, after_sequence=after_sequence):
                 sequence = max(sequence, int(item["sequence"]))
                 terminal_seen = terminal_seen or item["event"] in {"done", "error"}
                 yield f"id: {item['sequence']}\nevent: {item['event']}\ndata: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
@@ -1676,6 +1685,7 @@ class AppServerRunService:
             if run.status != "running":
                 run.pending_approvals.clear()
             app_server.unsubscribe_queue(notification_queue)
+            run.notification_queue = None
             await self._release_run_lease(run)
 
     async def _release_run_lease(self, run: AppServerActiveRun) -> None:
@@ -1683,7 +1693,16 @@ class AppServerRunService:
             return
         run.lease_released = True
         app_server = _app_server_for_provider(self.app_server, run.provider)
-        await _release_run_lease(app_server)
+        try:
+            await self._release_unused_thread(app_server, run.provider, run.thread_id)
+        finally:
+            await _release_run_lease(app_server)
+
+    async def _release_unused_thread(self, app_server: Any, provider: str, thread_id: str) -> None:
+        release_thread = getattr(app_server, "release_thread_if_unused", None)
+        if callable(release_thread):
+            async with self._provider_turn_start_locks.setdefault(provider, asyncio.Lock()):
+                await release_thread(thread_id)
 
 
 def _is_reasoning_delta_notification(notification: AppServerNotification) -> bool:

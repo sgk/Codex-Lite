@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,11 +27,19 @@ class ActiveRun:
 class EventHub:
     MAX_PERSISTED_EVENTS_PER_RUN = 2000
     PERSIST_BATCH_SECONDS = 0.25
+    MAX_MEMORY_BYTES = 16 * 1024 * 1024
+    MAX_MEMORY_RUNS = 32
+    MAX_SEQUENCE_CACHE = 128
+    MAX_PENDING_BYTES = 4 * 1024 * 1024
+    REPLAY_PAGE_SIZE = 128
 
     def __init__(self, db: Database | None = None) -> None:
         self._subscribers: dict[str, list[asyncio.Queue[dict]]] = {}
-        self._history: dict[str, list[dict]] = {}
-        self._sequences: dict[str, int] = {}
+        self._history: OrderedDict[str, list[dict]] = OrderedDict()
+        self._history_sizes: dict[str, list[int]] = {}
+        self._memory_bytes = 0
+        self._pending_bytes = 0
+        self._sequences: OrderedDict[str, int] = OrderedDict()
         self._db = db
         self._pending_persistence: list[tuple[str, int, str, str, str]] = []
         self._flush_task: asyncio.Task | None = None
@@ -45,20 +54,40 @@ class EventHub:
         async with self._lock:
             sequence = self.current_sequence(run_id) + 1
             self._sequences[run_id] = sequence
+            self._sequences.move_to_end(run_id)
+            while self._db is not None and len(self._sequences) > self.MAX_SEQUENCE_CACHE:
+                self._sequences.popitem(last=False)
             data = dict(data) | {"runId": run_id, "eventSequence": sequence, "occurredAt": utc_now()}
             payload = {"event": event, "data": data, "sequence": sequence}
             history = self._history.setdefault(run_id, [])
+            self._history.move_to_end(run_id)
+            serialized = self._persistable_data(data)
+            size = len(serialized.encode("utf-8"))
+            sizes = self._history_sizes.setdefault(run_id, [])
             history.append(payload)
-            if len(history) > self.MAX_PERSISTED_EVENTS_PER_RUN:
-                del history[:-self.MAX_PERSISTED_EVENTS_PER_RUN]
+            sizes.append(size)
+            self._memory_bytes += size
+            while len(history) > self.MAX_PERSISTED_EVENTS_PER_RUN:
+                history.pop(0)
+                self._memory_bytes -= sizes.pop(0)
+            while self._memory_bytes > self.MAX_MEMORY_BYTES or len(self._history) > self.MAX_MEMORY_RUNS:
+                oldest, _ = self._history.popitem(last=False)
+                self._memory_bytes -= sum(self._history_sizes.pop(oldest))
+                if self._db is None:
+                    self._sequences.pop(oldest, None)
             subscribers = list(self._subscribers.get(run_id, []))
             if self._db is not None:
-                self._pending_persistence.append((run_id, sequence, event, self._persistable_data(data), data["occurredAt"]))
+                self._pending_persistence.append((run_id, sequence, event, serialized, data["occurredAt"]))
+                self._pending_bytes += size
                 if self._flush_task is None or self._flush_task.done():
                     self._flush_task = asyncio.create_task(self._flush_after_delay())
         for queue in subscribers:
-            await queue.put(payload)
-        if event in {"done", "error"}:
+            if self._db is not None:
+                if queue.empty():
+                    queue.put_nowait({})  # Coalesced wakeup; replay owns the data.
+            else:
+                await queue.put(payload)
+        if event in {"done", "error"} or self._pending_bytes >= self.MAX_PENDING_BYTES:
             await self.flush()
         if event in {"status", "done", "error"} and self._lifecycle_listener is not None:
             self._lifecycle_listener(run_id)
@@ -71,29 +100,41 @@ class EventHub:
             return 0
         row = self._db.fetchone("SELECT MAX(sequence) AS sequence FROM run_events WHERE run_id = ?", (run_id,))
         sequence = int(row["sequence"] or 0) if row else 0
+        sequence = max(sequence, max((item[1] for item in self._pending_persistence if item[0] == run_id), default=0))
         self._sequences[run_id] = sequence
+        while len(self._sequences) > self.MAX_SEQUENCE_CACHE:
+            self._sequences.popitem(last=False)
         return sequence
 
     async def subscribe(self, run_id: str, after_sequence: int | None = None) -> AsyncIterator[dict]:
-        queue: asyncio.Queue[dict] = asyncio.Queue()
+        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1 if self._db is not None else 0)
         async with self._lock:
-            history = self.replay_history(run_id, after_sequence)
             self._subscribers.setdefault(run_id, []).append(queue)
         try:
-            for item in history:
-                yield item
-                if item["event"] in {"done", "error"}:
-                    return
+            cursor = after_sequence
             while True:
-                item = await queue.get()
-                yield item
-                if item["event"] in {"done", "error"}:
-                    break
+                for item in self.iter_replay_history(run_id, cursor):
+                    cursor = int(item["sequence"])
+                    yield item
+                    if item["event"] in {"done", "error"}:
+                        return
+                if self._db is not None:
+                    await queue.get()
+                else:
+                    item = await queue.get()
+                    if int(item["sequence"]) <= (cursor or 0):
+                        continue
+                    cursor = int(item["sequence"])
+                    yield item
+                    if item["event"] in {"done", "error"}:
+                        return
         finally:
             async with self._lock:
                 subscribers = self._subscribers.get(run_id, [])
                 if queue in subscribers:
                     subscribers.remove(queue)
+                if not subscribers:
+                    self._subscribers.pop(run_id, None)
 
     async def _flush_after_delay(self) -> None:
         await asyncio.sleep(self.PERSIST_BATCH_SECONDS)
@@ -109,6 +150,7 @@ class EventHub:
         async with self._lock:
             pending = self._pending_persistence
             self._pending_persistence = []
+            self._pending_bytes = 0
         if not pending:
             return
         try:
@@ -143,42 +185,55 @@ class EventHub:
             "pendingCount": len(self._pending_persistence),
             "lastError": self._last_persistence_error,
             "maxMemoryEventsPerRun": self.MAX_PERSISTED_EVENTS_PER_RUN,
+            "cachedRuns": len(self._history),
+            "cachedBytes": self._memory_bytes,
+            "pendingBytes": self._pending_bytes,
+            "sequenceCacheSize": len(self._sequences),
+            "subscriberCount": sum(map(len, self._subscribers.values())),
         }
 
-    def _persisted_history(self, run_id: str, after_sequence: int | None) -> list[dict]:
-        if self._db is None:
-            return []
-        rows = self._db.fetchall(
-            "SELECT sequence, event, data_json, created_at FROM run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence",
-            (run_id, after_sequence if after_sequence is not None else -1),
-        )
-        result: list[dict] = []
-        for row in rows:
-            try:
-                data = json.loads(str(row["data_json"]))
-            except json.JSONDecodeError:
-                data = {"message": "保存されたイベントを読み取れませんでした。"}
-            data.setdefault("occurredAt", row["created_at"])
-            data.setdefault("eventSequence", int(row["sequence"]))
-            data.setdefault("runId", run_id)
-            result.append({"event": row["event"], "data": data, "sequence": int(row["sequence"])})
-        return result
-
-    def replay_history(self, run_id: str, after_sequence: int | None = None) -> list[dict]:
-        persisted = self._persisted_history(run_id, after_sequence)
+    def iter_replay_history(self, run_id: str, after_sequence: int | None = None) -> Iterator[dict]:
+        # Snapshot the unflushed boundary before yielding. A slow SSE client
+        # must not retain the entire persisted run or queue every live delta.
+        upper = self.current_sequence(run_id)
         memory = [
             item
             for item in self._history.get(run_id, [])
             if after_sequence is None or int(item.get("sequence") or 0) > after_sequence
         ]
-        history_by_sequence = {int(item["sequence"]): item for item in persisted}
+        history_by_sequence = {}
         # A burst can exceed the memory window before the next DB batch. Those
         # accepted events still belong to the replay/live boundary.
         for pending_run, sequence, event, data_json, _ in self._pending_persistence:
             if pending_run == run_id and (after_sequence is None or sequence > after_sequence):
                 history_by_sequence[sequence] = {"sequence": sequence, "event": event, "data": json.loads(data_json)}
         history_by_sequence.update({int(item["sequence"]): item for item in memory})
-        return [history_by_sequence[key] for key in sorted(history_by_sequence)]
+        cursor = after_sequence if after_sequence is not None else -1
+        if self._db is not None:
+            while cursor < upper:
+                rows = self._db.fetchall(
+                    "SELECT sequence, event, data_json, created_at FROM run_events WHERE run_id=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?",
+                    (run_id, cursor, upper, self.REPLAY_PAGE_SIZE),
+                )
+                if not rows:
+                    break
+                for row in rows:
+                    sequence = int(row["sequence"])
+                    for key in sorted(k for k in history_by_sequence if cursor < k < sequence):
+                        yield history_by_sequence.pop(key)
+                    data = json.loads(row["data_json"])
+                    data.setdefault("occurredAt", row["created_at"])
+                    data.setdefault("eventSequence", sequence)
+                    data.setdefault("runId", run_id)
+                    history_by_sequence.pop(sequence, None)
+                    cursor = sequence
+                    yield {"event": row["event"], "data": data, "sequence": sequence}
+        for key in sorted(history_by_sequence):
+            if cursor < key <= upper:
+                yield history_by_sequence[key]
+
+    def replay_history(self, run_id: str, after_sequence: int | None = None) -> list[dict]:
+        return list(self.iter_replay_history(run_id, after_sequence))
 
     def _persistable_data(self, data: dict) -> str:
         return json.dumps(data, ensure_ascii=False)
