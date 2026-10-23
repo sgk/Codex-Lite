@@ -140,6 +140,8 @@ Windowsアプリは `wsl.exe -d <ディストリビューション> -- bash -c .
 
 WindowsのRemote同期対応ビルドと配布ZIPには、Firebase SDKを含むRemote Agentを単一のNode用JavaScriptへバンドルし、Firebase公開設定およびAgent既定値とともに `remote-agent/` へ同梱する。OAuthクライアントIDとクライアントシークレットはリポジトリ直下のGit管理外 `.env` だけで管理し、ビルド時に一時設定へ変換してパッケージへ同梱する。`.env` 自体は同梱しない。`GOOGLE_OAUTH_CLIENT_SECRET` が無い場合、Remote AgentとOAuth設定を同梱せず、WindowsアプリのRemote同期UIおよび自動接続を無効にしたビルドを生成する。Windowsアプリは `AppContext.BaseDirectory/remote-agent/index.js` だけをWSLのNode.jsで起動し、開発リポジトリ、ソース版 `remote/`、`node_modules`を探索しない。Firebase同期先は同梱 `firebase-config.json` の `projectId`、`apiKey`、`appId`で決定する。OAuthクライアント設定はGoogleログインにだけ使い、同期先の決定には使わない。
 
+Remote同期対応の配布物にはOAuth設定 `remote-oauth.json` が含まれるため、そのZIPをGitHub Releaseへ公開した場合もダウンロード者はクライアントシークレットを取得できる。デスクトップ用OAuthクライアントの設定として扱い、ユーザー個別のRefresh Tokenやサーバー用秘密鍵と混同しない。紛失時は同じOAuthクライアントへ新しいシークレットを発行し、Git管理外 `.env` を更新して再ビルド・再配置・再配布する。旧シークレットの無効化は旧設定のアプリの認証・トークン更新に影響するが、Firestoreの保存データを削除するものではない。詳細と移行手順は `remote/README.md` の「OAuthクライアントシークレットの配布と復旧」を参照する。
+
 Remote Agentの端末IDはビルドへ固定せず、各PCの初回起動時にランダムIDとPC表示名をWSL ext4側 `~/.local/share/codex-lite/remote-device.json` へ所有者限定で保存する。以後はこのファイルだけを正本とし、ホスト名や同梱設定へフォールバックしない。ファイルが存在するのに不正な場合は新しいIDで置き換えず、同期を停止してエラーを表示する。
 
 初回起動時間と Python バージョン差の影響を抑えるため、デーモンのHTTP層は Starlette と標準 uvicorn を使い、FastAPI/Pydantic や `uvicorn[standard]` のようなネイティブ拡張を含みやすい依存には頼らない。配布ZIPには仮想環境そのものを同梱しない。仮想環境は起動先WSLのPythonで作成し、Python 3.11以上の複数バージョンに対応する。

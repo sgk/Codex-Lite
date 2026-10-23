@@ -68,6 +68,25 @@ GOOGLE_OAUTH_CLIENT_SECRET="YOUR_DESKTOP_CLIENT_SECRET"
 
 一度認証を完了すると、次回以降のWindowsアプリ起動時はWindows Credential Managerの保存済みRefresh TokenでRemote Agentへ自動再接続し、Firestoreのカタログ同期を再開します。Refresh Tokenが無効な場合だけ、設定画面から再認証してください。
 
+### OAuthクライアントシークレットの配布と復旧
+
+クライアントシークレットの用途は、WindowsアプリでのGoogle認証コードの交換とトークン更新です。Remote Agentは取得したGoogleアクセストークンでFirebase Authenticationへログインし、Firestoreを通じてWeb UIと同期します。シークレット自体をWeb UIへ渡したり、Firestoreの同期先を決めたりするためのものではありません。
+
+`.env` はGit管理外ですが、Remote同期対応のビルドには、その値を含む `remote-oauth.json` が同梱されます。その配布ZIPをGitHub Releaseへ公開すると、ダウンロードした人は設定値を取得できます。「Gitに含まれない」ことは「配布物にも含まれない」ことを意味しません。
+
+必ず「デスクトップアプリ」用のOAuthクライアントを使います。Googleもインストール型アプリはクライアントシークレットを秘密に保てないことを前提にしています。この設定は、ユーザー個別のRefresh Tokenやサーバー用秘密鍵とは区別します。それらを配布物へ同梱してはいけません。すべてのアプリ・認証方式でシークレットの同梱が必要という意味でもありません。
+
+紛失時は、対象OAuthクライアントを管理するGCP権限があれば、同じクライアントIDに新しいシークレットを発行して復旧できます。OAuthクライアントそのものを削除・再作成する操作とは区別してください。
+
+1. Google Cloud Consoleの「Google Auth Platform → クライアント」で、対象のデスクトップ用OAuthクライアントに新しいシークレットを追加します。値は安全に保存し、会話やログへ貼り付けません。
+2. Git管理外 `.env` の `GOOGLE_OAUTH_CLIENT_SECRET` を更新します。同じOAuthクライアントならクライアントIDは維持します。
+3. 新しい設定でWindowsクライアントを再ビルド・配置し、配布している場合は配布物も更新します。GCP側で再発行しただけでは、既存のインストール先の設定は更新されません。
+4. 新版でログインとトークン更新・クラウド同期を確認します。旧シークレットが有効な通常の移行では、旧版から新版へ移行してから旧シークレットを無効化・削除します。無効化後、旧設定のアプリは認証・トークン更新ができなくなります。
+
+シークレットを紛失・更新しても、それ自体でFirestoreの同期データが削除されることはありません。保存済みRefresh Tokenが無効な場合は再認証が必要です。
+
+参考: [Googleのデスクトップアプリ向けOAuth仕様](https://developers.google.com/identity/protocols/oauth2/native-app)、[OAuth設定とシークレットのローテーション](https://support.google.com/googleapi/answer/6158849?hl=en)。
+
 ## Remote Agentの起動
 
 対象PCのWSLでソースから手動起動する場合は、Remote AgentはGoogle認証専用です。アクセストークンを環境変数へ設定して起動します。`start:agent` は配布時と同じAgentバンドルを生成してから起動します。通常はWindowsアプリの「Remote接続」から同梱版を起動してください。
