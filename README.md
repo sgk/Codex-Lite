@@ -82,10 +82,10 @@ make debug-build
 
 ビルド時には `CodexLite.exe`、`CodexLite.dll` に加え、`run-daemon.sh`、`daemon/`、接続先を内蔵しない `remote-agent/` と `cloud-sync.example.json` が出力先へコピーされます。同期機能の提供可否・Firebase接続先・OAuth設定は、実行用フォルダー直下の `cloud-sync.json` で指定します。ファイルがなければ同期は無効、設定画面の同期オン／オフの初期値もオフです。通常の配布物に社内設定を自動同梱せず、具体的な設定を同梱する場合はビルドスクリプトの `-CloudSyncConfigFile` で明示指定します。通常の配置更新ではインストール済み `cloud-sync.json` を保持します。詳細と旧方式からの移行手順は [remote/README.md](remote/README.md) を参照してください。実行中プロセスを止めるのは、準備済みディレクトリを実行用ディレクトリへ切り替える間だけです。配置結果とエラーは `runtime/deploy-debug.log` で確認できます。
 
-配布用ReleaseビルドとZIPは次のターゲットで作成します。既定の出力は `artifacts/CodexLite-v0.4.0-win-x64.zip` です。
+配布用ReleaseビルドとZIPは次のターゲットで作成します。既定の出力は `artifacts/CodexLite-v0.5.0-win-x64.zip` です。
 
 ```bash
-make release-zip VERSION=0.4.0
+make release-zip VERSION=0.5.0
 ```
 
 ## 起動方法

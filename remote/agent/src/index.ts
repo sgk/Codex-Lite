@@ -70,7 +70,7 @@ try {
     displayName: config.displayName,
     remoteEnabled: true,
     status: "online",
-    clientVersion: "0.4.0",
+    clientVersion: "0.5.0",
     heartbeatSeconds: config.heartbeatSeconds,
     lastSeenAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
