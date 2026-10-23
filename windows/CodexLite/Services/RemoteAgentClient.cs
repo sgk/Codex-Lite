@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
 
 namespace CodexLite.Services;
 
@@ -18,13 +19,16 @@ public sealed class RemoteAgentClient
         if (IsRunning) return Task.CompletedTask;
         if (string.IsNullOrWhiteSpace(distroName)) throw new InvalidOperationException("WSLディストリビューションが未確定です。");
         if (string.IsNullOrWhiteSpace(accessToken)) throw new InvalidOperationException("Google認証トークンが空です。");
+        var config = RemoteSyncFeature.RequireConfiguration();
 
         var remoteDirectory = Path.Combine(AppContext.BaseDirectory, "remote-agent");
         var remoteEntryPoint = Path.Combine(remoteDirectory, "index.js");
         if (!File.Exists(remoteEntryPoint)) throw new FileNotFoundException("同梱Remote Agentが見つかりません。", remoteEntryPoint);
+        _process?.Dispose();
+        _process = null;
 
         var remoteWslPath = WindowsPathToWslPath(remoteDirectory, distroName);
-        var command = $"IFS= read -r CODEX_LITE_REMOTE_GOOGLE_ACCESS_TOKEN || exit 1; export CODEX_LITE_REMOTE_GOOGLE_ACCESS_TOKEN; cd {ShellQuote(remoteWslPath)}; exec node index.js";
+        var command = $"IFS= read -r CODEX_LITE_REMOTE_GOOGLE_ACCESS_TOKEN || exit 1; IFS= read -r CODEX_LITE_REMOTE_FIREBASE_CONFIG || exit 1; export CODEX_LITE_REMOTE_GOOGLE_ACCESS_TOKEN CODEX_LITE_REMOTE_FIREBASE_CONFIG; cd {ShellQuote(remoteWslPath)} || exit 1; exec node index.js";
         var startInfo = new ProcessStartInfo
         {
             FileName = "wsl.exe",
@@ -41,43 +45,36 @@ public sealed class RemoteAgentClient
         startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add(command);
 
-        _process = Process.Start(startInfo) ?? throw new InvalidOperationException("Remote Agentを起動できませんでした。");
-        _process.EnableRaisingEvents = true;
-        _process.Exited += (_, _) =>
+        var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Remote Agentを起動できませんでした。");
+        _process = process;
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) =>
         {
-            _process?.Dispose();
-            _process = null;
+            if (!ReferenceEquals(_process, process)) return;
             Exited?.Invoke();
         };
-        _ = DrainAsync(_process.StandardOutput, cancellationToken, line => OutputLineReceived?.Invoke(line));
-        _ = DrainAsync(_process.StandardError, cancellationToken, line => ErrorLineReceived?.Invoke(line));
-        return WriteTokenAsync(_process, accessToken, cancellationToken);
+        _ = DrainAsync(process.StandardOutput, cancellationToken, line => OutputLineReceived?.Invoke(line));
+        _ = DrainAsync(process.StandardError, cancellationToken, line => ErrorLineReceived?.Invoke(line));
+        return WriteConfigurationAsync(process, accessToken, config.Firebase!, cancellationToken);
     }
 
     public async Task StopAsync()
     {
         var process = _process;
-        _process = null;
         if (process is null) return;
-        try
-        {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync();
-        }
-        catch
-        {
-        }
-        finally
-        {
-            process.Dispose();
-        }
+        // EOF is the single shutdown protocol; node exits even while login is pending.
+        // On timeout retain the process handle: do not pretend it was stopped.
+        if (!process.HasExited) process.StandardInput.Close();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        if (ReferenceEquals(_process, process)) _process = null;
+        process.Dispose();
     }
 
-    private static async Task WriteTokenAsync(Process process, string accessToken, CancellationToken cancellationToken)
+    private static async Task WriteConfigurationAsync(Process process, string accessToken, FirebaseConnection firebase, CancellationToken cancellationToken)
     {
         await process.StandardInput.WriteLineAsync(accessToken.AsMemory(), cancellationToken);
+        await process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(firebase, new JsonSerializerOptions(JsonSerializerDefaults.Web)).AsMemory(), cancellationToken);
         await process.StandardInput.FlushAsync(cancellationToken);
-        process.StandardInput.Close();
     }
 
     private static async Task DrainAsync(StreamReader reader, CancellationToken cancellationToken, Action<string>? lineReceived = null)

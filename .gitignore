@@ -1,5 +1,7 @@
 .venv/
 /.env
+/cloud-sync.json
+/cloud-sync.local.json
 __pycache__/
 *.py[cod]
 .pytest_cache/

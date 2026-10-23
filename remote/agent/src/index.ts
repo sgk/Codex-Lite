@@ -27,12 +27,17 @@ import { LocalDaemon } from "./daemon.js";
 import { isCountableProgressEvent } from "./progress-sync.js";
 import { historyChunks } from "./history-chunks.js";
 import { ConnectionHealth } from "./connection-health.js";
+import { watchParentInput } from "./parent-lifetime.js";
 
 interface QueuedTask {
   operation: RemoteOperation;
   payload?: RemoteTaskPayload;
   status: string;
 }
+
+// The desktop owns this process. Its stdin remains open after the initial
+// configuration frame. EOF stops cloud work immediately, including pending login.
+watchParentInput();
 
 const config = await loadAgentConfig();
 const app = initializeApp(config.firebase);

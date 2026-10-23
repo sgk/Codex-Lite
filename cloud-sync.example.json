@@ -1,0 +1,13 @@
+{
+  "enabled": false,
+  "firebase": {
+    "projectId": "YOUR_FIREBASE_PROJECT_ID",
+    "apiKey": "YOUR_FIREBASE_WEB_API_KEY",
+    "appId": "YOUR_FIREBASE_WEB_APP_ID",
+    "authDomain": "YOUR_FIREBASE_PROJECT_ID.firebaseapp.com"
+  },
+  "oauth": {
+    "clientId": "YOUR_DESKTOP_CLIENT_ID.apps.googleusercontent.com",
+    "clientSecret": "YOUR_DESKTOP_CLIENT_SECRET"
+  }
+}

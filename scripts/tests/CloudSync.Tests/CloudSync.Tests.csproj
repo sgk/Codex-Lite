@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../../windows/CodexLite/RemoteSyncFeature.cs" Link="RemoteSyncFeature.cs" />
+    <Compile Include="../../../windows/CodexLite/Services/RemoteAgentClient.cs" Link="RemoteAgentClient.cs" />
+    <Compile Include="../../../windows/CodexLite/Services/GoogleOAuthClient.cs" Link="GoogleOAuthClient.cs" />
+    <Reference Include="Microsoft.CodeAnalysis" HintPath="$(MSBuildSDKsPath)/../Roslyn/bincore/Microsoft.CodeAnalysis.dll" />
+    <Reference Include="Microsoft.CodeAnalysis.CSharp" HintPath="$(MSBuildSDKsPath)/../Roslyn/bincore/Microsoft.CodeAnalysis.CSharp.dll" />
+  </ItemGroup>
+</Project>

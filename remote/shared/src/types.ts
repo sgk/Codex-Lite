@@ -51,7 +51,7 @@ export interface CryptoContext {
 
 export interface FirebasePublicConfig {
   apiKey: string;
-  authDomain: string;
+  authDomain?: string;
   projectId: string;
   storageBucket?: string;
   messagingSenderId?: string;

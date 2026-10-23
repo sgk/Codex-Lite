@@ -9,16 +9,16 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <Version>0.4.0</Version>
-    <RemoteSyncEnabled Condition="'$(RemoteSyncEnabled)' == ''">false</RemoteSyncEnabled>
-    <DefineConstants Condition="'$(RemoteSyncEnabled)' == 'true'">$(DefineConstants);CODEX_LITE_REMOTE_SYNC</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
-    <Content Include="$(RemoteOAuthConfigPath)"
-             Condition="'$(RemoteSyncEnabled)' == 'true' and Exists('$(RemoteOAuthConfigPath)')"
-             Link="remote-oauth.json"
-             CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\..\remote\agent-dist\**\*"
-             Condition="'$(RemoteSyncEnabled)' == 'true'"
+    <Content Include="$(CloudSyncConfigPath)"
+             Condition="'$(CloudSyncConfigPath)' != ''"
+             Link="cloud-sync.json"
+             CopyToOutputDirectory="Always"
+             CopyToPublishDirectory="Always" />
+    <Content Include="..\..\cloud-sync.example.json" Link="cloud-sync.example.json"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\remote\agent-dist\index.js;..\..\remote\agent-dist\package.json;..\..\remote\agent-dist\agent-defaults.json"
              Link="remote-agent\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest"
              CopyToPublishDirectory="PreserveNewest" />
@@ -30,14 +30,14 @@
              Link="daemon\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest"/>
   </ItemGroup>
-  <Target Name="EnsureRemoteAgentBundle" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true' and '$(RemoteSyncEnabled)' == 'true'">
+  <Target Name="EnsureRemoteAgentBundle" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true'">
     <Error Condition="!Exists('..\..\remote\agent-dist\index.js')"
            Text="Remote Agent bundle is missing. Run npm --prefix remote run build:agent before building Codex Lite." />
-    <Error Condition="!Exists('$(RemoteOAuthConfigPath)')"
-           Text="Generated Remote OAuth configuration is missing." />
+    <Error Condition="'$(CloudSyncConfigPath)' != '' and !Exists('$(CloudSyncConfigPath)')"
+           Text="The explicitly selected cloud sync configuration is missing." />
   </Target>
-  <Target Name="RemoveDisabledRemoteArtifacts" AfterTargets="Build" Condition="'$(RemoteSyncEnabled)' != 'true'">
-    <Delete Files="$(OutDir)remote-oauth.json;$(OutDir)remote-oauth.local.json" />
-    <RemoveDir Directories="$(OutDir)remote-agent" />
+  <Target Name="RemoveLegacyRemoteConfiguration" AfterTargets="Build">
+    <Delete Files="$(OutDir)remote-oauth.json;$(OutDir)remote-oauth.local.json;$(OutDir)remote-agent/firebase-config.json" />
+    <Delete Files="$(OutDir)cloud-sync.json" Condition="'$(CloudSyncConfigPath)' == ''" />
   </Target>
 </Project>

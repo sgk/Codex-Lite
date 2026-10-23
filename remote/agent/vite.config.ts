@@ -11,11 +11,6 @@ function runtimeConfigAssets(): Plugin {
     async generateBundle() {
       this.emitFile({
         type: "asset",
-        fileName: "firebase-config.json",
-        source: await readFile(path.join(remoteRoot, "web/public/firebase-config.json")),
-      });
-      this.emitFile({
-        type: "asset",
         fileName: "agent-defaults.json",
         source: await readFile(path.join(remoteRoot, "agent-defaults.json")),
       });

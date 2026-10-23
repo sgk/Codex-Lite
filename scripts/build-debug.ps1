@@ -2,7 +2,7 @@ param(
     [string]$Configuration = "Debug",
     [string]$Solution = "windows/CodexLite.sln",
     [string]$Dotnet = "C:\Program Files\dotnet\dotnet.exe",
-    [string]$EnvFile = ".env",
+    [string]$CloudSyncConfigFile = "",
     [switch]$NoLaunch,
     [switch]$DryRun
 )
@@ -33,42 +33,6 @@ function Get-ProcessAncestry {
 function Get-RepoRoot {
     $scriptDir = Split-Path -Parent $PSCommandPath
     return (Resolve-Path (Join-Path $scriptDir "..")).ProviderPath
-}
-
-function Read-DotEnvFile {
-    param([string]$Path)
-
-    $values = @{}
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $values
-    }
-    foreach ($rawLine in Get-Content -LiteralPath $Path) {
-        $line = $rawLine.Trim()
-        if ($line.Length -eq 0 -or $line.StartsWith("#")) {
-            continue
-        }
-        if ($line.StartsWith("export ")) {
-            $line = $line.Substring(7).TrimStart()
-        }
-        $separator = $line.IndexOf('=')
-        if ($separator -le 0) {
-            throw "Invalid .env line: expected NAME=VALUE."
-        }
-        $name = $line.Substring(0, $separator).Trim()
-        if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
-            throw "Invalid .env variable name: $name"
-        }
-        $value = $line.Substring($separator + 1).Trim()
-        if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
-            $value = $value.Substring(1, $value.Length - 2)
-            $value = $value.Replace('\n', "`n").Replace('\r', "`r").Replace('\"', '"').Replace('\\', '\')
-        }
-        elseif ($value.Length -ge 2 -and $value.StartsWith("'") -and $value.EndsWith("'")) {
-            $value = $value.Substring(1, $value.Length - 2)
-        }
-        $values[$name] = $value
-    }
-    return $values
 }
 
 function Assert-DeploymentPath {
@@ -117,16 +81,10 @@ function Convert-WslPathToUncPath {
 
 $repoRoot = Get-RepoRoot
 Set-Location $repoRoot
-$resolvedEnvFile = if ([System.IO.Path]::IsPathRooted($EnvFile)) { $EnvFile } else { Join-Path $repoRoot $EnvFile }
-$envValues = Read-DotEnvFile -Path $resolvedEnvFile
-$oauthClientSecret = [string]$envValues["GOOGLE_OAUTH_CLIENT_SECRET"]
-$oauthClientId = [string]$envValues["GOOGLE_OAUTH_CLIENT_ID"]
-$remoteSyncEnabled = -not [string]::IsNullOrWhiteSpace($oauthClientSecret)
-if ($remoteSyncEnabled -and [string]::IsNullOrWhiteSpace($oauthClientId)) {
-    throw "GOOGLE_OAUTH_CLIENT_ID is required when GOOGLE_OAUTH_CLIENT_SECRET is set."
+$cloudSyncConfigPath = ""
+if ($CloudSyncConfigFile) {
+    $cloudSyncConfigPath = (Resolve-Path -LiteralPath $CloudSyncConfigFile).ProviderPath
 }
-$remoteSyncEnabledText = if ($remoteSyncEnabled) { "true" } else { "false" }
-$generatedOAuthConfigPath = Join-Path $repoRoot "windows/CodexLite/obj/remote-oauth.generated.json"
 $buildDirectory = Join-Path $repoRoot "windows/CodexLite/bin/$Configuration/net8.0-windows"
 $desktopDirectory = [Environment]::GetFolderPath("Desktop")
 $deploymentDirectory = Assert-DeploymentPath -DeploymentDirectory (Join-Path $desktopDirectory "Codex Lite")
@@ -140,10 +98,8 @@ foreach ($proc in $ancestry) {
 $wslRepoRoot = Convert-ToWslPath -WindowsPath $repoRoot
 
 if ($DryRun) {
-    Write-Host "Remote sync build: $remoteSyncEnabledText"
-    if ($remoteSyncEnabled) {
-        Write-Host "would build Remote Agent from $wslRepoRoot"
-    }
+    Write-Host "would build Remote Agent without a built-in Firebase destination"
+    Write-Host "include explicitly selected cloud configuration: $([bool]$cloudSyncConfigPath)"
     Write-Host "would build, then hand deployment to an independent Windows process"
     Write-Host "would deploy $buildDirectory -> $deploymentDirectory"
     exit 0
@@ -155,28 +111,14 @@ if ([string]::IsNullOrWhiteSpace($wslHome)) {
 }
 $daemonEndpointPath = Convert-WslPathToUncPath -RepoRoot $repoRoot -WslPath "$wslHome/.local/share/codex-lite/daemon-endpoint.json"
 
-if ($remoteSyncEnabled) {
-    & wsl.exe -- npm --prefix "$wslRepoRoot/remote" run build:agent
-    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-
-    $generatedOAuthConfigDirectory = Split-Path -Parent $generatedOAuthConfigPath
-    New-Item -ItemType Directory -Path $generatedOAuthConfigDirectory -Force | Out-Null
-    $oauthConfig = @{ clientId = $oauthClientId; clientSecret = $oauthClientSecret } | ConvertTo-Json -Compress
-    [System.IO.File]::WriteAllText($generatedOAuthConfigPath, $oauthConfig, (New-Object System.Text.UTF8Encoding($false)))
+& wsl.exe -- npm --prefix "$wslRepoRoot/remote" run build:agent
+if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
 }
 
-try {
-    & $Dotnet build $Solution -c $Configuration "-p:RemoteSyncEnabled=$remoteSyncEnabledText" "-p:RemoteOAuthConfigPath=$generatedOAuthConfigPath"
-    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-}
-finally {
-    if (Test-Path -LiteralPath $generatedOAuthConfigPath -PathType Leaf) {
-        Remove-Item -LiteralPath $generatedOAuthConfigPath -Force
-    }
+& $Dotnet build $Solution -c $Configuration "-p:CloudSyncConfigPath=$cloudSyncConfigPath"
+if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
 }
 
 $logDirectory = Join-Path $repoRoot "runtime"

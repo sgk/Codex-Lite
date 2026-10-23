@@ -22,6 +22,7 @@ using CodexLite.ViewModels;
 using Microsoft.Win32;
 using Binding = System.Windows.Data.Binding;
 using Button = System.Windows.Controls.Button;
+using CheckBox = System.Windows.Controls.CheckBox;
 using ComboBox = System.Windows.Controls.ComboBox;
 using Color = System.Windows.Media.Color;
 using DrawingIcon = System.Drawing.Icon;
@@ -165,6 +166,10 @@ public partial class MainWindow : Window
     private GoogleOAuthSession? _remoteAuthSession;
     private CancellationTokenSource? _remoteAuthRefreshCts;
     private bool _isRemoteAgentConnecting;
+    private bool _remoteSyncEnabled;
+    private readonly SemaphoreSlim _remoteOperationLock = new(1, 1);
+    private CancellationTokenSource _remoteSyncCts = new();
+    private bool RemoteSyncRequested => RemoteSyncFeature.IsEnabled && _remoteSyncEnabled && !_isClosing;
     private DateTimeOffset _nextRemoteReconnectAt = DateTimeOffset.MinValue;
     private readonly ObservableCollection<ProjectTreeItem> _projectTree = new();
     private ObservableCollection<MessageDto> _messages = new();
@@ -325,6 +330,7 @@ public partial class MainWindow : Window
         {
             RemoteSyncBorder.Visibility = Visibility.Collapsed;
         }
+        UpdateRemoteSyncDisabledDisplay();
         ProjectTree.ItemsSource = _projectTree;
         RegisterComposerImeHandlers(MessageBox);
         RegisterComposerImeHandlers(NewChatMessageBox);
@@ -646,6 +652,7 @@ public partial class MainWindow : Window
         e.Cancel = true;
         _isClosing = true;
         _remoteAuthRefreshCts?.Cancel();
+        _remoteSyncCts.Cancel();
         _remoteRunWatchCts.Cancel();
         _uiWatchdogCts.Cancel();
         _uiHeartbeatTimer.Stop();
@@ -818,27 +825,30 @@ public partial class MainWindow : Window
 
     private async Task TryReconnectRemoteAsync()
     {
-        if (!RemoteSyncFeature.IsEnabled || _isClosing || _remoteAgent.IsRunning ||
+        if (!RemoteSyncRequested || _remoteAgent.IsRunning ||
             _isRemoteAgentConnecting || !_isDaemonHttpReady ||
             DateTimeOffset.UtcNow < _nextRemoteReconnectAt)
         {
             return;
         }
 
+        if (!await _remoteOperationLock.WaitAsync(0)) return;
+        var cancellationToken = _remoteSyncCts.Token;
         _isRemoteAgentConnecting = true;
         WritePerformanceLog("remote-auto-reconnect-start", "savedSession=checking");
         try
         {
-            for (var attempt = 1; attempt <= 3 && !_isClosing; attempt++)
+            for (var attempt = 1; attempt <= 3 && RemoteSyncRequested; attempt++)
             {
                 try
                 {
-                    var session = await _googleOAuth.TryRestoreSessionAsync();
-                    if (session is null || _isClosing)
+                    var session = await _googleOAuth.TryRestoreSessionAsync(cancellationToken);
+                    if (!RemoteSyncRequested || cancellationToken.IsCancellationRequested) return;
+                    if (session is null)
                     {
                         _nextRemoteReconnectAt = DateTimeOffset.MaxValue;
                         WritePerformanceLog("remote-auto-reconnect-no-session", "savedSession=missing");
-                        RemoteSyncDetailText.Text = "保存済みのRemote認証がありません。初回認証後は自動接続されます。";
+                        RemoteSyncDetailText.Text = "Google認証が必要です。設定画面の認証ボタンから認証してください。";
                         return;
                     }
                     _remoteAuthSession = session;
@@ -847,7 +857,8 @@ public partial class MainWindow : Window
                         var wsl = await _client.ResolveDefaultWslEnvironmentAsync();
                         _wslDistroName = wsl.DistroName;
                     }
-                    await _remoteAgent.StartAsync(_wslDistroName, session.AccessToken);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await _remoteAgent.StartAsync(_wslDistroName, session.AccessToken, cancellationToken);
                     _nextRemoteReconnectAt = DateTimeOffset.MinValue;
                     WritePerformanceLog("remote-auto-reconnect-started", "agent=running");
                     StartRemoteAuthRefreshLoop();
@@ -857,27 +868,77 @@ public partial class MainWindow : Window
                     }
                     return;
                 }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
                 catch (Exception ex)
                 {
                     WritePerformanceLog("remote-auto-reconnect-error", $"attempt={attempt} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
                     if (attempt < 3)
                     {
                         RemoteSyncDetailText.Text = $"クラウド同期を再試行しています（{attempt}/3）。";
-                        await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None);
+                        await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
                     }
                 }
             }
             _nextRemoteReconnectAt = DateTimeOffset.UtcNow.AddMinutes(1);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         finally
         {
             _isRemoteAgentConnecting = false;
+            _remoteOperationLock.Release();
         }
+    }
+
+    private void UpdateRemoteSyncDisabledDisplay()
+    {
+        if (RemoteSyncRequested) return;
+        RemoteSyncStatusText.Text = "クラウド同期オフ";
+        RemoteSyncStatusText.Foreground = System.Windows.Media.Brushes.Gray;
+        RemoteSyncProgressBar.Visibility = Visibility.Collapsed;
+        RemoteSyncDetailText.Text = RemoteSyncFeature.ConfigurationError ??
+            (RemoteSyncFeature.IsEnabled ? "設定画面で同期をオンにできます。" : "cloud-sync.json で同期機能が構成されていません。");
+    }
+
+    private async Task SetRemoteSyncEnabledAsync(bool enabled)
+    {
+        _remoteSyncEnabled = enabled && RemoteSyncFeature.IsEnabled;
+        SaveUiState();
+        if (!_remoteSyncEnabled)
+        {
+            _remoteSyncCts.Cancel();
+            _remoteAuthRefreshCts?.Cancel();
+            _remotePriorityTimer.Stop();
+            _remotePriorityPending = false;
+            await _remoteOperationLock.WaitAsync();
+            try
+            {
+                await _remoteAgent.StopAsync();
+                _remoteAuthSession = null;
+                _remoteSyncCts.Dispose();
+                _remoteSyncCts = new CancellationTokenSource();
+            }
+            finally { _remoteOperationLock.Release(); }
+            UpdateRemoteSyncDisabledDisplay();
+            return;
+        }
+        _remoteSyncCts.Dispose();
+        _remoteSyncCts = new CancellationTokenSource();
+        _remoteTransientWarning = false;
+        _remoteSyncFailed = false;
+        _remoteListenerFailed = false;
+        _nextRemoteReconnectAt = DateTimeOffset.MinValue;
+        RemoteSyncStatusText.Text = "クラウド同期を準備中";
+        RemoteSyncDetailText.Text = "保存済みの認証を確認しています。";
+        ScheduleRemotePrioritySync();
+        await TryReconnectRemoteAsync();
     }
 
     private void ScheduleRemotePrioritySync()
     {
-        if (!RemoteSyncFeature.IsEnabled || _isLoadingUiState || _isClosing)
+        if (!RemoteSyncRequested || _isLoadingUiState)
         {
             return;
         }
@@ -892,7 +953,7 @@ public partial class MainWindow : Window
     private async void RemotePriorityTimer_Tick(object? sender, EventArgs e)
     {
         _remotePriorityTimer.Stop();
-        if (!_remotePriorityPending || _isPushingRemotePriority || !_isDaemonHttpReady || _isClosing)
+        if (!RemoteSyncRequested || !_remotePriorityPending || _isPushingRemotePriority || !_isDaemonHttpReady)
         {
             return;
         }
@@ -1345,20 +1406,35 @@ public partial class MainWindow : Window
     {
         if (!RemoteSyncFeature.IsEnabled)
         {
-            setStatus("このビルドにはクラウド同期機能が含まれていません。");
+            setStatus(RemoteSyncFeature.ConfigurationError ?? "cloud-sync.json でクラウド同期が構成されていません。");
             return;
         }
+        if (!await _remoteOperationLock.WaitAsync(0))
+        {
+            setStatus("認証・同期の操作中です。完了を待ってください。");
+            return;
+        }
+        var cancellationToken = _remoteSyncCts.Token;
         try
         {
+            _remoteAuthRefreshCts?.Cancel();
             setStatus("Google認証を開始中...");
-            _remoteAuthSession = await _googleOAuth.SignInAsync();
+            _remoteAuthSession = await _googleOAuth.SignInAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!RemoteSyncRequested)
+            {
+                setStatus("Google認証済み（クラウド同期はオフ）");
+                return;
+            }
+            await _remoteAgent.StopAsync();
             if (string.IsNullOrWhiteSpace(_wslDistroName))
             {
                 var wsl = await _client.ResolveDefaultWslEnvironmentAsync();
                 _wslDistroName = wsl.DistroName;
             }
             setStatus("Remote Agentを起動中...");
-            await _remoteAgent.StartAsync(_wslDistroName, _remoteAuthSession.AccessToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            await _remoteAgent.StartAsync(_wslDistroName, _remoteAuthSession.AccessToken, cancellationToken);
             _nextRemoteReconnectAt = DateTimeOffset.MinValue;
             StartRemoteAuthRefreshLoop();
             setStatus("クラウド同期を有効にしました");
@@ -1371,10 +1447,12 @@ public partial class MainWindow : Window
         {
             setStatus($"Google認証エラー | {ShortError(ex)}");
         }
+        finally { _remoteOperationLock.Release(); }
     }
 
     private void RemoteAgent_OutputLineReceived(string line)
     {
+        if (!RemoteSyncRequested) return;
         const string prefix = "REMOTE_SYNC ";
         if (!line.StartsWith(prefix, StringComparison.Ordinal))
         {
@@ -1398,6 +1476,7 @@ public partial class MainWindow : Window
 
     private void RemoteAgent_ErrorLineReceived(string line)
     {
+        if (!RemoteSyncRequested) return;
         const string backgroundPrefix = "REMOTE_BACKGROUND_ERROR ";
         if (line.StartsWith(backgroundPrefix, StringComparison.Ordinal))
         {
@@ -1411,6 +1490,7 @@ public partial class MainWindow : Window
         _ = Dispatcher.BeginInvoke(() =>
         {
             var transient = IsTransientFirestoreWarning(line);
+            if (!RemoteSyncRequested) return;
             if (transient && (_remoteSyncFailed || _remoteListenerFailed)) return;
             _remoteTransientWarning = transient;
             if (!transient) _remoteSyncFailed = true;
@@ -1424,10 +1504,11 @@ public partial class MainWindow : Window
 
     private void RemoteAgent_Exited()
     {
-        if (_isClosing) return;
+        if (!RemoteSyncRequested) return;
         _nextRemoteReconnectAt = DateTimeOffset.MinValue;
         _ = Dispatcher.BeginInvoke(() =>
         {
+            if (!RemoteSyncRequested) return;
             _remoteTransientWarning = false;
             _remoteSyncFailed = false;
             _remoteListenerFailed = false;
@@ -1466,6 +1547,7 @@ public partial class MainWindow : Window
 
     private void ApplyRemoteSyncProgress(RemoteSyncProgress progress)
     {
+        if (!RemoteSyncRequested) return;
         switch (progress.State)
         {
             case "transport_ready":
@@ -1537,7 +1619,7 @@ public partial class MainWindow : Window
 
     private async Task RefreshRemoteAuthLoopAsync(CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        while (!cancellationToken.IsCancellationRequested && RemoteSyncRequested)
         {
             var session = _remoteAuthSession;
             if (session is null || string.IsNullOrWhiteSpace(session.RefreshToken)) return;
@@ -2419,6 +2501,8 @@ public partial class MainWindow : Window
             }
 
             var state = JsonSerializer.Deserialize<UiState>(File.ReadAllText(_uiStatePath), _json);
+            _remoteSyncEnabled = state is not null &&
+                RemoteSyncFeature.Configuration?.RestoreEnabled(state.CloudSyncEnabled, state.CloudSyncIdentity) == true;
             _persistedExpandedProjectIds.Clear();
             foreach (var projectId in state?.ExpandedProjectIds ?? [])
             {
@@ -2546,7 +2630,9 @@ public partial class MainWindow : Window
             chatOrderIdsByProject,
             _persistedSelectedTabsByChat.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             _composerDraftsByChat.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
-            _newChatComposerDraftsByProject.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal));
+            _newChatComposerDraftsByProject.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+            _remoteSyncEnabled,
+            RemoteSyncFeature.IsEnabled ? RemoteSyncFeature.Configuration!.Identity : null);
         File.WriteAllText(_uiStatePath, JsonSerializer.Serialize(state, _json));
     }
 
@@ -2807,24 +2893,51 @@ public partial class MainWindow : Window
             codexChoices.Children.Add(radio);
         }
         content.Children.Add(codexChoices);
-        if (RemoteSyncFeature.IsEnabled)
         {
             content.Children.Add(new TextBlock { Text = "クラウド同期設定", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 18, 0, 8) });
             content.Children.Add(new TextBlock
             {
-                Text = "Google認証後、このPCの会話をクラウドへ同期します。",
+                Text = RemoteSyncFeature.ConfigurationError ?? (RemoteSyncFeature.IsEnabled
+                    ? "同期先は cloud-sync.json で設定されています。オンにすると、このPCの会話をクラウドへ同期します。"
+                    : "同期機能を使うには、実行用フォルダーに cloud-sync.json を設定してアプリを再起動してください。"),
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 0, 0, 8)
             });
             var remoteStatus = new TextBlock
             {
-                Text = _remoteAgent.IsRunning ? "同期中" : "未同期",
+                Text = _remoteAgent.IsRunning ? "同期中" : (_remoteSyncEnabled ? "認証・同期の準備待ち" : "同期オフ"),
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 0, 0, 8)
             };
             content.Children.Add(remoteStatus);
-            var remoteButton = new Button { Content = "Google認証して同期を有効化", MinWidth = 190, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
-            remoteButton.Click += async (_, _) => await ConnectRemoteAsync(message => remoteStatus.Text = message);
+            var remoteToggle = new CheckBox
+            {
+                Content = "クラウド同期をオンにする",
+                IsChecked = _remoteSyncEnabled,
+                IsEnabled = RemoteSyncFeature.IsEnabled,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            content.Children.Add(remoteToggle);
+            var remoteButton = new Button { Content = "Google認証", IsEnabled = RemoteSyncFeature.IsEnabled, MinWidth = 140, HorizontalAlignment = System.Windows.HorizontalAlignment.Left };
+            remoteToggle.Click += async (_, _) =>
+            {
+                remoteToggle.IsEnabled = false;
+                remoteButton.IsEnabled = false;
+                try
+                {
+                    await SetRemoteSyncEnabledAsync(remoteToggle.IsChecked == true);
+                    remoteStatus.Text = !_remoteSyncEnabled ? "同期オフ" :
+                        (_remoteAgent.IsRunning ? "同期中" : "Google認証が必要です。認証ボタンを押してください。");
+                }
+                catch (Exception ex) { remoteStatus.Text = $"同期設定エラー | {ShortError(ex)}"; }
+                finally { remoteToggle.IsEnabled = remoteButton.IsEnabled = RemoteSyncFeature.IsEnabled; }
+            };
+            remoteButton.Click += async (_, _) =>
+            {
+                remoteButton.IsEnabled = false;
+                try { await ConnectRemoteAsync(message => remoteStatus.Text = message); }
+                finally { remoteButton.IsEnabled = RemoteSyncFeature.IsEnabled; }
+            };
             content.Children.Add(remoteButton);
         }
         panel.Children.Add(content);
@@ -10544,7 +10657,9 @@ public sealed record UiState(
     Dictionary<string, List<string>>? ChatOrderIdsByProject = null,
     Dictionary<string, string>? SelectedTabsByChat = null,
     Dictionary<string, string>? ComposerDraftsByChat = null,
-    Dictionary<string, string>? NewChatComposerDraftsByProject = null);
+    Dictionary<string, string>? NewChatComposerDraftsByProject = null,
+    bool CloudSyncEnabled = false,
+    string? CloudSyncIdentity = null);
 
 public sealed record WindowPlacementState(
     double Left,

@@ -21,20 +21,10 @@ public sealed class GoogleOAuthClient
         var config = LoadConfig();
         var clientId = config.ClientId!;
         var redirectUri = RedirectUriForClientId(clientId);
-        var savedRefreshToken = CredentialStore.Read();
-        if (!string.IsNullOrWhiteSpace(savedRefreshToken))
-        {
-            try
-            {
-                return await RefreshAsync(clientId, config.ClientSecret, savedRefreshToken, cancellationToken);
-            }
-            catch
-            {
-                CredentialStore.Delete();
-            }
-        }
-
+        // This button explicitly requests interactive authentication. Automatic
+        // restoration uses TryRestoreSessionAsync and never switches methods.
         _state = Base64Url(RandomNumberGenerator.GetBytes(32));
+        cancellationToken.ThrowIfCancellationRequested();
         _verifier = Base64Url(RandomNumberGenerator.GetBytes(64));
         var challenge = Base64Url(SHA256.HashData(Encoding.ASCII.GetBytes(_verifier)));
         var authorizationUrl = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -122,17 +112,9 @@ public sealed class GoogleOAuthClient
         return new GoogleOAuthSession(token.AccessToken!, refreshToken, DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, token.ExpiresIn)));
     }
 
-    private static OAuthConfig LoadConfig()
+    private static CloudOAuthConfiguration LoadConfig()
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "remote-oauth.json");
-        if (!File.Exists(path)) throw new FileNotFoundException("このビルドにはRemote OAuth設定が含まれていません。", path);
-        using var stream = File.OpenRead(path);
-        var config = JsonSerializer.Deserialize<OAuthConfig>(stream, JsonOptions);
-        if (string.IsNullOrWhiteSpace(config?.ClientId) || string.IsNullOrWhiteSpace(config.ClientSecret))
-        {
-            throw new InvalidOperationException("Remote OAuth設定が不完全です。");
-        }
-        return config;
+        return RemoteSyncFeature.RequireConfiguration().OAuth!;
     }
 
     public static string RedirectUriForClientId(string clientId)
@@ -193,7 +175,6 @@ public sealed class GoogleOAuthClient
             : null;
     }
 
-    private sealed record OAuthConfig(string? ClientId, string? ClientSecret);
     private sealed record GoogleTokenResponse(
         [property: JsonPropertyName("access_token")] string? AccessToken,
         [property: JsonPropertyName("expires_in")] int ExpiresIn,
@@ -204,7 +185,7 @@ public sealed record GoogleOAuthSession(string AccessToken, string? RefreshToken
 
 internal static class CredentialStore
 {
-    private const string TargetName = "CodexLite/RemoteGoogleRefreshToken";
+    private static string TargetName => "CodexLite/RemoteGoogleRefreshToken/" + RemoteSyncFeature.RequireConfiguration().Identity;
     private const int GenericCredentialType = 1;
 
     public static void Write(string value)

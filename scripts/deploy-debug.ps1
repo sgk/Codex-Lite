@@ -215,6 +215,15 @@ if (Test-Path -LiteralPath $nextDirectory) {
 }
 New-Item -ItemType Directory -Path $nextDirectory -Force | Out-Null
 Copy-Item -Path (Join-Path $BuildDirectory "*") -Destination $nextDirectory -Recurse -Force
+# Runtime configuration is administrator-owned, not an implicit build default.
+# An explicitly packaged configuration replaces it; ordinary updates preserve it.
+$installedCloudConfig = Join-Path $currentDirectory "cloud-sync.json"
+$stagedCloudConfig = Join-Path $nextDirectory "cloud-sync.json"
+if ((Test-Path -LiteralPath $installedCloudConfig -PathType Leaf) -and
+    -not (Test-Path -LiteralPath $stagedCloudConfig -PathType Leaf)) {
+    Copy-Item -LiteralPath $installedCloudConfig -Destination $stagedCloudConfig
+    Write-Host "preserved installed cloud-sync.json"
+}
 Write-Host "staged $BuildDirectory -> $nextDirectory"
 
 $protectedIds = @(

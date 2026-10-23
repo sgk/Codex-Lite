@@ -28,6 +28,14 @@ npm run build
 
 この操作だけではFirebaseへ接続または配置しません。
 
+Windows側の設定読み込み・接続先別のオン設定・サービスコードの構文、およびWindowsからWSL子プロセスをEOFで停止する経路は、独立したテストハーネスでも確認できます。Windows PowerShellでリポジトリ直下から実行します。Windowsクライアント本体のビルド・配置・起動は行いません。
+
+```powershell
+dotnet run --project scripts/tests/CloudSync.Tests/CloudSync.Tests.csproj -- (Get-Location).Path
+```
+
+このハーネスのWSL子プロセステストは `Ubuntu-24.04` と `/usr/bin/node` のある検証環境を対象にします。実際の認証やFirestoreへの読み書きは行いません。
+
 ## Firebaseの準備（人間によるログインが必要）
 
 1. Firebase Consoleでプロジェクトを作成する。
@@ -55,32 +63,41 @@ Firebaseへのログインやプロジェクト作成はCodex Liteが代行し�
 
 Google Cloud ConsoleでOAuthクライアントを作成するときは、アプリケーションの種類を「デスクトップアプリ」にします。WindowsアプリはクライアントIDからGoogle標準の `com.googleusercontent.apps.<クライアントID本体>:/oauth2redirect` を生成して使います。
 
-作成したクライアントIDとクライアントシークレットは、リポジトリ直下のGit管理外 `.env` に保存します。雛形は `.env.example` です。
+クラウド同期機能の提供可否・接続先・OAuth設定は、実行用フォルダー（デスクトップの `Codex Lite`）直下の `cloud-sync.json` で指定します。雛形はリポジトリ直下の `cloud-sync.example.json` です。ファイルを編集したらアプリを再起動してください。
 
-```dotenv
-GOOGLE_OAUTH_CLIENT_ID="YOUR_DESKTOP_CLIENT_ID.apps.googleusercontent.com"
-GOOGLE_OAUTH_CLIENT_SECRET="YOUR_DESKTOP_CLIENT_SECRET"
-```
+- `enabled`: 同期機能を提供する場合だけ `true`。ファイルがない場合や `false` の場合は同期機能を無効化します。
+- `firebase`: 接続先の `projectId`、`apiKey`、`appId`。`authDomain` も同じFirebaseプロジェクトの設定を指定できます。Firestoreデータベースは `(default)` を使用します。
+- `oauth`: デスクトップ用Google OAuthの `clientId` と `clientSecret`。
 
-ビルド処理は `.env` を読み、クライアントシークレットが設定されている場合だけRemote Agentをビルド・同梱し、同期UIを有効にします。シークレットが無い場合はRemote同期機能を含まないWindowsクライアントをビルドします。`.env` 自体は成果物へコピーせず、値をログや画面にも表示しません。
+有効化したファイルの形式・必須項目が不正な場合は同期を停止し、設定画面に原因を表示します。旧 `remote-oauth.json`、同梱Agentの `firebase-config.json`、開発リポジトリや `.env` を代わりに読みません。
 
-その後、Windowsアプリで「Remote接続」を押してGoogle認証を完了します。認証後、アプリが配布パッケージに同梱された `remote-agent/index.js` をWSLのNode.jsで起動し、認証トークンはプロセスの標準入力から一時的に渡されます。アプリは開発リポジトリやソース版 `remote/` を探索しません。コマンドライン、設定ファイル、ログには保存しません。
+設定画面には「クラウド同期をオンにする」と「Google認証」を表示します。初期値は同期オフです。認証だけを行っても同期を勝手にオンにしません。オフにするとAgentを停止し、自動再接続・認証の自動更新も停止します。停止時には親プロセスから標準入力を閉じ、WSL側のNode.jsも終了させます。
 
-一度認証を完了すると、次回以降のWindowsアプリ起動時はWindows Credential Managerの保存済みRefresh TokenでRemote Agentへ自動再接続し、Firestoreのカタログ同期を再開します。Refresh Tokenが無効な場合だけ、設定画面から再認証してください。
+オン／オフは既存のUI状態ファイルへ保存し、同じ接続先なら起動後も維持します。Refresh TokenはWindows Credential Managerへ接続先（FirebaseプロジェクトID・アプリID・OAuthクライアントID）別に保存します。接続先を変更した場合は同期オフから始め、以前の接続先の認証を流用しません。旧版の接続先を区別しない保存トークンも流用しないため、初回移行時は再認証が必要です。
+
+認証後、アプリが同梱された `remote-agent/index.js` をWSLのNode.jsで起動します。GoogleアクセストークンとFirebase接続設定は標準入力で渡し、コマンドラインへ含めません。AgentへOAuthクライアントシークレットは渡しません。
+
+### 配布と既存環境の移行
+
+通常のビルド・配布ZIPにはAgentと無効状態の設定雛形だけを同梱し、特定の接続先やOAuth設定を自動で組み込みません。ビルド処理は `.env` やWeb UI用 `web/public/firebase-config.json` を読みません。社外配布版に社内設定が混入しないよう、具体的な設定の同梱には `scripts/build-debug.ps1` または `scripts/build-release.ps1` の `-CloudSyncConfigFile` で管理者が明示指定する必要があります。同梱せず、導入後に管理者が実行用フォルダーへファイルを設置することもできます。
+
+通常のデスクトップ配置更新では、実行用フォルダーの既存 `cloud-sync.json` を保持します。明示指定して同梱した設定がある場合は、その設定で置き換えます。公開用ZIPの作成はインストール済み設定を取り込みません。
+
+旧版から移行するときは、管理者が旧Firebase設定とOAuth設定を新しい `cloud-sync.json` の各項目へ移し、`enabled` を `true` にします。これは自動移行しません。ファイルを設置して再起動した後、設定画面でGoogle認証し、同期をオンにしてください。同期先のFirestore Rules・許可リストとGoogle認証の設定、同じFirebaseプロジェクトに接続するWeb UIも別途必要です。デスクトップの設定だけではWeb UIの接続先は変わりません。
 
 ### OAuthクライアントシークレットの配布と復旧
 
 クライアントシークレットの用途は、WindowsアプリでのGoogle認証コードの交換とトークン更新です。Remote Agentは取得したGoogleアクセストークンでFirebase Authenticationへログインし、Firestoreを通じてWeb UIと同期します。シークレット自体をWeb UIへ渡したり、Firestoreの同期先を決めたりするためのものではありません。
 
-`.env` はGit管理外ですが、Remote同期対応のビルドには、その値を含む `remote-oauth.json` が同梱されます。その配布ZIPをGitHub Releaseへ公開すると、ダウンロードした人は設定値を取得できます。「Gitに含まれない」ことは「配布物にも含まれない」ことを意味しません。
+具体的な `cloud-sync.json` はGitへ登録しません。ただし、そのファイルを明示指定して同梱した配布ZIPをGitHub Releaseへ公開すると、ダウンロードした人は設定値を取得できます。「Gitに含まれない」ことは「配布物にも含まれない」ことを意味しません。旧方式で作成した `remote-oauth.json` 入りのリリースも同様です。
 
 必ず「デスクトップアプリ」用のOAuthクライアントを使います。Googleもインストール型アプリはクライアントシークレットを秘密に保てないことを前提にしています。この設定は、ユーザー個別のRefresh Tokenやサーバー用秘密鍵とは区別します。それらを配布物へ同梱してはいけません。すべてのアプリ・認証方式でシークレットの同梱が必要という意味でもありません。
 
 紛失時は、対象OAuthクライアントを管理するGCP権限があれば、同じクライアントIDに新しいシークレットを発行して復旧できます。OAuthクライアントそのものを削除・再作成する操作とは区別してください。
 
 1. Google Cloud Consoleの「Google Auth Platform → クライアント」で、対象のデスクトップ用OAuthクライアントに新しいシークレットを追加します。値は安全に保存し、会話やログへ貼り付けません。
-2. Git管理外 `.env` の `GOOGLE_OAUTH_CLIENT_SECRET` を更新します。同じOAuthクライアントならクライアントIDは維持します。
-3. 新しい設定でWindowsクライアントを再ビルド・配置し、配布している場合は配布物も更新します。GCP側で再発行しただけでは、既存のインストール先の設定は更新されません。
+2. 実行用フォルダーの `cloud-sync.json` の `oauth.clientSecret` を更新します。同じOAuthクライアントならクライアントIDは維持します。
+3. アプリを再起動します。新方式では設定ファイルの変更だけなら再ビルドは不要です。設定を同梱して配布している場合は、配布物と各インストール先の設定も更新します。GCP側で再発行しただけでは、既存のインストール先の設定は更新されません。
 4. 新版でログインとトークン更新・クラウド同期を確認します。旧シークレットが有効な通常の移行では、旧版から新版へ移行してから旧シークレットを無効化・削除します。無効化後、旧設定のアプリは認証・トークン更新ができなくなります。
 
 シークレットを紛失・更新しても、それ自体でFirestoreの同期データが削除されることはありません。保存済みRefresh Tokenが無効な場合は再認証が必要です。
@@ -89,7 +106,7 @@ GOOGLE_OAUTH_CLIENT_SECRET="YOUR_DESKTOP_CLIENT_SECRET"
 
 ## Remote Agentの起動
 
-対象PCのWSLでソースから手動起動する場合は、Remote AgentはGoogle認証専用です。アクセストークンを環境変数へ設定して起動します。`start:agent` は配布時と同じAgentバンドルを生成してから起動します。通常はWindowsアプリの「Remote接続」から同梱版を起動してください。
+対象PCのWSLでソースから手動起動する場合は、Remote AgentはGoogle認証専用です。アクセストークンを `CODEX_LITE_REMOTE_GOOGLE_ACCESS_TOKEN`、Firebase接続設定のJSONを `CODEX_LITE_REMOTE_FIREBASE_CONFIG` で実行時に渡します。`start:agent` は配布時と同じAgentバンドルを生成してから起動します。標準入力が閉じるとAgentは終了します。通常はWindowsアプリの設定画面から同梱版を起動してください。
 
 ```bash
 cd remote
