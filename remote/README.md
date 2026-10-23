@@ -85,6 +85,8 @@ Google Cloud ConsoleでOAuthクライアントを作成するときは、アプ�
 
 旧版から移行するときは、管理者が旧Firebase設定とOAuth設定を新しい `cloud-sync.json` の各項目へ移し、`enabled` を `true` にします。これは自動移行しません。ファイルを設置して再起動した後、設定画面でGoogle認証し、同期をオンにしてください。同期先のFirestore Rules・許可リストとGoogle認証の設定、同じFirebaseプロジェクトに接続するWeb UIも別途必要です。デスクトップの設定だけではWeb UIの接続先は変わりません。
 
+管理者が移行を明示的に行う場合は、Windows PowerShellで `scripts/migrate-cloud-sync-config.ps1` を実行できます。この専用スクリプトだけが旧 `.env` とWeb用Firebase設定を読み、デスクトップの実行用フォルダーへ設定ファイルを作成します。設定値は出力せず、既存の `cloud-sync.json` がある場合は上書きせず停止します。通常のビルド・起動処理からは呼びません。
+
 ### OAuthクライアントシークレットの配布と復旧
 
 クライアントシークレットの用途は、WindowsアプリでのGoogle認証コードの交換とトークン更新です。Remote Agentは取得したGoogleアクセストークンでFirebase Authenticationへログインし、Firestoreを通じてWeb UIと同期します。シークレット自体をWeb UIへ渡したり、Firestoreの同期先を決めたりするためのものではありません。
