@@ -24,6 +24,7 @@ from .app_server import AppServerClientPool
 from .app_services import AppServerRunService, AppServerRuntimeSettings, AppServerThreadService, AppServerUsageService
 from .config import Config, load_config
 from .daemon_instance import DaemonInstance
+from .daemon_log import RedirectedDaemonLog, daemon_logging_config
 from .codex_state import CodexStateService
 from .deepseek import deepseek_model_ids, deepseek_reasoning_efforts, model_provider_for_model
 from .db import Database
@@ -1075,7 +1076,7 @@ def _serve_daemon(cfg: Config, instance: DaemonInstance) -> None:
     host, port = sock.getsockname()[:2]
 
     app = create_app(cfg)
-    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, reload=False))
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, reload=False, log_config=daemon_logging_config()))
     app.state.server = server
     endpoint_path = cfg.app_data_dir / "daemon-endpoint.json"
     endpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1091,23 +1092,17 @@ def _serve_daemon(cfg: Config, instance: DaemonInstance) -> None:
     # A shared owner may outlive the desktop that launched it. Never leave log
     # writers attached to that desktop's pipes, which can close or fill up.
     log_path = cfg.app_data_dir / "daemon.log"
-    log_fd = os.open(log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
-    try:
-        os.fchmod(log_fd, 0o600)
-        print(f"codex-lite-daemon-log: {log_path}", file=sys.stderr, flush=True)
-        os.dup2(log_fd, sys.stdout.fileno())
-        os.dup2(log_fd, sys.stderr.fileno())
-    finally:
-        os.close(log_fd)
-    try:
-        server.run(sockets=[sock])
-    finally:
+    print(f"codex-lite-daemon-log: {log_path}", file=sys.stderr, flush=True)
+    with RedirectedDaemonLog(log_path, lambda: setattr(server, "should_exit", True)):
         try:
-            current = json.loads(endpoint_path.read_text(encoding="utf-8"))
-            if current.get("pid") == os.getpid():
-                endpoint_path.unlink(missing_ok=True)
-        except (OSError, json.JSONDecodeError):
-            pass
+            server.run(sockets=[sock])
+        finally:
+            try:
+                current = json.loads(endpoint_path.read_text(encoding="utf-8"))
+                if current.get("pid") == os.getpid():
+                    endpoint_path.unlink(missing_ok=True)
+            except (OSError, json.JSONDecodeError):
+                pass
 
 
 def _release_client_on_stdin_eof(instance: DaemonInstance) -> None:

@@ -113,7 +113,7 @@ pip install -e '.[dev]'
 CODEX_LITE_PORT=0 python -m codex_lite_daemon.main
 ```
 
-空きポートで起動すると、標準出力へ次の形式で待受情報を1行出力します。ログは標準エラーへ出力します。
+空きポートで起動すると、標準出力へ次の形式で待受情報を1行出力します。以後のstdout/stderrはWSLの `~/.local/share/codex-lite/daemon.log` へ保存します。現行10MiB・退避 `daemon.previous.log` 10MiBの1世代、合計20MiB以内でローテーションし、巨大な既存ログも起動時に末尾だけを退避して縮小します。正常なHTTPアクセスログは保存せず、4xx/5xx・警告・例外は保持します。
 
 ```json
 {"event":"ready","host":"127.0.0.1","port":41237}
