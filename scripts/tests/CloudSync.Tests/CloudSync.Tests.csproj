@@ -9,6 +9,7 @@
     <Compile Include="../../../windows/CodexLite/RemoteSyncFeature.cs" Link="RemoteSyncFeature.cs" />
     <Compile Include="../../../windows/CodexLite/Services/RemoteAgentClient.cs" Link="RemoteAgentClient.cs" />
     <Compile Include="../../../windows/CodexLite/Services/GoogleOAuthClient.cs" Link="GoogleOAuthClient.cs" />
+    <Compile Include="../../../windows/CodexLite/Services/SubmissionReceiptTracker.cs" Link="SubmissionReceiptTracker.cs" />
     <Reference Include="Microsoft.CodeAnalysis" HintPath="$(MSBuildSDKsPath)/../Roslyn/bincore/Microsoft.CodeAnalysis.dll" />
     <Reference Include="Microsoft.CodeAnalysis.CSharp" HintPath="$(MSBuildSDKsPath)/../Roslyn/bincore/Microsoft.CodeAnalysis.CSharp.dll" />
   </ItemGroup>

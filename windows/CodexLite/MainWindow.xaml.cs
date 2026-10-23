@@ -80,14 +80,18 @@ public partial class MainWindow : Window
         public string Content { get; }
         public IReadOnlyList<MessageAttachmentDto> Attachments { get; }
         public string? Operation { get; private set; }
+        public SubmissionReceiptTracker Receipt { get; } = new();
+        public bool NeedsReceiptConfirmation => Receipt.NeedsConfirmation;
         public string State { get; private set; } = "queued";
         public string StateLabel => State switch
         {
             "sending" => "送信中",
-            "failed" => "送信エラー",
+            "confirming" => "受付確認中",
+            "failed" => NeedsReceiptConfirmation ? "受付未確認" : "送信エラー",
             _ => "送信待ち",
         };
         public string AttachmentLabel => Attachments.Count > 0 ? $"添付 {Attachments.Count}件" : "";
+        public string RetryLabel => NeedsReceiptConfirmation ? "受付確認" : "再送";
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -110,6 +114,7 @@ public partial class MainWindow : Window
             State = state;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(State)));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StateLabel)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RetryLabel)));
         }
 
         public string ChooseOperation(bool hasActiveRun)
@@ -7618,6 +7623,7 @@ public partial class MainWindow : Window
                     return;
                 }
                 var submission = _queuedComposerSubmissions[index];
+                if (!submission.Receipt.CanCheck(DateTimeOffset.UtcNow)) return;
                 try
                 {
                     if (!string.Equals(_selectedProject?.Id, submission.ProjectId, StringComparison.Ordinal)
@@ -7628,7 +7634,7 @@ public partial class MainWindow : Window
                     submission.SetState("sending");
                     StatusText.Text = $"送信キューを処理中 | 残り {_queuedComposerSubmissions.Count}件";
                     var operation = submission.ChooseOperation(SelectedActiveRun() is not null);
-                    var accepted = operation == "steer"
+                    var accepted = operation == "steer" && !submission.NeedsReceiptConfirmation
                         ? await SteerCurrentRunAsync(submission)
                         : await SendCurrentMessageAsync(submission);
                     if (!accepted)
@@ -7691,8 +7697,9 @@ public partial class MainWindow : Window
         {
             return;
         }
+        submission.Receipt.ResetChecks();
         submission.SetState("queued");
-        StatusText.Text = "再送待ち";
+        StatusText.Text = submission.NeedsReceiptConfirmation ? "受付確認待ち" : "再送待ち";
         _sendReadinessTimer.Start();
         UpdateCommandButtonState();
         UpdateProjectRunningIndicators();
@@ -7946,7 +7953,18 @@ public partial class MainWindow : Window
             MessagePostResult? result;
             using (EnterUiPhase("SendCurrentMessage/PostMessage"))
             {
-                result = await _client.SendMessageAsync(project.Id, chat.Id, content, attachments, runToken, submission.RequestId);
+                if (submission.NeedsReceiptConfirmation) submission.SetState("confirming");
+                result = await submission.Receipt.ResolveAsync(
+                    () => _client.SendMessageAsync(project.Id, chat.Id, content, attachments, runToken, submission.RequestId),
+                    () => _client.GetSubmissionReceiptAsync(project.Id, chat.Id, submission.RequestId, runToken),
+                    ex =>
+                    {
+                        var uncertain = (ex is OperationCanceledException && !runToken.IsCancellationRequested)
+                            || ex is System.Net.Http.HttpRequestException or IOException or JsonException
+                            || (ex is DaemonRequestException requestError && (int)requestError.StatusCode >= 500);
+                        if (uncertain) WritePerformanceLog("send-receipt-pending", $"requestId={submission.RequestId} type={ex.GetType().Name} message={LogText(ex.Message)}");
+                        return uncertain;
+                    }, DateTimeOffset.UtcNow);
             }
             if (result is not null)
             {
@@ -7997,7 +8015,12 @@ public partial class MainWindow : Window
             }
             else
             {
-                submission.SetState("failed");
+                submission.SetState(submission.NeedsReceiptConfirmation && !submission.Receipt.Exhausted ? "confirming" : "failed");
+                if (submission.NeedsReceiptConfirmation)
+                {
+                    StatusText.Text = submission.Receipt.Exhausted ? "受付未確認 | 受付確認ボタンで照合を再開できます" : "受付確認中（再送せず確認しています）";
+                    ShowPendingRunProgressForChat(chat.Id, StatusText.Text);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -8005,19 +8028,20 @@ public partial class MainWindow : Window
             WritePerformanceLog("send-cancelled", $"runAccepted={runAccepted}");
             if (!runAccepted)
             {
-                submission.SetState("failed");
+                submission.SetState(submission.NeedsReceiptConfirmation && !submission.Receipt.Exhausted ? "confirming" : "failed");
             }
-            ReplaceMessageContentIfWaiting(chat.Id, assistantMessageId, "キャンセルしました");
-            StatusText.Text = "キャンセルしました";
-            ShowPendingRunProgressForChat(chat.Id, "キャンセルしました");
+            var cancellationStatus = submission.NeedsReceiptConfirmation ? submission.StateLabel : "キャンセルしました";
+            ReplaceMessageContentIfWaiting(chat.Id, assistantMessageId, cancellationStatus);
+            StatusText.Text = cancellationStatus;
+            ShowPendingRunProgressForChat(chat.Id, cancellationStatus);
         }
         catch (Exception ex)
         {
             WritePerformanceLog("send-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
-            submission.SetState("failed");
+            submission.SetState(submission.NeedsReceiptConfirmation && !submission.Receipt.Exhausted ? "confirming" : "failed");
             ReplaceMessageContentIfWaiting(chat.Id, assistantMessageId, $"send error | {ShortError(ex)}");
-            StatusText.Text = $"send error | {ShortError(ex)}";
-            ShowPendingRunProgressForChat(chat.Id, $"送信エラー | {ShortError(ex)}");
+            StatusText.Text = $"{submission.StateLabel} | {ShortError(ex)}";
+            ShowPendingRunProgressForChat(chat.Id, StatusText.Text);
         }
         finally
         {
@@ -8026,7 +8050,7 @@ public partial class MainWindow : Window
             {
                 EndRunActivity(chat.Id);
                 runCts.Dispose();
-                CancelButton.IsEnabled = false;
+                CancelButton.IsEnabled = SelectedActiveRun() is not null;
             }
             UpdateCommandButtonState();
         }
@@ -8171,7 +8195,22 @@ public partial class MainWindow : Window
         {
             SendButton.IsEnabled = false;
             ShowRunProgressForChat(chat.Id, "追加指示を送信中");
-            var result = await _client.SteerRunAsync(runId, content, attachments);
+            var result = await submission.Receipt.ResolveAsync<MessagePostResult>(
+                async () =>
+                {
+                    var accepted = await _client.SteerRunAsync(runId, content, attachments, requestId: submission.RequestId);
+                    return accepted is null ? null : new MessagePostResult(accepted.MessageId ?? "", accepted.Id, accepted.CreatedAt, accepted.Status);
+                },
+                () => _client.GetSubmissionReceiptAsync(activeRun.ProjectId, chat.Id, submission.RequestId),
+                ex => ex is OperationCanceledException or System.Net.Http.HttpRequestException or IOException or JsonException
+                    || (ex is DaemonRequestException requestError && (int)requestError.StatusCode >= 500),
+                DateTimeOffset.UtcNow);
+            if (result is null && submission.NeedsReceiptConfirmation)
+            {
+                submission.SetState("confirming");
+                ShowRunProgressForChat(chat.Id, "追加指示の受付確認中（再送せず確認しています）");
+                return false;
+            }
             if (result is null || string.IsNullOrWhiteSpace(result.MessageId))
             {
                 throw new InvalidOperationException("追加指示の保存済みメッセージIDを取得できませんでした。");
@@ -8276,6 +8315,27 @@ public partial class MainWindow : Window
                     await System.Windows.Threading.Dispatcher.Yield(DispatcherPriority.Background);
                 lastEventAt = DateTimeOffset.Now;
                 lastEventName = item.Event;
+                if (item.Event == "instructions")
+                {
+                    using var document = JsonDocument.Parse(item.Data);
+                    foreach (var value in document.RootElement.GetProperty("messages").EnumerateArray())
+                    {
+                        var message = value.Deserialize<MessageDto>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+                        if (message is not null && message.ChatId == chatId && message.Role == "user")
+                        {
+                            AppendMessageForChat(projectId, chatId, message, scrollToEnd: false);
+                            if (value.TryGetProperty("requestId", out var requestId) && requestId.ValueKind == JsonValueKind.String)
+                            {
+                                foreach (var queued in _queuedComposerSubmissions.Where(queued =>
+                                    queued.ProjectId == projectId && queued.ChatId == chatId
+                                    && queued.RequestId == requestId.GetString()).ToArray())
+                                    RemoveQueuedComposerSubmission(queued);
+                            }
+                        }
+                    }
+                    if (item.Sequence > 0) _lastRunEventSequenceByRun[runId] = item.Sequence;
+                    continue;
+                }
                 if (item.Event == "approval")
                 {
                     FlushReasoningProgress(runId);

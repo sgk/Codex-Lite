@@ -576,6 +576,28 @@ class MessageService:
         )
         return [str(row["content"]).strip() for row in reversed(rows) if str(row["content"]).strip()]
 
+    def get_submission_receipt(self, project_id: str, chat_id: str, request_id: str) -> dict | None:
+        self.chats.get_chat_row(project_id, chat_id)
+        row = self.db.fetchone(
+            """SELECT s.*, r.status FROM submission_receipts s
+               JOIN messages m ON m.id = s.message_id
+               JOIN runs r ON r.id = s.run_id
+               WHERE s.request_id = ? AND m.chat_id = ?""",
+            (request_id, chat_id),
+        )
+        if row is None:
+            return None
+        return {"messageId": row["message_id"], "runId": row["run_id"],
+                "createdAt": row["created_at"], "status": row["status"], "eventSequence": 0}
+
+    def list_run_instructions(self, run_id: str) -> list[dict]:
+        return [message_out(row) | {"requestId": row["request_id"]} for row in self.db.fetchall(
+            """SELECT m.*, s.request_id FROM messages m
+               LEFT JOIN submission_receipts s ON s.message_id = m.id
+               WHERE m.run_id = ? AND m.role = 'user' AND m.kind = 'instruction' ORDER BY m.rowid""",
+            (run_id,),
+        )]
+
     def get_run_conclusion(self, run_id: str) -> dict | None:
         run = self.db.fetchone("SELECT id FROM runs WHERE id = ?", (run_id,))
         if run is None:

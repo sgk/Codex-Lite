@@ -446,6 +446,7 @@ class AppServerActiveRun:
     last_reconnect_message: str | None = None
     lease_released: bool = False
     replacing_idle_turn: bool = False
+    steer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     notification_queue: asyncio.Queue[AppServerNotification] | None = field(default=None, repr=False)
     pending_approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
     watcher_alive: bool = False
@@ -1108,10 +1109,26 @@ class AppServerRunService:
             await asyncio.sleep(CANCEL_IDLE_POLL_SECONDS)
         raise asyncio.TimeoutError
 
-    async def steer_run(self, run_id: str, content: str, attachments: list[dict[str, Any]] | None = None) -> dict:
+    async def steer_run(self, run_id: str, content: str, attachments: list[dict[str, Any]] | None = None, request_id: str | None = None) -> dict:
         run = self.runs.get(run_id)
         if run is None:
             raise AppError("steer_failed", "Run is not active.", 409)
+        async with run.steer_lock:
+            return await self._steer_run_reserved(run_id, content, attachments, request_id)
+
+    async def _steer_run_reserved(self, run_id: str, content: str, attachments: list[dict[str, Any]] | None, request_id: str | None) -> dict:
+        run = self.runs.get(run_id)
+        if run is None:
+            raise AppError("steer_failed", "Run is not active.", 409)
+        payload_hash = hashlib.sha256(json.dumps(["steer", run_id, content, attachments or []], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        if request_id is not None:
+            if not request_id or len(request_id) > 200:
+                raise AppError("invalid_request_id", "Invalid submission request ID.", 400)
+            receipt = self.chats.db.fetchone("SELECT * FROM submission_receipts WHERE request_id = ?", (request_id,))
+            if receipt is not None:
+                if receipt["payload_hash"] != payload_hash:
+                    raise AppError("request_id_conflict", "Request ID was already used for different content.", 409)
+                return _run_out(run_id, run) | {"messageId": receipt["message_id"], "createdAt": receipt["created_at"]}
         if run.status != "running":
             raise AppError("steer_run_finished", "Run has already finished.", 409)
         clean_content = content.strip()
@@ -1182,14 +1199,18 @@ class AppServerRunService:
                         "summary": "The previous turn had already completed; the instruction was started as the next turn.",
                     },
                 )
-            user_message = self.messages.insert_message(
-                run.chat_id,
-                "user",
-                _content_with_attachment_summary(clean_content, attachments or []),
-                run_id=run_id,
-                kind="instruction",
-                created_at=accepted_at,
-            )
+            with self.chats.db.transaction():
+                user_message = self.messages.insert_message(
+                    run.chat_id,
+                    "user",
+                    _content_with_attachment_summary(clean_content, attachments or []),
+                    run_id=run_id,
+                    kind="instruction",
+                    created_at=accepted_at,
+                )
+                if request_id is not None:
+                    self.chats.db.execute("INSERT INTO submission_receipts(request_id, payload_hash, run_id, message_id, created_at) VALUES (?, ?, ?, ?, ?)", (request_id, payload_hash, run_id, user_message["id"], accepted_at))
+            await self.events.publish(run_id, "instructions", {"messages": [user_message | {"requestId": request_id}]})
             await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "additional instructions sent"})
             result = _run_out(run_id, run)
             result["messageId"] = user_message["id"]
@@ -1227,6 +1248,14 @@ class AppServerRunService:
         return _run_out(run_id, run)
 
     async def stream_events(self, run_id: str, after_sequence: int | None = None) -> AsyncIterator[str]:
+        # Canonical instructions precede every output replay, including reconnects
+        # that resume after the original acceptance event. This is not a journal
+        # event and must not advance the replay cursor.
+        self.get_run(run_id)
+        instructions = await asyncio.to_thread(self.messages.list_run_instructions, run_id)
+        if instructions:
+            snapshot = {"messages": instructions, "occurredAt": instructions[-1]["createdAt"]}
+            yield f"event: instructions\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
         if run_id not in self.runs:
             row = self.db.fetchone("SELECT * FROM runs WHERE id = ?", (run_id,)) if self.db is not None else None
             if row is None:

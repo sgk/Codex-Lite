@@ -178,6 +178,8 @@ CREATE TABLE IF NOT EXISTS remote_tasks (
 
 CREATE INDEX IF NOT EXISTS idx_chats_project ON chats(project_id);
 CREATE INDEX IF NOT EXISTS idx_messages_chat_created ON messages(chat_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_run ON messages(run_id);
+CREATE INDEX IF NOT EXISTS idx_submission_receipts_message ON submission_receipts(message_id);
 CREATE INDEX IF NOT EXISTS idx_chat_provider_threads_thread ON chat_provider_threads(provider, thread_id);
 CREATE INDEX IF NOT EXISTS idx_model_reasoning_history_used ON model_reasoning_history(used_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_chat_started ON runs(chat_id, started_at);

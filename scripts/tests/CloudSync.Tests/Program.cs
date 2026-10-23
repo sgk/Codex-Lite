@@ -14,6 +14,47 @@ void Check(bool value, string label)
 }
 try
 {
+    var receipt = new CodexLite.Services.SubmissionReceiptTracker();
+    var now = DateTimeOffset.UtcNow;
+    var posts = 0;
+    var reads = 0;
+    Task<string?> LostResponse() { posts++; throw new TaskCanceledException("response lost after admission"); }
+    Task<string?> ReadReceipt() { reads++; return Task.FromResult<string?>(reads >= 3 ? "accepted-run" : null); }
+    bool Uncertain(Exception ex) => ex is TaskCanceledException;
+    Check(await receipt.ResolveAsync(LostResponse, ReadReceipt, Uncertain, now) is null,
+        "lost response remains uncertain, not rejected");
+    Check(receipt.NeedsConfirmation && posts == 1 && reads == 0, "only one POST before confirmation");
+    Check(!receipt.CanCheck(now.AddSeconds(1)) && receipt.CanCheck(now.AddSeconds(2)), "receipt reads are throttled");
+    var earlyCheckRejected = false;
+    try { await receipt.ResolveAsync(LostResponse, ReadReceipt, Uncertain, now.AddSeconds(1)); }
+    catch (InvalidOperationException) { earlyCheckRejected = true; }
+    Check(earlyCheckRejected && posts == 1 && reads == 0, "early confirmation cannot bypass throttling or resend");
+    Check(await receipt.ResolveAsync(LostResponse, ReadReceipt, Uncertain, now.AddSeconds(2)) is null,
+        "missing receipt is not proof of rejection");
+    Check(await receipt.ResolveAsync(LostResponse, ReadReceipt, Uncertain, now.AddSeconds(7)) is null,
+        "late admission still uses read-only confirmation");
+    Check(await receipt.ResolveAsync(LostResponse, ReadReceipt, Uncertain, now.AddSeconds(12)) == "accepted-run",
+        "late acceptance resolves to the original run");
+    Check(posts == 1 && reads == 3, "confirmation never resends content");
+    var unavailable = new CodexLite.Services.SubmissionReceiptTracker();
+    await unavailable.ResolveAsync<string>(() => Task.FromResult<string?>(null), ReadReceipt, Uncertain, now);
+    for (var i = 0; i < 12; i++)
+    {
+        try
+        {
+            await unavailable.ResolveAsync<string>(LostResponse, () => throw new IOException("offline"), Uncertain, now.AddSeconds(2 + i * 5));
+        }
+        catch (IOException) { }
+    }
+    Check(unavailable.Exhausted && !unavailable.CanCheck(now.AddHours(1)), "receipt errors have a bounded retry count");
+    unavailable.ResetChecks();
+    Check(await unavailable.ResolveAsync(LostResponse, ReadReceipt, Uncertain, now.AddHours(1)) == "accepted-run"
+        && posts == 1, "manual confirmation does not return to POST");
+    var rejected = new CodexLite.Services.SubmissionReceiptTracker();
+    var rejectedThrown = false;
+    try { await rejected.ResolveAsync<string>(() => throw new InvalidOperationException("explicit rejection"), ReadReceipt, Uncertain, now); }
+    catch (InvalidOperationException) { rejectedThrown = true; }
+    Check(rejectedThrown && !rejected.NeedsConfirmation, "explicit rejection remains a real send error");
     var path = Path.Combine(scratch, "cloud-sync.json");
     Check(CloudSyncConfiguration.Load(path) is null, "missing config disables sync");
     File.WriteAllText(path, "{\"enabled\":false}");
@@ -43,7 +84,7 @@ try
         catch (Exception ex) when (ex is JsonException or InvalidOperationException) { failed = true; }
         Check(failed, "malformed config rejected");
     }
-    foreach (var relative in new[] { "MainWindow.xaml.cs", "RemoteSyncFeature.cs", "Services/GoogleOAuthClient.cs", "Services/RemoteAgentClient.cs" })
+    foreach (var relative in new[] { "MainWindow.xaml.cs", "RemoteSyncFeature.cs", "Services/GoogleOAuthClient.cs", "Services/RemoteAgentClient.cs", "Services/DaemonClient.cs" })
     {
         var source = File.ReadAllText(Path.Combine(root, "windows/CodexLite", relative));
         var errors = CSharpSyntaxTree.ParseText(source).GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToArray();

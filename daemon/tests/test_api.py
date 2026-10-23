@@ -3083,12 +3083,23 @@ async def test_app_server_run_keeps_active_turn_id_after_steer(linux_tmp_path: P
     transcripts = TranscriptImportService(cfg, projects, chats)
     app_server = SteerReturnsTurnAppServer()
     threads = AppServerThreadService(projects, chats, messages, transcripts, app_server, make_runtime_settings())  # type: ignore[arg-type]
-    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings())  # type: ignore[arg-type]
+    runs = AppServerRunService(projects, threads, messages, app_server, max_concurrent_runs=1, settings=make_runtime_settings(), db=db)  # type: ignore[arg-type]
 
     project_id = projects.create_project(str(project_dir))["id"]
     chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
     result = await runs.start_message_run(project_id, chat_id, "hello")
-    await runs.steer_run(result["runId"], "please continue")
+    first, duplicate = await asyncio.gather(
+        runs.steer_run(result["runId"], "please continue", request_id="steer-1"),
+        runs.steer_run(result["runId"], "please continue", request_id="steer-1"),
+    )
+    assert first["messageId"] == duplicate["messageId"]
+    assert len([entry for entry in app_server.requests if entry[0] == "turn/steer"]) == 1
+    receipt = messages.get_submission_receipt(project_id, chat_id, "steer-1")
+    assert receipt["messageId"] == first["messageId"]
+    assert receipt["runId"] == result["runId"]
+    with pytest.raises(AppError) as conflict:
+        await runs.steer_run(result["runId"], "different", request_id="steer-1")
+    assert conflict.value.code == "request_id_conflict"
     await runs.steer_run(result["runId"], "and keep going")
     assert app_server.requests[-1] == (
         "turn/steer",
@@ -3107,6 +3118,9 @@ async def test_app_server_run_keeps_active_turn_id_after_steer(linux_tmp_path: P
             break
 
     assert any("continued" in event for event in events)
+    snapshot = json.loads(events[0].split("data: ", 1)[1])
+    assert [message["content"] for message in snapshot["messages"]] == ["hello", "please continue", "and keep going"]
+    assert len([event for event in events if "event: instructions" in event]) == 3
     assert runs.get_run(result["runId"])["turnId"] == "turn_1"
     db.close()
 
@@ -3454,11 +3468,14 @@ async def test_app_server_event_reconnect_starts_after_snapshot(linux_tmp_path: 
     events = []
     async for event in runs.stream_events(result["runId"], after_sequence=snapshot):
         events.append(event)
-        break
+        if "event: instructions" not in event:
+            break
 
-    assert len(events) == 1
-    assert "event: progress" in events[0]
-    assert "event: status" not in events[0]
+    assert len(events) == 2
+    assert "event: instructions" in events[0]
+    assert not events[0].startswith("id:")
+    assert "event: progress" in events[1]
+    assert "event: status" not in events[1]
     db.close()
 
 
@@ -3539,6 +3556,7 @@ async def test_submission_is_saved_before_slow_start_and_deduplicated(linux_tmp_
         assert messages.list_messages(project_id, chat_id) == []
         assert db.fetchall("SELECT id FROM runs") == []
         assert not runs._submission_tasks
+        assert messages.get_submission_receipt(project_id, chat_id, "request-1") is None
         receipt = await asyncio.wait_for(runs.submit_message(project_id, chat_id, "hello", request_id="request-1"), 1)
         await asyncio.wait_for(server.turn_start_entered.wait(), 1)
         assert receipt["status"] == "queued"
@@ -3548,6 +3566,8 @@ async def test_submission_is_saved_before_slow_start_and_deduplicated(linux_tmp_
         assert stored[0]["createdAt"] == receipt["createdAt"]
         assert stored[0]["runId"] == receipt["runId"]
         assert await runs.submit_message(project_id, chat_id, "hello", request_id="request-1") == receipt
+        assert messages.get_submission_receipt(project_id, chat_id, "request-1") == receipt
+        assert len(messages.list_messages(project_id, chat_id)) == 1
         with pytest.raises(AppError) as conflict:
             await runs.submit_message(project_id, chat_id, "different", request_id="request-1")
         assert conflict.value.code == "request_id_conflict"
@@ -3555,6 +3575,7 @@ async def test_submission_is_saved_before_slow_start_and_deduplicated(linux_tmp_
             await runs.submit_message(project_id, chat_id, "second")
         assert active.value.code == "run_already_active_in_chat"
         second_chat = chats.create_chat(project_id, "second")["id"]
+        assert messages.get_submission_receipt(project_id, second_chat, "request-1") is None
         second = await asyncio.wait_for(runs.submit_message(project_id, second_chat, "independent"), 1)
         assert second["status"] == "queued"
         assert second["runId"] != receipt["runId"]
@@ -3568,6 +3589,18 @@ async def test_submission_is_saved_before_slow_start_and_deduplicated(linux_tmp_
         journal = runs.events.replay_history(receipt["runId"])
         assert [event["event"] for event in journal] == ["status", "error"]
         assert all(event["data"]["occurredAt"] >= receipt["createdAt"] for event in journal)
+        assert messages.get_submission_receipt(project_id, chat_id, "request-1")["status"] == "cancelled"
+        # Even when all status/output events have already been acknowledged,
+        # a new desktop subscriber receives the canonical human instruction.
+        stream = runs.stream_events(receipt["runId"], after_sequence=journal[-1]["sequence"])
+        first = await anext(stream)
+        assert first.startswith("event: instructions\n")
+        instruction = json.loads(first.split("data: ", 1)[1])["messages"][0]
+        assert instruction["id"] == receipt["messageId"]
+        assert instruction["requestId"] == "request-1"
+        assert instruction["createdAt"] == receipt["createdAt"]
+        assert instruction["content"] == "hello"
+        await stream.aclose()
     finally:
         await runs.close_submissions()
         await runs.events.flush()
@@ -4017,6 +4050,34 @@ async def test_app_server_run_does_not_replace_missing_imported_thread(linux_tmp
         ("turn/start", {"threadId": "old_thread", "cwd": str(project_dir), "input": [{"type": "text", "text": "hello"}]}),
     ]
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_receipt_api_is_read_only_and_chat_scoped(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    app = create_app(make_test_config(linux_tmp_path))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        project_id = (await client.post("/projects", json={"path": str(project_dir)})).json()["id"]
+        chat_id = (await client.post(f"/projects/{project_id}/chats", json={"title": "receipt"})).json()["id"]
+        other_chat = (await client.post(f"/projects/{project_id}/chats", json={"title": "other"})).json()["id"]
+        path = f"/projects/{project_id}/chats/{chat_id}/submissions/request-1"
+        assert (await client.get(path)).json() is None
+        # Seed the fake runner's receipt; no provider/cloud calls are required.
+        result = (await client.post(f"/projects/{project_id}/chats/{chat_id}/messages", json={"content": "hello"})).json()
+        await asyncio.wait_for(app.state.runs.active_runs[result["runId"]].task, 3)
+        db = app.state.db
+        row = db.fetchone("SELECT created_at FROM messages WHERE id = ?", (result["messageId"],))
+        db.execute("INSERT INTO submission_receipts VALUES (?, ?, ?, ?, ?)", ("request-1", "test-hash", result["runId"], result["messageId"], row["created_at"]))
+        before = db.fetchone("SELECT COUNT(*) AS count FROM messages")["count"]
+        for _ in range(3):
+            response = await client.get(path)
+            assert response.status_code == 200
+            assert response.json()["messageId"] == result["messageId"]
+            assert response.json()["createdAt"] == row["created_at"]
+        assert db.fetchone("SELECT COUNT(*) AS count FROM messages")["count"] == before
+        assert (await client.get(f"/projects/{project_id}/chats/{other_chat}/submissions/request-1")).json() is None
+        assert (await client.get(f"/projects/other/chats/{chat_id}/submissions/request-1")).status_code == 404
 
 
 @pytest.mark.asyncio

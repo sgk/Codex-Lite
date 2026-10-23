@@ -575,6 +575,9 @@ public sealed class DaemonClient
     public Task<MessagePostResult?> SendMessageAsync(string projectId, string chatId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default, string? requestId = null) =>
         PostAsync<MessagePostResult>($"/projects/{projectId}/chats/{chatId}/messages", new { content, requestId, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
 
+    public Task<MessagePostResult?> GetSubmissionReceiptAsync(string projectId, string chatId, string requestId, CancellationToken cancellationToken = default) =>
+        _http.GetFromJsonAsync<MessagePostResult>($"/projects/{projectId}/chats/{chatId}/submissions/{Uri.EscapeDataString(requestId)}", JsonOptions, cancellationToken);
+
     public Task<RunDto?> CancelRunAsync(string runId, CancellationToken cancellationToken = default) =>
         PostAsync<RunDto>($"/runs/{runId}/cancel", new { }, cancellationToken);
 
@@ -609,8 +612,8 @@ public sealed class DaemonClient
         return await _http.GetFromJsonAsync<List<RunDto>>(path, JsonOptions, cancellationToken) ?? [];
     }
 
-    public Task<RunDto?> SteerRunAsync(string runId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default) =>
-        PostAsync<RunDto>($"/runs/{runId}/steer", new { content, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
+    public Task<RunDto?> SteerRunAsync(string runId, string content, IReadOnlyList<MessageAttachmentDto>? attachments = null, CancellationToken cancellationToken = default, string? requestId = null) =>
+        PostAsync<RunDto>($"/runs/{runId}/steer", new { content, requestId, attachments = NormalizeAttachmentPaths(attachments) }, cancellationToken);
 
     public Task<RunDto?> ResolveRunApprovalAsync(string runId, string requestId, string decision, CancellationToken cancellationToken = default) =>
         PostAsync<RunDto>($"/runs/{runId}/approval", new { requestId, decision }, cancellationToken);

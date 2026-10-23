@@ -1030,7 +1030,7 @@
                                                     </Style.Triggers>
                                                 </Style>
                                             </StackPanel.Style>
-                                            <Button Content="再送" Click="RetryComposerSubmission_Click" MinWidth="48" Height="24" Margin="0,0,5,0"/>
+                                            <Button Content="{Binding RetryLabel}" Click="RetryComposerSubmission_Click" MinWidth="48" Height="24" Margin="0,0,5,0"/>
                                             <Button Content="削除" Click="DeleteComposerSubmission_Click" MinWidth="48" Height="24"/>
                                         </StackPanel>
                                     </Grid>
@@ -1382,7 +1382,7 @@
                                                     </Style.Triggers>
                                                 </Style>
                                             </StackPanel.Style>
-                                            <Button Content="再送" Click="RetryComposerSubmission_Click" MinWidth="48" Height="24" Margin="0,0,5,0"/>
+                                            <Button Content="{Binding RetryLabel}" Click="RetryComposerSubmission_Click" MinWidth="48" Height="24" Margin="0,0,5,0"/>
                                             <Button Content="削除" Click="DeleteComposerSubmission_Click" MinWidth="48" Height="24"/>
                                         </StackPanel>
                                     </Grid>

@@ -431,6 +431,10 @@ def create_app(config: Config | None = None) -> Starlette:
             result = runs.start_message_run(project_id, chat_id, _required_str(body, "content", min_length=1))
         return result
 
+    @get("/projects/{project_id}/chats/{chat_id}/submissions/{request_id}")
+    async def get_submission_receipt(project_id: str, chat_id: str, request_id: str) -> dict | None:
+        return await asyncio.to_thread(messages.get_submission_receipt, project_id, chat_id, request_id)
+
     @get("/runs/{run_id}")
     async def get_run(run_id: str) -> dict:
         if use_app_server:
@@ -505,7 +509,7 @@ def create_app(config: Config | None = None) -> Starlette:
     async def steer_run(run_id: str, body: dict) -> dict:
         if not use_app_server:
             raise AppError("steer_not_supported", "Steering is only supported with Codex app-server.", 409)
-        return await app_runs.steer_run(run_id, _required_str(body, "content", min_length=1), _attachments(body))
+        return await app_runs.steer_run(run_id, _required_str(body, "content", min_length=1), _attachments(body), _optional_str(body, "requestId"))
 
     @post("/runs/{run_id}/approval")
     async def resolve_run_approval(run_id: str, body: dict) -> dict:

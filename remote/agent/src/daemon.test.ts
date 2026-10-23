@@ -74,6 +74,14 @@ test("再生イベントでもデーモンの発生時刻と秒以下精度を�
   assert.throws(() => parseSseBlock('id: 13\nevent: progress\ndata: {"summary":"work"}'), /daemon timestamp/);
 });
 
+test("指示文スナップショットは再生カーソルを進めず元の保存時刻を保持する", () => {
+  const occurredAt = "2026-10-24T01:02:03.123456Z";
+  const event = parseSseBlock(`event: instructions\ndata: ${JSON.stringify({ occurredAt, messages: [{ id: "instruction-1", createdAt: occurredAt }] })}`);
+  assert.equal(event?.sequence, 0);
+  assert.equal(event?.event, "instructions");
+  assert.equal(event?.observedAt, occurredAt);
+});
+
 test("デスクトップRunの再接続では現在位置より後だけを購読する", () => {
   assert.equal(
     runEventsPath("run /1", 1195),
