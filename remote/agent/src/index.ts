@@ -26,6 +26,7 @@ import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon } from "./daemon.js";
 import { isCountableProgressEvent } from "./progress-sync.js";
 import { historyChunks } from "./history-chunks.js";
+import { latestMessageVersion } from "../../shared/src/unread.js";
 import { ConnectionHealth } from "./connection-health.js";
 import { watchParentInput } from "./parent-lifetime.js";
 
@@ -439,6 +440,7 @@ async function syncCatalog(): Promise<void> {
         recordsTotal += historySync.writes;
         recordsWritten += historySync.writes;
         data.historyItemCount = history.length;
+        data.latestMessageVersion = latestMessageVersion(history);
         data.historyChunkHashes = historySync.hashes;
         data.historyChunkIds = historySync.chunkIds;
         data.historyGeneration = historySync.generation;
@@ -564,7 +566,7 @@ async function loadCloudCatalogSnapshot(): Promise<CatalogProject[]> {
       status: textField(chat.data(), "status"),
       syncOrder: numberField(chat.data(), "syncOrder"),
       updatedAt: textField(chat.data(), "lastUpdatedAt") || undefined,
-      historyRevision: textField(chat.data(), "historyRevision") || undefined,
+      historyRevision: typeof chat.data().latestMessageVersion === "string" ? textField(chat.data(), "historyRevision") || undefined : undefined,
       hasAutomation: chat.data().hasAutomation === true,
       hasEnabledAutomation: chat.data().hasEnabledAutomation === true,
       historyChunkHashes: stringArrayField(chat.data(), "historyChunkHashes"),

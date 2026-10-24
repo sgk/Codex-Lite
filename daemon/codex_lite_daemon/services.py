@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Callable
 
 from .config import Config
@@ -176,7 +177,21 @@ class ChatService:
             """,
             (project_id,),
         )
-        return [chat_out(row) for row in _dedupe_chat_rows(rows)]
+        return [self._chat_with_message_version(row) for row in _dedupe_chat_rows(rows)]
+
+    def _chat_with_message_version(self, row: dict) -> dict:
+        result = chat_out(row)
+        latest = self.db.fetchone(
+            """SELECT id, created_at FROM messages
+               WHERE chat_id = ? AND role = 'assistant' AND kind IN ('work', 'conclusion')
+                 AND trim(content) <> ''
+               ORDER BY julianday(created_at) DESC, id DESC LIMIT 1""", (row["id"],),
+        )
+        result["latestMessageVersion"] = ""
+        if latest:
+            time = datetime.fromisoformat(latest["created_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+            result["latestMessageVersion"] = time.isoformat(timespec="milliseconds").replace("+00:00", "Z") + "\n" + latest["id"]
+        return result
 
     def get_chat_row(self, project_id: str, chat_id: str) -> dict:
         self.projects.get_project_row(project_id)
@@ -204,7 +219,7 @@ class ChatService:
         )
         if row is None:
             raise AppError("chat_not_found", "Chat was not found.", 404)
-        return chat_out(row)
+        return self._chat_with_message_version(row)
 
     def mark_resume_on_start(self, chat_ids: list[str]) -> int:
         now = utc_now()

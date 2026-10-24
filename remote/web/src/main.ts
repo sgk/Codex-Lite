@@ -17,7 +17,8 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 import type { FirebasePublicConfig, RemoteAttachment, RemoteOperation, RemoteTaskPayload } from "../../shared/src/types.js";
-import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection } from "./conversation-behavior.js";
+import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection } from "./conversation-behavior.js";
+import { messageReadState } from "../../shared/src/unread.js";
 import { renderMarkdown } from "./markdown.js";
 
 const buildInfo = document.getElementById("build-info");
@@ -721,7 +722,7 @@ function saveComposerDraft(context: string, content: string): void {
 }
 
 function chatReadStorageKey(uid: string): string {
-  return `codex-lite-remote-chat-read-v2:${uid}`;
+  return `codex-lite-remote-chat-read-v3:${uid}`;
 }
 
 function chatReadKey(deviceId: string, chatId: string): string {
@@ -758,14 +759,13 @@ function updateChatReadStates(deviceId: string, chats: Array<QueryDocumentSnapsh
   }
   for (const chat of chats) {
     const key = chatReadKey(deviceId, chat.id);
-    const version = completedRunVersion(chat.data().lastRun);
+    const version = chat.data().latestMessageVersion;
+    if (typeof version !== "string") continue;
     const previous = chatReadStates.get(key);
     const visible = document.visibilityState === "visible" && deviceId === elements.device.value && chat.id === elements.chat.value;
-    if (!previous) {
-      chatReadStates.set(key, { version, unread: false });
-      changed = true;
-    } else if (previous.version !== version || (visible && previous.unread)) {
-      chatReadStates.set(key, { version, unread: visible ? false : previous.unread || previous.version !== version });
+    const next = messageReadState(previous, version, visible);
+    if (!previous || previous.version !== next.version || previous.unread !== next.unread) {
+      chatReadStates.set(key, next);
       changed = true;
     }
   }

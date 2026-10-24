@@ -99,7 +99,8 @@ public sealed record ChatDto(
     bool CanContinue = true,
     string? ContinueDisabledReason = null,
     bool HasAutomation = false,
-    bool HasEnabledAutomation = false);
+    bool HasEnabledAutomation = false,
+    string LatestMessageVersion = "");
 
 public sealed record AutomationDto(
     string Id,

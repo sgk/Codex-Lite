@@ -217,6 +217,7 @@ public partial class MainWindow : Window
     private readonly CancellationTokenSource _remoteRunWatchCts = new();
     private readonly HashSet<string> _persistedExpandedProjectIds = new();
     private readonly HashSet<(string ProjectId, string ChatId)> _chatsWithUnloadedHistory = new();
+    private readonly Dictionary<string, string> _latestMessageVersionsByChat = new(StringComparer.Ordinal);
     private readonly List<string> _persistedProjectOrderIds = new();
     private readonly Dictionary<string, List<string>> _persistedChatOrderIdsByProject = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<string>> _composerHistoryByChat = new(StringComparer.Ordinal);
@@ -2147,9 +2148,12 @@ public partial class MainWindow : Window
             {
                 continue;
             }
-            var previousUpdatedAt = existingById.TryGetValue(chat.Id, out var existingChatItem)
-                ? existingChatItem.Chat.UpdatedAt
-                : null;
+            existingById.TryGetValue(chat.Id, out var existingChatItem);
+            _latestMessageVersionsByChat.TryGetValue(chat.Id, out var previousMessageVersion);
+            if (previousMessageVersion is null || string.CompareOrdinal(chat.LatestMessageVersion, previousMessageVersion) > 0)
+            {
+                _latestMessageVersionsByChat[chat.Id] = chat.LatestMessageVersion;
+            }
             ChatTreeItem chatItem;
             if (existingChatItem is null)
             {
@@ -2173,8 +2177,9 @@ public partial class MainWindow : Window
             chatItem.HasUnloadedHistory = _chatsWithUnloadedHistory.Contains((projectItem.Project.Id, chat.Id));
             chatItem.IsRunning = IsChatRunning(chat.Id);
             if (markUpdatedChats
-                && previousUpdatedAt is not null
-                && !string.Equals(previousUpdatedAt, chat.UpdatedAt, StringComparison.Ordinal))
+                && previousMessageVersion is not null
+                && string.CompareOrdinal(chat.LatestMessageVersion, previousMessageVersion) > 0
+                && !string.Equals(chat.LatestMessageVersion.Split('\n').Last(), previousMessageVersion.Split('\n').Last(), StringComparison.Ordinal))
             {
                 MarkChatUnreadIfConversationNotVisible(projectItem.Project.Id, chat.Id);
             }
@@ -4422,7 +4427,6 @@ public partial class MainWindow : Window
             var loadedMessages = OrderMessages(page?.Messages ?? []).ToList();
             _hasMoreOlderMessages = page?.HasMoreBefore ?? false;
             _messageTotalCount = page?.TotalCount ?? loadedMessages.Count;
-            SetChatUnloadedHistoryIndicator(chat.Id, _hasMoreOlderMessages);
             MarkSelectedConversationSeen();
             SetHistorySpacer();
             await AddLoadedMessagesAndPositionAsync(loadedMessages, startedAt, chat.Title);
@@ -4619,7 +4623,6 @@ public partial class MainWindow : Window
             var added = AppendNewMessages(page?.Messages ?? []);
             if (added > 0)
             {
-                MarkChatUnreadIfConversationNotVisible(chatId);
                 StatusText.Text = $"history updated | +{added} message(s)";
                 if (shouldFollowNewMessages)
                 {
@@ -8447,7 +8450,6 @@ public partial class MainWindow : Window
                     WritePerformanceLog(
                         "stream-terminal",
                         $"runId={LogText(runId)} event={LogText(item.Event)} outputChars={receivedOutputChars} raw={LogText(item.Data)}");
-                    MarkChatUnreadIfConversationNotVisible(chatId);
                     FlushAssistantMessageText(currentAssistantMessageId);
                     completed = item.Event == "done";
                     if (completed)
@@ -9219,7 +9221,6 @@ public partial class MainWindow : Window
     private void AppendAssistantMessageTextNow(string chatId, string messageId, string runId, string text, string? messageKind)
     {
         using var phase = EnterUiPhase("AppendAssistantMessageText");
-        MarkChatUnreadIfConversationNotVisible(chatId);
         var messages = MessagesForChat(chatId);
         if (messages is null)
         {

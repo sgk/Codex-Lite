@@ -139,12 +139,6 @@ export function activityCountLabel(activityCount: number): string {
   return count ? `進行 ${count}件` : "";
 }
 
-export function completedRunVersion(lastRunProgress: unknown): string {
-  if (!lastRunProgress || typeof lastRunProgress !== "object" || Array.isArray(lastRunProgress)) return "";
-  const id = (lastRunProgress as Record<string, unknown>).id;
-  return typeof id === "string" ? id : "";
-}
-
 export function chatTreeIndicator(activeRunStatus: string, unread: boolean): "running" | "unread" | "none" {
   const activeStatuses = ["queued", "claimed", "running", "waiting_for_approval"];
   if (activeStatuses.includes(activeRunStatus)) return "running";

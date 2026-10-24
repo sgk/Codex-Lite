@@ -9,7 +9,7 @@ test("同じミリ秒内でも送信と応答をデーモン時刻順に並べ�
   ]);
   assert.deepEqual(ordered.map(item => item.sourceOrder), [2, 1, 0]);
 });
-import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, completedRunVersion, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction } from "./conversation-behavior.js";
+import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction } from "./conversation-behavior.js";
 
 test("新規チャットのタイトルはデスクトップと同じく最初の指示から作る", () => {
   assert.equal(titleFromFirstInstruction("  最初の\n\n指示です  "), "最初の 指示です");
@@ -124,12 +124,6 @@ test("チャットツリーは実行中を未読より優先して表示する",
   assert.equal(projectTreeIndicator(["unread", "running"]), "running");
   assert.equal(projectTreeIndicator(["none", "unread"]), "unread");
   assert.equal(projectTreeIndicator(["none"]), "none");
-});
-
-test("未読判定は履歴改訂ではなく最後に完了したRunを使う", () => {
-  assert.equal(completedRunVersion({ id: "run-2", activityCount: 8 }), "run-2");
-  assert.equal(completedRunVersion({ activityCount: 8 }), "");
-  assert.equal(completedRunVersion(undefined), "");
 });
 
 test("画面内の横スワイプでサイドバーを開閉する", () => {
