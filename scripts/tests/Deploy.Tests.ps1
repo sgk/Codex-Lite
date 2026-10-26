@@ -41,7 +41,7 @@ if ($null -eq $definition) { throw "Daemon shutdown function not found" }
 } $definition.Extent.Text
 Write-Host "Deployment checks passed: syntax, missing endpoint, shutdown race, unexpected I/O failure"
 
-$rotationFunctions = @("Assert-ExactChildPath", "Assert-DeploymentFolder", "Activate-StagedDeployment") | ForEach-Object {
+$rotationFunctions = @("Assert-ExactChildPath", "Assert-DeploymentFolder", "Get-InstalledDeploymentDirectory", "Activate-StagedDeployment") | ForEach-Object {
     $name = $_
     $node = $ast.Find({ param($item)
         $item -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name
@@ -56,10 +56,10 @@ $rotationFunctions = @("Assert-ExactChildPath", "Assert-DeploymentFolder", "Acti
     . ([scriptblock]::Create($functionText))
     $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("CodexLite-DeployTests-" + [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $testRoot | Out-Null
-    $current = Join-Path $testRoot "Codex Lite"
-    $next = Join-Path $testRoot "Codex Lite-next"
-    $previous = Join-Path $testRoot "Codex Lite-previous"
-    $previous2 = Join-Path $testRoot "Codex Lite-previous2"
+    $current = Join-Path $testRoot "current"
+    $next = Join-Path $testRoot "next"
+    $previous = Join-Path $testRoot "previous"
+    $previous2 = Join-Path $testRoot "previous2"
     $other = Join-Path $testRoot "unrelated"
     function New-Version {
         param([string]$Version)
@@ -95,7 +95,7 @@ $rotationFunctions = @("Assert-ExactChildPath", "Assert-DeploymentFolder", "Acti
 
         # The documented three renames switch versions without an app, script,
         # shortcut change, copying files, or discarding either version.
-        $swap = Join-Path $testRoot "Codex Lite-swap"
+        $swap = Join-Path $testRoot "swap"
         Move-Item -LiteralPath $current -Destination $swap
         Move-Item -LiteralPath $previous -Destination $current
         Move-Item -LiteralPath $swap -Destination $previous
@@ -162,6 +162,26 @@ $rotationFunctions = @("Assert-ExactChildPath", "Assert-DeploymentFolder", "Acti
         Assert-Version $next "broken"
         Move-Item -LiteralPath $previous -Destination $current
         Assert-Version $current "E"
+
+        # The old flat layout migrates wholly inside its existing container.
+        $flatRoot = Join-Path $testRoot "flat-installation"
+        New-Item -ItemType Directory -Path $flatRoot | Out-Null
+        Copy-Item -Path (Join-Path $current "*") -Destination $flatRoot -Recurse
+        Copy-Item -LiteralPath $previous2 -Destination (Join-Path $flatRoot "previous") -Recurse
+        Copy-Item -LiteralPath $next -Destination (Join-Path $flatRoot "next") -Recurse
+        Set-Content -LiteralPath (Join-Path $flatRoot "recovery.txt") -Value "inside only"
+        if ((Get-InstalledDeploymentDirectory $flatRoot) -ne $flatRoot) { throw "Flat configuration path must be explicit" }
+        Activate-StagedDeployment $flatRoot
+        Assert-Version (Join-Path $flatRoot "current") "broken"
+        Assert-Version (Join-Path $flatRoot "previous") "E"
+        Assert-Version (Join-Path $flatRoot "previous2") "C"
+        if (Test-Path -LiteralPath (Join-Path $flatRoot "CodexLite.dll")) { throw "Flat runtime must no longer remain at container root" }
+        if ((Get-Content -LiteralPath (Join-Path $flatRoot "recovery.txt") -Raw).Trim() -ne "inside only") { throw "Recovery guide must stay in the container" }
+        if ((Get-InstalledDeploymentDirectory $flatRoot) -ne (Join-Path $flatRoot "current")) { throw "New configuration path must use current" }
+        Set-Content -LiteralPath (Join-Path $flatRoot "CodexLite.dll") -Value "unfinished migration"
+        $failed = $false
+        try { Get-InstalledDeploymentDirectory $flatRoot | Out-Null } catch { $failed = $true }
+        if (-not $failed) { throw "Mixed flat and current layout must not silently select a version" }
     }
     finally {
         Remove-Item -LiteralPath $testRoot -Recurse -Force

@@ -77,16 +77,20 @@ make debug-build
 
 ```text
 ビルド成果物: windows/CodexLite/bin/Debug/net8.0-windows/
-実行用:       Windowsデスクトップ/Codex Lite/
-前の版:       Windowsデスクトップ/Codex Lite-previous/
-2世代前:      Windowsデスクトップ/Codex Lite-previous2/
+実行用:       Windowsデスクトップ/Codex Lite/current/
+前の版:       Windowsデスクトップ/Codex Lite/previous/
+2世代前:      Windowsデスクトップ/Codex Lite/previous2/
+更新準備用:   Windowsデスクトップ/Codex Lite/next/
+手動復旧手順: Windowsデスクトップ/Codex Lite/recovery.txt
 ```
 
 デプロイ時は実行用と退避2世代の計最大3世代をフォルダーごと保持します。新方式での更新から順に蓄積し、最古の退避1世代だけを削除します。各世代に `daemon/`、`remote-agent/`、その世代の `cloud-sync.json` を含む一式と、準備時刻・クライアント版・SHA256の `deployment-info.json` を残します。自動ロールバックはせず、配置失敗はログへ明示して停止します。
 
-手動で前の版に戻すときは、アプリと関連デーモンを終了してから、エクスプローラーで `Codex Lite` → `Codex Lite-swap`、`Codex Lite-previous` → `Codex Lite`、`Codex Lite-swap` → `Codex Lite-previous` の順に名前を変更します。`Codex Lite-swap` が既にある場合は上書きせず中止してください。2世代前に戻す場合は `previous` を `previous2` に読み替えます。既存ショートカットは変更不要です。退避先のEXEを直接起動したり複数版を同時起動したりしないでください。
+実行用・退避・更新準備・復旧手順は、すべて既存の `Codex Lite` フォルダー内に置き、デスクトップ直下に新たな項目を増やしません。旧来の親直下にEXEがある配置は、新方式の初回デプロイ時に内側へ移行し、ショートカットを `current/CodexLite.exe` へ更新します。
 
-同じ手順をデスクトップの `Codex Lite-recovery.txt` にも配置するため、アプリが壊れても参照できます。原本は [手動復旧手順](scripts/deployment-recovery.txt) です。切り替わるのはプログラム一式であり、共通のWSL会話DB・履歴・設定・Codex本体は巻き戻りません。新しいDB形式に非対応の旧版は利用できない場合があります。
+手動で前の版に戻すときは、アプリと関連デーモンを終了してから、`Codex Lite` 内で `current` → `swap`、`previous` → `current`、`swap` → `previous` の順に名前を変更します。`swap` が既にある場合は上書きせず中止してください。2世代前に戻す場合は `previous` を `previous2` に読み替えます。既存ショートカットは変更不要です。退避先のEXEを直接起動したり複数版を同時起動したりしないでください。
+
+同じ手順を `Codex Lite/recovery.txt` にも配置するため、アプリが壊れても参照できます。原本は [手動復旧手順](scripts/deployment-recovery.txt) です。切り替わるのはプログラム一式であり、共通のWSL会話DB・履歴・設定・Codex本体は巻き戻りません。新しいDB形式に非対応の旧版は利用できない場合があります。
 
 ビルド時には `CodexLite.exe`、`CodexLite.dll` に加え、`run-daemon.sh`、`daemon/`、接続先を内蔵しない `remote-agent/` と `cloud-sync.example.json` が出力先へコピーされます。同期機能の提供可否・Firebase接続先・OAuth設定は、実行用フォルダー直下の `cloud-sync.json` で指定します。ファイルがなければ同期は無効、設定画面の同期オン／オフの初期値もオフです。通常の配布物に社内設定を自動同梱せず、具体的な設定を同梱する場合はビルドスクリプトの `-CloudSyncConfigFile` で明示指定します。通常の配置更新ではインストール済み `cloud-sync.json` を保持します。詳細と旧方式からの移行手順は [remote/README.md](remote/README.md) を参照してください。実行中プロセスを止めるのは、準備済みディレクトリを実行用ディレクトリへ切り替える間だけです。配置結果とエラーは `runtime/deploy-debug.log` で確認できます。
 
@@ -98,10 +102,10 @@ make release-zip VERSION=0.5.0
 
 ## 起動方法
 
-通常は `make debug-build` が配置と起動まで行います。手動で起動する場合は、Windowsデスクトップ直下の `Codex Lite` フォルダーにある `CodexLite.exe` を使います。
+通常は `make debug-build` が配置と起動まで行います。手動で起動する場合は、Windowsデスクトップの `Codex Lite/current` にある `CodexLite.exe` を使います。旧配置からの初回移行前は親直下のEXEを使います。
 
 ```powershell
-$installDirectory = Join-Path ([Environment]::GetFolderPath("Desktop")) "Codex Lite"
+$installDirectory = Join-Path ([Environment]::GetFolderPath("Desktop")) "Codex Lite/current"
 Start-Process (Join-Path $installDirectory "CodexLite.exe")
 ```
 

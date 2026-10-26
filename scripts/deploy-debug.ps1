@@ -49,10 +49,15 @@ function Assert-DeploymentFolder {
 function Activate-StagedDeployment {
     param([string]$RuntimeDirectory)
 
-    $current = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "Codex Lite") "Codex Lite"
-    $next = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "Codex Lite-next") "Codex Lite-next"
-    $previous = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "Codex Lite-previous") "Codex Lite-previous"
-    $previous2 = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "Codex Lite-previous2") "Codex Lite-previous2"
+    $current = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "current") "current"
+    $next = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "next") "next"
+    $previous = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "previous") "previous"
+    $previous2 = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "previous2") "previous2"
+    $installed = Get-InstalledDeploymentDirectory $RuntimeDirectory
+    $legacy = $installed -eq $RuntimeDirectory
+    if (Test-Path -LiteralPath (Join-Path $RuntimeDirectory "swap")) {
+        throw "A manual version switch is unfinished (swap exists): $RuntimeDirectory"
+    }
     # Validate every existing target before moving or deleting anything. Never
     # prune by a wildcard or follow a user-created directory link.
     foreach ($directory in @($next, $current, $previous, $previous2)) {
@@ -62,7 +67,7 @@ function Activate-StagedDeployment {
         -not (Test-Path -LiteralPath (Join-Path $next "CodexLite.dll") -PathType Leaf)) {
         throw "Staged deployment is incomplete: $next"
     }
-    if (Test-Path -LiteralPath $current) {
+    if ($legacy -or (Test-Path -LiteralPath $current)) {
         if (Test-Path -LiteralPath $previous) {
             if (Test-Path -LiteralPath $previous2) {
                 Remove-Item -LiteralPath $previous2 -Recurse -Force
@@ -70,12 +75,54 @@ function Activate-StagedDeployment {
             }
             Move-Item -LiteralPath $previous -Destination $previous2
         }
-        Move-Item -LiteralPath $current -Destination $previous
+        if ($legacy) {
+            # One-time migration from the old flat installation. Only runtime
+            # payload moves; the container and its backup/staging folders stay.
+            New-Item -ItemType Directory -Path $previous | Out-Null
+            $payload = @(Get-ChildItem -LiteralPath $RuntimeDirectory -Force | Where-Object {
+                $_.Name -notin @("current", "next", "previous", "previous2", "swap", "recovery.txt")
+            })
+            foreach ($item in $payload) {
+                Copy-Item -LiteralPath $item.FullName -Destination $previous -Recurse -Force
+            }
+        }
+        else {
+            Move-Item -LiteralPath $current -Destination $previous
+        }
     }
     # On a move failure, stop and leave the named backups for manual recovery;
     # do not silently launch a different version.
     Move-Item -LiteralPath $next -Destination $current
+    if ($legacy) {
+        # Keep the entire old flat runtime intact until the complete backup and
+        # new current folder both exist. Remove only those copied payload items.
+        foreach ($item in $payload) {
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force
+        }
+    }
     Write-Host "activated $current (previous deployments retained)"
+}
+
+function Get-InstalledDeploymentDirectory {
+    param([string]$RuntimeDirectory)
+
+    if (Test-Path -LiteralPath $RuntimeDirectory) {
+        $rootItem = Get-Item -LiteralPath $RuntimeDirectory -Force
+        if (-not $rootItem.PSIsContainer -or -not [string]::IsNullOrWhiteSpace([string]$rootItem.LinkType)) {
+            throw "Installation root must be a real directory: $RuntimeDirectory"
+        }
+    }
+    $current = Join-Path $RuntimeDirectory "current"
+    $legacy = Test-Path -LiteralPath (Join-Path $RuntimeDirectory "CodexLite.dll") -PathType Leaf
+    if ($legacy -and (Test-Path -LiteralPath $current)) {
+        throw "Both flat and current deployments exist; resolve the unfinished migration: $RuntimeDirectory"
+    }
+    if ($legacy) {
+        Assert-DeploymentFolder $RuntimeDirectory
+        return $RuntimeDirectory
+    }
+    Assert-DeploymentFolder $current
+    return $current
 }
 
 function Stop-UnprotectedCodexLite {
@@ -261,17 +308,21 @@ $deploymentParent = [System.IO.Path]::GetFullPath((Split-Path -Parent $Deploymen
 if (-not [string]::Equals($deploymentParent, $desktopDirectory, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to deploy outside the Windows desktop: $DeploymentDirectory"
 }
-$currentDirectory = Assert-ExactChildPath -RuntimeDirectory $deploymentParent -Candidate $DeploymentDirectory -ExpectedName "Codex Lite"
-$nextDirectory = Assert-ExactChildPath -RuntimeDirectory $deploymentParent -Candidate (Join-Path $deploymentParent "Codex Lite-next") -ExpectedName "Codex Lite-next"
+$installationDirectory = Assert-ExactChildPath -RuntimeDirectory $deploymentParent -Candidate $DeploymentDirectory -ExpectedName "Codex Lite"
+$installedDirectory = Get-InstalledDeploymentDirectory $installationDirectory
+New-Item -ItemType Directory -Path $installationDirectory -Force | Out-Null
+$currentDirectory = Join-Path $installationDirectory "current"
+$nextDirectory = Assert-ExactChildPath -RuntimeDirectory $installationDirectory -Candidate (Join-Path $installationDirectory "next") -ExpectedName "next"
 
 if (Test-Path -LiteralPath $nextDirectory) {
+    Assert-DeploymentFolder $nextDirectory
     Remove-Item -LiteralPath $nextDirectory -Recurse -Force
 }
 New-Item -ItemType Directory -Path $nextDirectory -Force | Out-Null
 Copy-Item -Path (Join-Path $BuildDirectory "*") -Destination $nextDirectory -Recurse -Force
 # Runtime configuration is administrator-owned, not an implicit build default.
 # An explicitly packaged configuration replaces it; ordinary updates preserve it.
-$installedCloudConfig = Join-Path $currentDirectory "cloud-sync.json"
+$installedCloudConfig = Join-Path $installedDirectory "cloud-sync.json"
 $stagedCloudConfig = Join-Path $nextDirectory "cloud-sync.json"
 if ((Test-Path -LiteralPath $installedCloudConfig -PathType Leaf) -and
     -not (Test-Path -LiteralPath $stagedCloudConfig -PathType Leaf)) {
@@ -285,7 +336,7 @@ $deploymentInfo = [ordered]@{
     clientSha256 = (Get-FileHash -LiteralPath (Join-Path $nextDirectory "CodexLite.dll") -Algorithm SHA256).Hash
 }
 $deploymentInfo | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $nextDirectory "deployment-info.json") -Encoding UTF8
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot "deployment-recovery.txt") -Destination (Join-Path $deploymentParent "Codex Lite-recovery.txt") -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "deployment-recovery.txt") -Destination (Join-Path $installationDirectory "recovery.txt") -Force
 
 $protectedIds = @(
     $ProtectedProcessIds.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries) |
@@ -296,7 +347,7 @@ Stop-UnprotectedCodexLite -ProtectedIds $protectedIds
 Stop-RemainingLocalDaemon -EndpointPath $DaemonEndpointPath
 Wait-CodexLiteWslChildrenExit -Children $wslChildren
 
-Activate-StagedDeployment -RuntimeDirectory $deploymentParent
+Activate-StagedDeployment -RuntimeDirectory $installationDirectory
 
 $executablePath = Join-Path $currentDirectory "CodexLite.exe"
 $desktopDirectory = [Environment]::GetFolderPath("Desktop")

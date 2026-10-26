@@ -102,6 +102,7 @@ if ($DryRun) {
     Write-Host "include explicitly selected cloud configuration: $([bool]$cloudSyncConfigPath)"
     Write-Host "would build, then hand deployment to an independent Windows process"
     Write-Host "would deploy $buildDirectory -> $deploymentDirectory"
+    Write-Host "all runtime, previous versions, staging and recovery instructions stay inside this directory"
     exit 0
 }
 
