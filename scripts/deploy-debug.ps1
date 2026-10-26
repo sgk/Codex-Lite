@@ -31,6 +31,53 @@ function Assert-ExactChildPath {
     return $resolved
 }
 
+function Assert-DeploymentFolder {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force
+    # OneDrive folders also use ReparsePoint for cloud storage. Reject actual
+    # directory links, not ordinary OneDrive deployment folders.
+    if (-not $item.PSIsContainer -or -not [string]::IsNullOrWhiteSpace([string]$item.LinkType)) {
+        throw "Refusing to rotate a file or linked deployment directory: $Path"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Path "CodexLite.dll") -PathType Leaf)) {
+        throw "Refusing to rotate a directory without CodexLite.dll: $Path"
+    }
+}
+
+function Activate-StagedDeployment {
+    param([string]$RuntimeDirectory)
+
+    $current = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "Codex Lite") "Codex Lite"
+    $next = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "Codex Lite-next") "Codex Lite-next"
+    $previous = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "Codex Lite-previous") "Codex Lite-previous"
+    $previous2 = Assert-ExactChildPath $RuntimeDirectory (Join-Path $RuntimeDirectory "Codex Lite-previous2") "Codex Lite-previous2"
+    # Validate every existing target before moving or deleting anything. Never
+    # prune by a wildcard or follow a user-created directory link.
+    foreach ($directory in @($next, $current, $previous, $previous2)) {
+        Assert-DeploymentFolder $directory
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $next "CodexLite.exe") -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $next "CodexLite.dll") -PathType Leaf)) {
+        throw "Staged deployment is incomplete: $next"
+    }
+    if (Test-Path -LiteralPath $current) {
+        if (Test-Path -LiteralPath $previous) {
+            if (Test-Path -LiteralPath $previous2) {
+                Remove-Item -LiteralPath $previous2 -Recurse -Force
+                Write-Host "removed oldest deployment $previous2; keeping current and two previous generations"
+            }
+            Move-Item -LiteralPath $previous -Destination $previous2
+        }
+        Move-Item -LiteralPath $current -Destination $previous
+    }
+    # On a move failure, stop and leave the named backups for manual recovery;
+    # do not silently launch a different version.
+    Move-Item -LiteralPath $next -Destination $current
+    Write-Host "activated $current (previous deployments retained)"
+}
+
 function Stop-UnprotectedCodexLite {
     param([int[]]$ProtectedIds)
 
@@ -216,7 +263,6 @@ if (-not [string]::Equals($deploymentParent, $desktopDirectory, [System.StringCo
 }
 $currentDirectory = Assert-ExactChildPath -RuntimeDirectory $deploymentParent -Candidate $DeploymentDirectory -ExpectedName "Codex Lite"
 $nextDirectory = Assert-ExactChildPath -RuntimeDirectory $deploymentParent -Candidate (Join-Path $deploymentParent "Codex Lite-next") -ExpectedName "Codex Lite-next"
-$previousDirectory = Assert-ExactChildPath -RuntimeDirectory $deploymentParent -Candidate (Join-Path $deploymentParent "Codex Lite-previous") -ExpectedName "Codex Lite-previous"
 
 if (Test-Path -LiteralPath $nextDirectory) {
     Remove-Item -LiteralPath $nextDirectory -Recurse -Force
@@ -233,6 +279,13 @@ if ((Test-Path -LiteralPath $installedCloudConfig -PathType Leaf) -and
     Write-Host "preserved installed cloud-sync.json"
 }
 Write-Host "staged $BuildDirectory -> $nextDirectory"
+$deploymentInfo = [ordered]@{
+    preparedAtUtc = [DateTime]::UtcNow.ToString("o")
+    clientVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $nextDirectory "CodexLite.dll")).FileVersion
+    clientSha256 = (Get-FileHash -LiteralPath (Join-Path $nextDirectory "CodexLite.dll") -Algorithm SHA256).Hash
+}
+$deploymentInfo | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $nextDirectory "deployment-info.json") -Encoding UTF8
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot "deployment-recovery.txt") -Destination (Join-Path $deploymentParent "Codex Lite-recovery.txt") -Force
 
 $protectedIds = @(
     $ProtectedProcessIds.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries) |
@@ -243,15 +296,7 @@ Stop-UnprotectedCodexLite -ProtectedIds $protectedIds
 Stop-RemainingLocalDaemon -EndpointPath $DaemonEndpointPath
 Wait-CodexLiteWslChildrenExit -Children $wslChildren
 
-if (Test-Path -LiteralPath $previousDirectory) {
-    Remove-Item -LiteralPath $previousDirectory -Recurse -Force
-}
-
-if (Test-Path -LiteralPath $currentDirectory) {
-    Move-Item -LiteralPath $currentDirectory -Destination $previousDirectory
-}
-Move-Item -LiteralPath $nextDirectory -Destination $currentDirectory
-Write-Host "activated $currentDirectory"
+Activate-StagedDeployment -RuntimeDirectory $deploymentParent
 
 $executablePath = Join-Path $currentDirectory "CodexLite.exe"
 $desktopDirectory = [Environment]::GetFolderPath("Desktop")
@@ -271,10 +316,6 @@ if (-not $NoLaunch) {
         throw "The deployed Codex Lite process was not found after launch."
     }
     Write-Host "started deployed CodexLite.exe PID $($launchedProcess.Id)"
-}
-
-if (Test-Path -LiteralPath $previousDirectory) {
-    Remove-Item -LiteralPath $previousDirectory -Recurse -Force
 }
 
 if ($LogPath) {
