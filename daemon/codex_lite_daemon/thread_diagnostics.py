@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import json
 from pathlib import Path
 
 
@@ -22,3 +23,17 @@ def thread_snapshot() -> list[dict]:
     finally:
         # Frame objects must not keep requests and their locals alive.
         frames.clear()
+
+
+def capture_startup_threads(path: Path, intervals: tuple[float, ...] = (10, 20, 30)) -> threading.Thread:
+    """Bounded startup capture also works when the HTTP event loop is blocked."""
+    def capture():
+        samples = []
+        for interval in intervals:
+            threading.Event().wait(interval)
+            samples.append(thread_snapshot())
+            path.write_text(json.dumps(samples, ensure_ascii=False), encoding="utf-8")
+
+    worker = threading.Thread(target=capture, name="startup-thread-diagnostics", daemon=True)
+    worker.start()
+    return worker

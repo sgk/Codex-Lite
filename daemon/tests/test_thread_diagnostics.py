@@ -1,7 +1,7 @@
 import json
 import threading
 
-from codex_lite_daemon.thread_diagnostics import thread_snapshot
+from codex_lite_daemon.thread_diagnostics import capture_startup_threads, thread_snapshot
 
 
 def test_snapshot_reports_locations_without_local_values():
@@ -27,3 +27,13 @@ def test_snapshot_reports_locations_without_local_values():
     finally:
         release.set()
         worker.join(1)
+
+
+def test_startup_capture_is_bounded(tmp_path):
+    path = tmp_path / "threads.json"
+    worker = capture_startup_threads(path, intervals=(0, 0))
+    worker.join(2)
+    assert not worker.is_alive()
+    samples = json.loads(path.read_text())
+    assert len(samples) == 2
+    assert any(t["name"] == "startup-thread-diagnostics" for t in samples[0])
