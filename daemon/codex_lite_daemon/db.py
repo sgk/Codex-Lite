@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS chats (
   model TEXT,
   reasoning_effort TEXT,
   resume_on_start INTEGER NOT NULL DEFAULT 0,
-  resume_requested_at TEXT
+  resume_requested_at TEXT,
+  resume_run_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -235,6 +236,8 @@ class Database:
                 self._conn.execute("ALTER TABLE chats ADD COLUMN resume_on_start INTEGER NOT NULL DEFAULT 0")
             if "resume_requested_at" not in columns:
                 self._conn.execute("ALTER TABLE chats ADD COLUMN resume_requested_at TEXT")
+            if "resume_run_id" not in columns:
+                self._conn.execute("ALTER TABLE chats ADD COLUMN resume_run_id TEXT")
             message_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()}
             if "kind" not in message_columns:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'conclusion'")

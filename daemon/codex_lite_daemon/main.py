@@ -490,12 +490,12 @@ def create_app(config: Config | None = None) -> Starlette:
     @post("/runs/prepare-app-restart")
     async def prepare_runs_for_app_restart() -> dict:
         active_runs = app_runs.list_active_runs() if use_app_server else runs.list_run_diagnostics()
-        chat_ids = [
-            str(run.get("chatId") or "")
+        run_ids = [
+            str(run.get("id") or "")
             for run in active_runs
             if str(run.get("status") or "") in {"queued", "running"} and str(run.get("chatId") or "")
         ]
-        return {"markedCount": chats.mark_resume_on_start(chat_ids)}
+        return {"markedCount": chats.mark_resume_on_start(run_ids)}
 
     @post("/runs/resume-after-app-restart")
     async def resume_runs_after_app_restart() -> dict:
@@ -504,6 +504,16 @@ def create_app(config: Config | None = None) -> Starlette:
         for pending in chats.list_resume_on_start():
             project_id = str(pending["project_id"])
             chat_id = str(pending["chat_id"])
+            source_run_id = pending["resume_run_id"]
+            if not chats.should_resume_run(chat_id, source_run_id):
+                chats.clear_resume_on_start(chat_id, run_id=source_run_id)
+                continue
+            active = app_runs.list_active_runs() if use_app_server else runs.list_run_diagnostics()
+            if any(run.get("chatId") == chat_id and run.get("status") in {"queued", "running"} for run in active):
+                # Reconnecting to a still-running daemon needs tracking, not
+                # another user instruction. Keep the marker until successful
+                # startup/completion, so a failed queued start remains resumable.
+                continue
             try:
                 result = (
                     await app_runs.submit_message(project_id, chat_id, "つづけて")
@@ -514,7 +524,7 @@ def create_app(config: Config | None = None) -> Starlette:
                 failed.append({"projectId": project_id, "chatId": chat_id, "code": exc.code})
                 continue
             if not use_app_server or result.get("status") != "queued":
-                chats.clear_resume_on_start(chat_id)
+                chats.clear_resume_on_start(chat_id, run_id=source_run_id)
             resumed.append({"projectId": project_id, "chatId": chat_id, **result})
         return {"resumed": resumed, "failed": failed, "pendingCount": len(chats.list_resume_on_start())}
 

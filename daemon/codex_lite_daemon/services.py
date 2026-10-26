@@ -221,13 +221,36 @@ class ChatService:
             raise AppError("chat_not_found", "Chat was not found.", 404)
         return self._chat_with_message_version(row)
 
-    def mark_resume_on_start(self, chat_ids: list[str]) -> int:
+    def should_resume_run(self, chat_id: str, run_id: str | None) -> bool:
+        if not run_id:
+            return False
+        run = self.db.fetchone("SELECT rowid AS run_order, status, terminal_reason FROM runs WHERE id = ? AND chat_id = ?", (run_id, chat_id))
+        if run is None or run["status"] == "succeeded":
+            return False
+        if run["status"] == "cancelled" and run.get("terminal_reason") not in {"submission_cancelled", "submission_start_failed"}:
+            return False
+        # A later successful conversation supersedes an old interrupted run.
+        if self.db.fetchone("SELECT 1 FROM runs WHERE chat_id = ? AND rowid > ? AND status = 'succeeded' LIMIT 1", (chat_id, run["run_order"])):
+            return False
+        # Use insertion order, not wall-clock timestamps: a final response may
+        # precede a follow-up instruction within the same run.
+        latest = self.db.fetchone(
+            """SELECT role, kind FROM messages WHERE chat_id = ? AND run_id = ?
+               AND ((role = 'user' AND kind = 'instruction') OR (role = 'assistant' AND kind = 'conclusion'))
+               AND trim(content) != '' ORDER BY rowid DESC LIMIT 1""", (chat_id, run_id),
+        )
+        return latest is None or latest["kind"] != "conclusion"
+
+    def mark_resume_on_start(self, run_ids: list[str]) -> int:
         now = utc_now()
         marked = 0
-        for chat_id in dict.fromkeys(chat_ids):
+        for run_id in dict.fromkeys(run_ids):
+            run = self.db.fetchone("SELECT chat_id, status FROM runs WHERE id = ?", (run_id,))
+            if run is None or run["status"] not in {"queued", "running"} or not self.should_resume_run(str(run["chat_id"]), run_id):
+                continue
             cursor = self.db.execute(
-                "UPDATE chats SET resume_on_start = 1, resume_requested_at = ? WHERE id = ? AND archived_at IS NULL AND can_continue = 1",
-                (now, chat_id),
+                "UPDATE chats SET resume_on_start = 1, resume_requested_at = ?, resume_run_id = ? WHERE id = ? AND archived_at IS NULL AND can_continue = 1",
+                (now, run_id, run["chat_id"]),
             )
             marked += int(cursor.rowcount or 0)
         return marked
@@ -235,17 +258,18 @@ class ChatService:
     def list_resume_on_start(self) -> list[dict]:
         return self.db.fetchall(
             """
-            SELECT id AS chat_id, project_id, resume_requested_at
+            SELECT id AS chat_id, project_id, resume_requested_at, resume_run_id
             FROM chats
             WHERE resume_on_start = 1 AND archived_at IS NULL AND can_continue = 1
             ORDER BY resume_requested_at ASC, created_at ASC
             """
         )
 
-    def clear_resume_on_start(self, chat_id: str) -> None:
+    def clear_resume_on_start(self, chat_id: str, *, run_id: str | None = None) -> None:
         self.db.execute(
-            "UPDATE chats SET resume_on_start = 0, resume_requested_at = NULL WHERE id = ?",
-            (chat_id,),
+            "UPDATE chats SET resume_on_start = 0, resume_requested_at = NULL, resume_run_id = NULL WHERE id = ?"
+            + (" AND resume_run_id = ?" if run_id is not None else ""),
+            (chat_id, run_id) if run_id is not None else (chat_id,),
         )
 
     def create_chat(self, project_id: str, title: str | None = None, settings: dict[str, str] | None = None) -> dict:

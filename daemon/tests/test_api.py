@@ -923,18 +923,27 @@ def test_chat_restart_flag_is_persisted_until_cleared(linux_tmp_path: Path) -> N
     chats = ChatService(db, projects)
     project = projects.create_project(str(project_dir))
     chat = chats.create_chat(project["id"], "restart")
+    db.execute("INSERT INTO runs(id, chat_id, status) VALUES ('restart-source', ?, 'running')", (chat["id"],))
 
-    assert chats.mark_resume_on_start([chat["id"], chat["id"]]) == 1
+    assert chats.mark_resume_on_start(["restart-source", "restart-source"]) == 1
     pending = chats.list_resume_on_start()
     assert pending == [
         {
             "chat_id": chat["id"],
             "project_id": project["id"],
             "resume_requested_at": pending[0]["resume_requested_at"],
+            "resume_run_id": "restart-source",
         }
     ]
 
     chats.clear_resume_on_start(chat["id"])
+    assert chats.list_resume_on_start() == []
+    # Cleanup of an older run must not erase a newer shutdown marker.
+    db.execute("INSERT INTO runs(id, chat_id, status) VALUES ('newer-source', ?, 'running')", (chat["id"],))
+    chats.mark_resume_on_start(["newer-source"])
+    chats.clear_resume_on_start(chat["id"], run_id="restart-source")
+    assert chats.list_resume_on_start()[0]["resume_run_id"] == "newer-source"
+    chats.clear_resume_on_start(chat["id"], run_id="newer-source")
     assert chats.list_resume_on_start() == []
     db.close()
 
@@ -947,8 +956,9 @@ async def test_restart_flag_sends_continue_only_once(linux_tmp_path: Path) -> No
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         project = (await client.post("/projects", json={"path": str(project_dir)})).json()
         chat = (await client.post(f"/projects/{project['id']}/chats", json={"title": "restart"})).json()
+        app.state.db.execute("INSERT INTO runs(id, chat_id, status, terminal_reason) VALUES ('restart-source', ?, 'failed', 'daemon_restarted')", (chat["id"],))
         app.state.db.execute(
-            "UPDATE chats SET resume_on_start = 1, resume_requested_at = ? WHERE id = ?",
+            "UPDATE chats SET resume_on_start = 1, resume_requested_at = ?, resume_run_id = 'restart-source' WHERE id = ?",
             (utc_now(), chat["id"]),
         )
 
@@ -961,6 +971,117 @@ async def test_restart_flag_sends_continue_only_once(linux_tmp_path: Path) -> No
         assert resumed.json()["pendingCount"] == 0
         assert repeated.json()["resumed"] == []
         assert [message["content"] for message in messages if message["kind"] == "instruction"] == ["つづけて"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completion", ["succeeded", "conclusion", "cancelled", "legacy", "later_success"])
+async def test_restart_skips_completed_or_unidentified_conversations(linux_tmp_path: Path, completion: str) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    app = create_app(make_test_config(linux_tmp_path))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        project = (await client.post("/projects", json={"path": str(project_dir)})).json()
+        chat = (await client.post(f"/projects/{project['id']}/chats", json={"title": "restart"})).json()
+        db = app.state.db
+        db.execute("INSERT INTO runs(id, chat_id, status) VALUES ('original', ?, 'running')", (chat["id"],))
+        assert app.state.remote_gateway.chats.mark_resume_on_start(["original"]) == 1
+        if completion in {"succeeded", "cancelled"}:
+            db.execute("UPDATE runs SET status = ? WHERE id = 'original'", (completion,))
+        elif completion == "conclusion":
+            app.state.runs.messages.insert_message(chat["id"], "assistant", "finished", run_id="original", kind="conclusion")
+        elif completion == "legacy":
+            db.execute("UPDATE chats SET resume_run_id = NULL WHERE id = ?", (chat["id"],))
+        else:
+            db.execute("INSERT INTO runs(id, chat_id, status) VALUES ('newer', ?, 'succeeded')", (chat["id"],))
+        response = await client.post("/runs/resume-after-app-restart")
+        assert response.json() == {"resumed": [], "failed": [], "pendingCount": 0}
+        assert db.fetchone("SELECT COUNT(*) AS n FROM messages WHERE chat_id = ? AND role = 'user'", (chat["id"],))["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_restart_prepare_ignores_final_but_keeps_later_instruction(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    app = create_app(make_test_config(linux_tmp_path))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        project = (await client.post("/projects", json={"path": str(project_dir)})).json()
+        chat = (await client.post(f"/projects/{project['id']}/chats", json={"title": "restart"})).json()
+        app.state.db.execute("INSERT INTO runs(id, chat_id, status) VALUES ('original', ?, 'running')", (chat["id"],))
+        monkeypatch.setattr(app.state.runs, "list_run_diagnostics", lambda: [{"id": "original", "chatId": chat["id"], "status": "running"}])
+        messages = app.state.runs.messages
+        messages.insert_message(chat["id"], "user", "work", run_id="original", kind="instruction")
+        messages.insert_message(chat["id"], "assistant", "progress", run_id="original", kind="work")
+        assert (await client.post("/runs/prepare-app-restart")).json() == {"markedCount": 1}
+        messages.insert_message(chat["id"], "assistant", "finished", run_id="original", kind="conclusion")
+        assert (await client.post("/runs/prepare-app-restart")).json() == {"markedCount": 0}
+        assert (await client.post("/runs/resume-after-app-restart")).json()["pendingCount"] == 0
+        # Deliberately identical timestamps still preserve the actual order.
+        messages.insert_message(chat["id"], "user", "additional work", run_id="original", kind="instruction")
+        app.state.db.execute("UPDATE messages SET created_at = '2026-10-26T00:00:00Z' WHERE run_id = 'original'")
+        assert (await client.post("/runs/prepare-app-restart")).json() == {"markedCount": 1}
+        app.state.db.execute("UPDATE runs SET status = 'failed', terminal_reason = 'daemon_restarted' WHERE id = 'original'")
+        monkeypatch.setattr(app.state.runs, "list_run_diagnostics", lambda: [])
+        assert len((await client.post("/runs/resume-after-app-restart")).json()["resumed"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_startup_completion_does_not_clear_a_new_shutdown_marker(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    app = create_app(make_test_config(linux_tmp_path))
+    gateway = app.state.remote_gateway
+    project = gateway.projects.create_project(str(project_dir))
+    chat = gateway.chats.create_chat(project["id"], "restart")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_start(*args):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(gateway.app_runs, "_start_message_run_reserved", delayed_start)
+    try:
+        receipt = await gateway.app_runs.submit_message(project["id"], chat["id"], "work")
+        await started.wait()
+        assert gateway.chats.mark_resume_on_start([receipt["runId"]]) == 1
+        task = gateway.app_runs._submission_tasks[receipt["runId"]]
+        release.set()
+        await task
+        assert gateway.chats.list_resume_on_start()[0]["resume_run_id"] == receipt["runId"]
+        gateway.app_runs._finish_run_row(receipt["runId"], "succeeded")
+        assert gateway.chats.list_resume_on_start() == []
+    finally:
+        release.set()
+        await gateway.app_runs.close_submissions()
+        await gateway.app_runs.flush_events()
+
+
+@pytest.mark.asyncio
+async def test_restart_marker_is_cleared_by_app_server_completion(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    app = create_app(make_test_config(linux_tmp_path))
+    gateway = app.state.remote_gateway
+    project = gateway.projects.create_project(str(project_dir))
+    chat = gateway.chats.create_chat(project["id"], "restart")
+    app.state.db.execute("INSERT INTO runs(id, chat_id, status) VALUES ('original', ?, 'running')", (chat["id"],))
+    assert gateway.chats.mark_resume_on_start(["original"]) == 1
+    gateway.app_runs._finish_run_row("original", "succeeded", reason="turn_completed:completed")
+    assert gateway.chats.list_resume_on_start() == []
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_send_to_a_still_running_daemon(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    app = create_app(make_test_config(linux_tmp_path))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        project = (await client.post("/projects", json={"path": str(project_dir)})).json()
+        chat = (await client.post(f"/projects/{project['id']}/chats", json={"title": "restart"})).json()
+        app.state.db.execute("INSERT INTO runs(id, chat_id, status) VALUES ('original', ?, 'running')", (chat["id"],))
+        app.state.remote_gateway.chats.mark_resume_on_start(["original"])
+        monkeypatch.setattr(app.state.runs, "list_run_diagnostics", lambda: [{"id": "original", "chatId": chat["id"], "status": "running"}])
+        assert (await client.post("/runs/resume-after-app-restart")).json() == {"resumed": [], "failed": [], "pendingCount": 1}
 
 
 @pytest.mark.asyncio

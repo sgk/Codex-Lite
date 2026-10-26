@@ -593,7 +593,8 @@ class AppServerRunService:
         try:
             await self.events.publish(run_id, "status", {"status": "queued", "messageId": message["id"], "createdAt": message["createdAt"]})
             await self._start_message_run_reserved(project_id, chat_id, content, attachments, project, chat, run_id, message, settings)
-            self.chats.clear_resume_on_start(chat_id)
+            if chat.get("resume_on_start") and chat.get("resume_run_id"):
+                self.chats.clear_resume_on_start(chat_id, run_id=str(chat["resume_run_id"]))
         except (Exception, asyncio.CancelledError) as exc:
             run = self.runs[run_id]
             run.status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
@@ -1056,6 +1057,10 @@ class AppServerRunService:
             "UPDATE runs SET status = ?, exit_code = ?, finished_at = ?, error = ?, watcher_state = 'stopped', terminal_reason = ?, revision = revision + 1 WHERE id = ?",
             (status, 0 if status == "succeeded" else None, utc_now(), error, reason, run_id),
         )
+        if status == "succeeded":
+            run = self.db.fetchone("SELECT chat_id FROM runs WHERE id = ?", (run_id,))
+            if run is not None:
+                self.chats.clear_resume_on_start(str(run["chat_id"]), run_id=run_id)
 
     async def cancel_run(self, run_id: str) -> dict:
         run = self.runs.get(run_id)

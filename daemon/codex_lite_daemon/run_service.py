@@ -361,6 +361,7 @@ class RunService:
                 "UPDATE runs SET status = 'succeeded', exit_code = 0, finished_at = ? WHERE id = ?",
                 (utc_now(), run_id),
             )
+            self.chats.clear_resume_on_start(chat_id, run_id=run_id)
             await self.events.publish(run_id, "done", {"status": "succeeded", "exitCode": 0})
         except asyncio.CancelledError:
             self.db.execute("UPDATE runs SET status = 'cancelled', finished_at = ? WHERE id = ?", (utc_now(), run_id))
