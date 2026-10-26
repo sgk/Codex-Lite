@@ -94,7 +94,7 @@ class TranscriptImportService:
         except OSError:
             project_path = Path(project["path"])
         indexed = 0
-        all_sessions = sessions_by_path or self._sessions_by_path()
+        all_sessions = sessions_by_path if sessions_by_path is not None else self._sessions_by_path()
         sessions = all_sessions.get(project_path, [])
         if not sessions:
             project_key = _path_key(project_path)

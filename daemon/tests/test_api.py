@@ -5252,6 +5252,72 @@ def json_line(value: dict) -> str:
     return json.dumps(value) + "\n"
 
 
+def test_codex_state_guardian_metadata_skips_prompt_and_transcript_work(linux_tmp_path: Path, monkeypatch) -> None:
+    import codex_lite_daemon.codex_state as state_module
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    transcript = cfg.codex_home / "sessions" / "normal.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json_line({"type": "session_meta", "payload": {"source": "cli"}}))
+    write_codex_state_db(cfg, [
+        ("normal", str(project_dir), "visible", str(transcript), 0, 1, 2, None),
+        ("guardian", str(project_dir), "review" * 100_000, str(transcript), 0, 1, 2, None),
+    ])
+    with sqlite3.connect(cfg.codex_sqlite_home / "state_5.sqlite") as db:
+        db.execute("ALTER TABLE threads ADD COLUMN source TEXT")
+        db.execute("ALTER TABLE threads ADD COLUMN first_user_message TEXT")
+        db.execute("UPDATE threads SET source='cli'")
+        db.execute("UPDATE threads SET source=?, first_user_message=? WHERE id='guardian'",
+                   (json.dumps({"subagent": {"other": "guardian"}}), "large review prompt" * 100_000))
+    state = CodexStateService(cfg)
+    candidate = state._candidate_path
+    transcript_path = state._transcript_path
+    calls = {"project": 0, "transcript": 0}
+    def count_project(value):
+        calls["project"] += 1
+        return candidate(value)
+    def count_transcript(value):
+        calls["transcript"] += 1
+        return transcript_path(value)
+    monkeypatch.setattr(state, "_candidate_path", count_project)
+    monkeypatch.setattr(state, "_transcript_path", count_transcript)
+    monkeypatch.setattr(state_module, "_is_guardian_session", lambda _: pytest.fail("metadata DB must not inspect JSONL headers"))
+    rows = {row.id: row for row in state.list_threads()}
+    assert not rows["normal"].hidden
+    assert rows["guardian"].hidden and rows["guardian"].title is None
+    assert rows["guardian"].transcript_path is None
+    assert calls == {"project": 1, "transcript": 1}
+    state.list_threads()
+    assert calls == {"project": 1, "transcript": 1}
+    with sqlite3.connect(cfg.codex_sqlite_home / "state_5.sqlite") as db:
+        db.execute("UPDATE threads SET title='renamed' WHERE id='normal'")
+    assert next(row for row in state.list_threads() if row.id == "normal").title == "renamed"
+
+
+def test_codex_state_parallel_reads_share_one_snapshot(linux_tmp_path: Path, monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    state = CodexStateService(make_test_config(linux_tmp_path))
+    metadata = linux_tmp_path / "metadata.sqlite"
+    metadata.touch()
+    monkeypatch.setattr(state, "_find_state_db", lambda: metadata)
+    entered, release = Event(), Event()
+    calls = []
+    def read(_):
+        calls.append(1)
+        entered.set()
+        assert release.wait(2)
+        return []
+    monkeypatch.setattr(state, "_read_threads", read)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(state.list_threads) for _ in range(8)]
+        assert entered.wait(1)
+        release.set()
+        assert [future.result(2) for future in futures] == [[]] * 8
+    assert len(calls) == 1
+
+
 def write_codex_state_db(cfg: Config, rows: list[tuple[str, str, str, str, int, int, int, int | None]]) -> None:
     cfg.codex_sqlite_home.mkdir(parents=True)
     conn = sqlite3.connect(cfg.codex_sqlite_home / "state_5.sqlite")

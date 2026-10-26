@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +34,10 @@ class CodexThreadMetadata:
 class CodexStateService:
     def __init__(self, config: Config) -> None:
         self.config = config
+        self._read_lock = threading.Lock()
+        self._cached_key = None
+        self._cached_at = 0.0
+        self._cached_threads: tuple[CodexThreadMetadata, ...] = ()
         self._status: dict[str, Any] = {
             "ok": False,
             "path": None,
@@ -40,11 +46,26 @@ class CodexStateService:
         }
 
     def list_threads(self) -> list[CodexThreadMetadata]:
+        # Multiple project refreshes must not independently scan the whole DB.
+        with self._read_lock:
+            return self._list_threads_locked()
+
+    def _list_threads_locked(self) -> list[CodexThreadMetadata]:
         db_path = self._find_state_db()
         if db_path is None:
             self._status = {"ok": False, "path": None, "error": "Codex state DB with threads table was not found.", "threadCount": 0}
             return []
         try:
+            def signature(path: Path):
+                try:
+                    stat = path.stat()
+                    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+                except FileNotFoundError:
+                    return None
+            key = (str(db_path), signature(db_path), signature(Path(str(db_path) + "-wal")))
+            now = time.monotonic()
+            if self._status["ok"] and key == self._cached_key and now - self._cached_at < 5:
+                return list(self._cached_threads)
             threads = self._read_threads(db_path)
         except CodexStateSchemaError as exc:
             self._status = {"ok": False, "path": str(db_path), "error": str(exc), "threadCount": 0}
@@ -56,6 +77,9 @@ class CodexStateService:
             self._status = {"ok": False, "path": str(db_path), "error": f"Path validation failed: {type(exc).__name__}", "threadCount": 0}
             return []
         self._status = {"ok": True, "path": str(db_path), "error": None, "threadCount": len(threads)}
+        self._cached_key = key
+        self._cached_at = time.monotonic()
+        self._cached_threads = tuple(threads)
         return threads
 
     def diagnostics(self) -> dict[str, Any]:
@@ -85,12 +109,19 @@ class CodexStateService:
             if not required.issubset(columns):
                 missing = ", ".join(sorted(required - columns))
                 raise CodexStateSchemaError(f"threads table is missing columns: {missing}")
+            # Current Codex records this explicit session type in metadata.
+            # Keep guardian IDs for hiding old imported rows, but never load
+            # their potentially huge prompt/title fields or open their JSONL.
+            guardian = ("COALESCE(CASE WHEN json_valid(source) THEN json_extract(source, '$.subagent.other')='guardian' ELSE 0 END, 0)"
+                        if "source" in columns else "0")
             select_columns = [
                 "id",
                 "cwd",
-                "title",
-                "preview" if "preview" in columns else "NULL AS preview",
-                "first_user_message" if "first_user_message" in columns else "NULL AS first_user_message",
+                f"CASE WHEN {guardian} THEN NULL ELSE title END AS title",
+                f"CASE WHEN {guardian} THEN NULL ELSE preview END AS preview" if "preview" in columns else "NULL AS preview",
+                f"CASE WHEN {guardian} THEN NULL ELSE first_user_message END AS first_user_message" if "first_user_message" in columns else "NULL AS first_user_message",
+                f"{guardian} AS guardian",
+                f"{'1' if 'source' in columns else '0'} AS has_source_metadata",
                 "archived",
                 "archived_at" if "archived_at" in columns else "NULL AS archived_at",
                 "rollout_path",
@@ -105,22 +136,26 @@ class CodexStateService:
             rows = conn.execute(f"SELECT {', '.join(select_columns)} FROM threads").fetchall()
 
         threads: list[CodexThreadMetadata] = []
+        project_paths: dict[str, Path | None] = {}
         for row in rows:
-            thread = self._thread_from_row(row)
+            thread = self._thread_from_row(row, project_paths)
             if thread is not None:
                 threads.append(thread)
         return threads
 
-    def _thread_from_row(self, row: sqlite3.Row) -> CodexThreadMetadata | None:
+    def _thread_from_row(self, row: sqlite3.Row, project_paths: dict[str, Path | None]) -> CodexThreadMetadata | None:
         thread_id = row["id"]
         cwd = row["cwd"]
         if not isinstance(thread_id, str) or not thread_id.strip() or not isinstance(cwd, str):
             return None
-        project_path = self._candidate_path(cwd)
+        if cwd not in project_paths:
+            project_paths[cwd] = self._candidate_path(cwd)
+        project_path = project_paths[cwd]
         if project_path is None:
             return None
-        transcript_path = self._transcript_path(row["rollout_path"])
-        hidden = _is_guardian_session(transcript_path)
+        metadata_guardian = bool(row["guardian"])
+        transcript_path = None if metadata_guardian else self._transcript_path(row["rollout_path"])
+        hidden = metadata_guardian if row["has_source_metadata"] else _is_guardian_session(transcript_path)
         archived = bool(row["archived"])
         can_continue, continue_disabled_reason = self._continue_state(transcript_path, archived)
         created_at = _timestamp(row["created_at_ms"]) or _timestamp(row["created_at"])

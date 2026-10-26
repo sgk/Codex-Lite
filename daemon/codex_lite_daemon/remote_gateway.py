@@ -54,7 +54,7 @@ class RemoteGateway:
         # The desktop UI owns registration and projection order. Refresh only
         # registered projects; importing every unregistered transcript here
         # would resurrect projects the user deliberately removed.
-        self.transcript_import.index_registered_projects()
+        await asyncio.to_thread(self.transcript_import.index_registered_projects)
         active_runs = self.app_runs.list_active_runs() if self.use_app_server else self.runs.list_run_diagnostics()
         active_by_chat = {
             str(run.get("chatId") or ""): run

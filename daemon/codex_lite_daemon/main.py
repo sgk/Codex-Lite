@@ -40,7 +40,7 @@ from .runner.fake_runner import FakeRunner
 from .services import ChatService, MessageService, ProjectService
 from .transcript_import import TranscriptImportService
 from .usage_tracking import UsageTrackingService
-from .thread_diagnostics import capture_startup_threads, thread_snapshot
+from .thread_diagnostics import thread_snapshot
 
 
 _STATIC_OPENAI_MODELS = ["gpt-6-astra", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5", "gpt-5-codex"]
@@ -1093,7 +1093,6 @@ def _serve_daemon(cfg: Config, instance: DaemonInstance) -> None:
     host, port = sock.getsockname()[:2]
 
     app = create_app(cfg)
-    capture_startup_threads(cfg.app_data_dir / "startup-thread-diagnostics.json")
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, reload=False, log_config=daemon_logging_config()))
     app.state.server = server
     endpoint_path = cfg.app_data_dir / "daemon-endpoint.json"
