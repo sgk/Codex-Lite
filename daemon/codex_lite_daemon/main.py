@@ -40,6 +40,7 @@ from .runner.fake_runner import FakeRunner
 from .services import ChatService, MessageService, ProjectService
 from .transcript_import import TranscriptImportService
 from .usage_tracking import UsageTrackingService
+from .thread_diagnostics import thread_snapshot
 
 
 _STATIC_OPENAI_MODELS = ["gpt-6-astra", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5", "gpt-5-codex"]
@@ -136,6 +137,10 @@ def create_app(config: Config | None = None) -> Starlette:
             "codexVersion": codex_runner.codex_version,
             "codexHome": str(cfg.codex_home),
         }
+
+    @get("/diagnostics/threads")
+    async def diagnostics_threads() -> dict:
+        return {"pid": os.getpid(), "threads": thread_snapshot()}
 
     @get("/diagnostics")
     async def diagnostics() -> dict:
