@@ -4502,10 +4502,7 @@ public partial class MainWindow : Window
         targetView.IsHitTestVisible = false;
         try
         {
-            for (var index = messages.Count - 1; index >= 0; index--)
-            {
-                targetMessages.Insert(insertIndex, messages[index]);
-            }
+            HistoryMessageMerge.PrependMissing(targetMessages, messages, message => message.Id, insertIndex);
 
             var elapsed = DateTimeOffset.Now - startedAt;
             SetBusyMessage($"Loading history... | {elapsed:mm\\:ss} | {messages.Count}/{messages.Count} | {chatTitle}");
