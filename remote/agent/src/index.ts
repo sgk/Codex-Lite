@@ -29,6 +29,7 @@ import { historyChunks } from "./history-chunks.js";
 import { latestMessageVersion } from "../../shared/src/unread.js";
 import { ConnectionHealth } from "./connection-health.js";
 import { watchParentInput } from "./parent-lifetime.js";
+import { SingleFlight } from "./single-flight.js";
 
 interface QueuedTask {
   operation: RemoteOperation;
@@ -47,7 +48,7 @@ const login = await signInWithCredential(auth, GoogleAuthProvider.credential(nul
 const uid = login.user.uid;
 const db = getFirestore(app);
 const daemon = new LocalDaemon(config);
-let catalogSyncRunning = false;
+const catalogSync = new SingleFlight();
 let lastCatalogSnapshot: CatalogProject[] | undefined;
 let lastCatalogRevision = -1;
 let lastRevisionCheckErrorAt = 0;
@@ -343,9 +344,11 @@ function reconcileDesktopRunWatchers(projects: CatalogProject[]): void {
   }
 }
 
-async function syncCatalog(): Promise<void> {
-  if (catalogSyncRunning) return;
-  catalogSyncRunning = true;
+function syncCatalog(): Promise<void> {
+  return catalogSync.run(syncCatalogOnce);
+}
+
+async function syncCatalogOnce(): Promise<void> {
   connectionHealth.catalogStarted();
   let phase = "reading";
   reportSyncProgress({ state: "syncing", phase: "reading" });
@@ -503,8 +506,6 @@ async function syncCatalog(): Promise<void> {
     connectionHealth.catalogFailed();
     reportSyncProgress({ state: "failed", phase, error: safeErrorMessage(error) });
     throw error;
-  } finally {
-    catalogSyncRunning = false;
   }
 }
 
