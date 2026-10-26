@@ -79,7 +79,6 @@ public partial class MainWindow : Window
         public string Model { get; }
         public string Content { get; }
         public IReadOnlyList<MessageAttachmentDto> Attachments { get; }
-        public string? Operation { get; private set; }
         public SubmissionReceiptTracker Receipt { get; } = new();
         public bool NeedsReceiptConfirmation => Receipt.NeedsConfirmation;
         public string State { get; private set; } = "queued";
@@ -117,13 +116,6 @@ public partial class MainWindow : Window
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RetryLabel)));
         }
 
-        public string ChooseOperation(bool hasActiveRun)
-        {
-            Operation ??= hasActiveRun ? "steer" : "send";
-            return Operation;
-        }
-
-        public void SwitchToSend() => Operation = "send";
     }
     private sealed record RemoteSyncProgress(
         string State,
@@ -7636,10 +7628,7 @@ public partial class MainWindow : Window
                     }
                     submission.SetState("sending");
                     StatusText.Text = $"送信キューを処理中 | 残り {_queuedComposerSubmissions.Count}件";
-                    var operation = submission.ChooseOperation(SelectedActiveRun() is not null);
-                    var accepted = operation == "steer" && !submission.NeedsReceiptConfirmation
-                        ? await SteerCurrentRunAsync(submission)
-                        : await SendCurrentMessageAsync(submission);
+                    var accepted = await SendCurrentMessageAsync(submission);
                     if (!accepted)
                     {
                         return;
@@ -7958,7 +7947,7 @@ public partial class MainWindow : Window
             {
                 if (submission.NeedsReceiptConfirmation) submission.SetState("confirming");
                 result = await submission.Receipt.ResolveAsync(
-                    () => _client.SendMessageAsync(project.Id, chat.Id, content, attachments, runToken, submission.RequestId),
+                    () => _client.SendMessageAsync(project.Id, chat.Id, content, attachments, runToken, submission.RequestId, ActiveRunForChat(chat.Id)?.RunId),
                     () => _client.GetSubmissionReceiptAsync(project.Id, chat.Id, submission.RequestId, runToken),
                     ex =>
                     {
@@ -8168,99 +8157,6 @@ public partial class MainWindow : Window
             return "New Chat";
         }
         return text.Length > 80 ? text[..77].TrimEnd() + "..." : text;
-    }
-
-    private async Task<bool> SteerCurrentRunAsync(QueuedComposerSubmission submission)
-    {
-        if (SelectedActiveRun() is not { } activeRun || _selectedChat is not ChatDto chat)
-        {
-            StatusText.Text = "追加指示は、Codex Liteで応答中のチャットを選択している時だけ送れます。";
-            submission.SetState("failed");
-            return false;
-        }
-        var runId = activeRun.RunId;
-        var content = submission.Content;
-        var attachments = submission.Attachments;
-        if (string.IsNullOrWhiteSpace(content) && attachments.Count == 0)
-        {
-            submission.SetState("failed");
-            return false;
-        }
-        if (string.IsNullOrWhiteSpace(content))
-        {
-            content = "添付ファイルを確認してください。";
-        }
-
-        WritePerformanceLog(
-            "steer-request",
-            $"chatId={LogText(chat.Id)} runId={LogText(runId)} content={LogText(content)} attachments={LogText(AttachmentLogText(attachments), 12000)}");
-        try
-        {
-            SendButton.IsEnabled = false;
-            ShowRunProgressForChat(chat.Id, "追加指示を送信中");
-            var result = await submission.Receipt.ResolveAsync<MessagePostResult>(
-                async () =>
-                {
-                    var accepted = await _client.SteerRunAsync(runId, content, attachments, requestId: submission.RequestId);
-                    return accepted is null ? null : new MessagePostResult(accepted.MessageId ?? "", accepted.Id, accepted.CreatedAt, accepted.Status);
-                },
-                () => _client.GetSubmissionReceiptAsync(activeRun.ProjectId, chat.Id, submission.RequestId),
-                ex => ex is OperationCanceledException or System.Net.Http.HttpRequestException or IOException or JsonException
-                    || (ex is DaemonRequestException requestError && (int)requestError.StatusCode >= 500),
-                DateTimeOffset.UtcNow);
-            if (result is null && submission.NeedsReceiptConfirmation)
-            {
-                submission.SetState("confirming");
-                ShowRunProgressForChat(chat.Id, "追加指示の受付確認中（再送せず確認しています）");
-                return false;
-            }
-            if (result is null || string.IsNullOrWhiteSpace(result.MessageId))
-            {
-                throw new InvalidOperationException("追加指示の保存済みメッセージIDを取得できませんでした。");
-            }
-            AddComposerHistory(chat.Id, content);
-            RemoveQueuedComposerSubmission(submission);
-            AppendMessageForChat(activeRun.ProjectId, chat.Id, new MessageDto(
-                result.MessageId,
-                chat.Id,
-                "user",
-                content,
-                runId,
-                result.CreatedAt ?? throw new InvalidOperationException("追加指示の受付に保存時刻がありません。"),
-                "instruction",
-                attachments),
-                scrollToEnd: true);
-            WritePerformanceLog("steer-sent", $"chatId={LogText(chat.Id)} runId={LogText(runId)}");
-            ShowRunProgressForChat(chat.Id, "追加指示を送信済み");
-            return true;
-        }
-        catch (DaemonRequestException ex) when (ex.Code.Equals("steer_run_finished", StringComparison.Ordinal))
-        {
-            WritePerformanceLog(
-                "steer-finished-switch-to-send",
-                $"chatId={LogText(chat.Id)} runId={LogText(runId)} code={LogText(ex.Code)}");
-            submission.SwitchToSend();
-            if (!string.Equals(_selectedProject?.Id, submission.ProjectId, StringComparison.Ordinal)
-                || !string.Equals(_selectedChat?.Id, submission.ChatId, StringComparison.Ordinal))
-            {
-                submission.SetState("queued");
-                return false;
-            }
-            ShowRunProgressForChat(chat.Id, "前の応答が完了したため、次の指示として送信中");
-            return await SendCurrentMessageAsync(submission);
-        }
-        catch (Exception ex)
-        {
-            WritePerformanceLog("steer-error", $"chatId={LogText(chat.Id)} runId={LogText(runId)} type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
-            submission.SetState("failed");
-            StatusText.Text = $"steer error | {ShortError(ex)}";
-            ShowRunProgressForChat(chat.Id, $"追加指示エラー | {ShortError(ex)}");
-            return false;
-        }
-        finally
-        {
-            UpdateCommandButtonState();
-        }
     }
 
     private async Task StreamRunAsync(string runId, string projectId, string chatId, string assistantMessageId, DateTimeOffset sendStartedAt, CancellationToken cancellationToken, long afterSequence = 0)
@@ -8545,13 +8441,13 @@ public partial class MainWindow : Window
             }
             UpdateCommandButtonState();
             EndRunActivity(chatId);
-            HideRunProgressForChat(chatId);
+            if (ActiveRunForChat(chatId) is null) HideRunProgressForChat(chatId);
         }
         if (reconnectAfterStreamLoss)
         {
             await ReconcileActiveRunsAsync();
         }
-        else if (terminalRunForReplay is not null && ProjectIdForChat(chatId) is { } replayProjectId)
+        else if (terminalRunForReplay is not null && ActiveRunForChat(chatId) is null && ProjectIdForChat(chatId) is { } replayProjectId)
         {
             var replayCts = new CancellationTokenSource();
             _activeRunsByChat[chatId] = new ActiveUiRun(runId, replayProjectId, chatId, replayCts);

@@ -447,6 +447,7 @@ class AppServerActiveRun:
     lease_released: bool = False
     replacing_idle_turn: bool = False
     steer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    instruction_revision: int = 0
     notification_queue: asyncio.Queue[AppServerNotification] | None = field(default=None, repr=False)
     pending_approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
     watcher_alive: bool = False
@@ -1109,6 +1110,43 @@ class AppServerRunService:
             await asyncio.sleep(CANCEL_IDLE_POLL_SECONDS)
         raise asyncio.TimeoutError
 
+    async def submit_followup(self, run_id: str, content: str, attachments: list[dict[str, Any]] | None = None, request_id: str | None = None) -> dict:
+        """Choose the acceptance path from authoritative state, not UI state.
+
+        This is admission-time dispatch, not retrying a failed provider request.
+        Hold the same lock as steering while deciding whether the run is over.
+        """
+        live = self.runs.get(run_id)
+        if live is not None:
+            async with live.steer_lock:
+                return await self._submit_followup_reserved(run_id, content, attachments, request_id)
+        return await self._submit_followup_reserved(run_id, content, attachments, request_id)
+
+    async def _submit_followup_reserved(self, run_id: str, content: str, attachments: list[dict[str, Any]] | None, request_id: str | None) -> dict:
+        previous = self.get_run(run_id)
+        chat_id = str(previous["chatId"])
+        chat = self.chats.get_chat_row_by_id(chat_id)
+        project_id = str(chat["project_id"])
+        # Receipt identity is retained even when the original run has finished
+        # or been evicted. Never turn an acknowledged steer into another send.
+        if request_id is not None:
+            receipt = self.chats.db.fetchone("SELECT * FROM submission_receipts WHERE request_id = ?", (request_id,))
+            if receipt is not None:
+                hashes = {
+                    hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                    for payload in (["steer", run_id, content, attachments or []], [project_id, chat_id, content, attachments or []])
+                }
+                if receipt["payload_hash"] not in hashes:
+                    raise AppError("request_id_conflict", "Request ID was already used for different content.", 409)
+                return self.get_run(str(receipt["run_id"])) | {"runId": receipt["run_id"], "messageId": receipt["message_id"], "createdAt": receipt["created_at"]}
+        if previous["status"] == "running":
+            result = await self._steer_run_reserved(run_id, content, attachments, request_id)
+            return result | {"runId": run_id}
+        if previous["status"] not in {"succeeded", "failed", "cancelled"}:
+            raise AppError("run_already_active_in_chat", "The previous run is still starting.", 409)
+        accepted = await self.submit_message(project_id, chat_id, content, attachments, request_id)
+        return self.get_run(accepted["runId"]) | accepted
+
     async def steer_run(self, run_id: str, content: str, attachments: list[dict[str, Any]] | None = None, request_id: str | None = None) -> dict:
         run = self.runs.get(run_id)
         if run is None:
@@ -1145,6 +1183,7 @@ class AppServerRunService:
         # turn and the same watcher must move to that turn without losing its
         # first notifications.
         run.replacing_idle_turn = True
+        run.instruction_revision += 1
         try:
             try:
                 await self.events.publish(run_id, "progress", {"method": "turn/steer", "summary": "sending additional instructions"})
@@ -1399,6 +1438,7 @@ class AppServerRunService:
                         run.last_reconcile_at = utc_now()
                         run.revision += 1
                         try:
+                            reconcile_instruction_revision = run.instruction_revision
                             response = await app_server.request("thread/read", {"threadId": run.thread_id})
                             thread = response.get("thread") or {}
                             status = thread.get("status") if isinstance(thread, dict) else None
@@ -1424,17 +1464,18 @@ class AppServerRunService:
                             # queued the final deltas and turn/completed, but
                             # before this watcher has consumed them.
                             await asyncio.sleep(IDLE_RECONCILE_NOTIFICATION_GRACE_SECONDS)
-                            if not notification_queue.empty():
-                                continue
-                            await complete_all_agent_messages()
-                            run.status = "succeeded"
-                            run.finished_at = utc_now()
-                            run.terminal_reason = "thread_idle_reconciled"
-                            run.revision += 1
-                            self.chats.touch_provider_thread(run.chat_id, run.provider)
-                            self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
-                            await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0})
-                            return
+                            async with run.steer_lock:
+                                if not notification_queue.empty() or run.instruction_revision != reconcile_instruction_revision:
+                                    continue
+                                await complete_all_agent_messages()
+                                run.status = "succeeded"
+                                run.finished_at = utc_now()
+                                run.terminal_reason = "thread_idle_reconciled"
+                                run.revision += 1
+                                self.chats.touch_provider_thread(run.chat_id, run.provider)
+                                self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
+                                await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0})
+                                return
                     continue
                 while run.replacing_idle_turn and run.status == "running":
                     await asyncio.sleep(0.01)
@@ -1657,20 +1698,23 @@ class AppServerRunService:
                         },
                     )
                 elif notification.method == "turn/completed":
-                    turn = notification.params.get("turn") or {}
-                    turn_status = str(turn.get("status") or "completed")
-                    if turn_status == "completed":
-                        await complete_all_agent_messages()
-                    else:
-                        await flush_all_pending_agent_output()
-                    run.status = "succeeded" if turn_status == "completed" else "cancelled" if turn_status in {"cancelled", "interrupted"} else "failed"
-                    run.finished_at = utc_now()
-                    run.terminal_reason = f"turn_completed:{turn_status}"
-                    run.revision += 1
-                    self.chats.touch_provider_thread(run.chat_id, run.provider)
-                    self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
-                    await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
-                    return
+                    async with run.steer_lock:
+                        if not _notification_matches(notification, run):
+                            continue
+                        turn = notification.params.get("turn") or {}
+                        turn_status = str(turn.get("status") or "completed")
+                        if turn_status == "completed":
+                            await complete_all_agent_messages()
+                        else:
+                            await flush_all_pending_agent_output()
+                        run.status = "succeeded" if turn_status == "completed" else "cancelled" if turn_status in {"cancelled", "interrupted"} else "failed"
+                        run.finished_at = utc_now()
+                        run.terminal_reason = f"turn_completed:{turn_status}"
+                        run.revision += 1
+                        self.chats.touch_provider_thread(run.chat_id, run.provider)
+                        self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
+                        await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
+                        return
                 elif notification.method == "error":
                     if _is_retryable_app_server_error(notification.params):
                         summary = _retryable_error_summary(notification.params)

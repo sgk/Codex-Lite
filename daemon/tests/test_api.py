@@ -21,7 +21,7 @@ from codex_lite_daemon.db import Database
 from codex_lite_daemon.dynamic_tools import CREATE_AUTOMATION_TOOL, SET_TITLE_TOOL, CodexLiteDynamicTools
 from codex_lite_daemon.errors import AppError
 from codex_lite_daemon.main import _attachment_path_to_wsl, _model_list_out, create_app, message_page
-from codex_lite_daemon.remote_gateway import _remote_attachments, _remote_history
+from codex_lite_daemon.remote_gateway import RemoteGateway, _remote_attachments, _remote_history
 import codex_lite_daemon.process_env as process_env
 import codex_lite_daemon.deepseek as deepseek
 import codex_lite_daemon.app_services as app_services
@@ -3879,10 +3879,13 @@ async def test_app_server_run_steer_failure_does_not_store_message(linux_tmp_pat
 
     with pytest.raises(AppError):
         await runs.steer_run(result["runId"], "this should fail")
+    with pytest.raises(AppError):
+        await runs.submit_followup(result["runId"], "this should also fail")
 
     assert app_server.requests[-1][0] == "turn/steer"
     stored_messages = messages.list_messages(project_id, chat_id)
     assert [message["content"] for message in stored_messages] == ["hello"]
+    assert len([request for request in app_server.requests if request[0] == "turn/start"]) == 1
     db.close()
 
 
@@ -3931,6 +3934,110 @@ async def test_app_server_steer_starts_next_turn_when_previous_turn_is_already_i
         ("assistant", "replacement answer"),
     ]
     db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["running", "finished", "evicted", "finishes_while_waiting", "completion_in_progress"])
+async def test_followup_dispatch_uses_current_state_and_preserves_receipt(linux_tmp_path: Path, state: str) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    server = TurnStartAppServer()
+    settings = make_runtime_settings()
+    transcripts = TranscriptImportService(cfg, projects, chats)
+    threads = AppServerThreadService(projects, chats, messages, transcripts, server, settings)
+    runs = AppServerRunService(projects, threads, messages, server, 1, settings, db=db)
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "existing", "thread_1", utc_now(), utc_now())["id"]
+
+    async def finish(run_id):
+        active = runs.runs[run_id]
+        await active.notification_queue.put(AppServerNotification("turn/completed", {
+            "threadId": active.thread_id, "turn": {"id": active.turn_id, "status": "completed"},
+        }))
+        async def consume():
+            async for _ in runs.stream_events(run_id):
+                pass
+        await asyncio.wait_for(consume(), 2)
+
+    try:
+        first = await runs.start_message_run(project_id, chat_id, "first")
+        old_id = first["runId"]
+        if state in {"finished", "evicted"}:
+            await finish(old_id)
+            if state == "evicted":
+                del runs.runs[old_id]
+        if state == "completion_in_progress":
+            entered = asyncio.Event()
+            release = asyncio.Event()
+            publish = runs.events.publish
+
+            async def paused_done(run_id, event, data):
+                if run_id == old_id and event == "done":
+                    entered.set()
+                    await release.wait()
+                return await publish(run_id, event, data)
+
+            runs.events.publish = paused_done
+            old = runs.runs[old_id]
+            await old.notification_queue.put(AppServerNotification("turn/completed", {
+                "threadId": old.thread_id, "turn": {"id": old.turn_id, "status": "completed"},
+            }))
+            await asyncio.wait_for(entered.wait(), 2)
+            pending = asyncio.create_task(runs.submit_followup(old_id, "next", request_id="followup-1"))
+            await asyncio.sleep(0)
+            assert not pending.done()
+            release.set()
+            result = await asyncio.wait_for(pending, 2)
+        elif state == "finishes_while_waiting":
+            old = runs.runs[old_id]
+            await old.steer_lock.acquire()
+            pending = asyncio.create_task(runs.submit_followup(old_id, "next", request_id="followup-1"))
+            await asyncio.sleep(0)
+            assert not pending.done()
+            old.status = "succeeded"
+            runs._finish_run_row(old_id, "succeeded")
+            await old.notification_queue.put(AppServerNotification("turn/completed", {
+                "threadId": old.thread_id, "turn": {"id": old.turn_id, "status": "completed"},
+            }))
+            await asyncio.sleep(0)
+            old.steer_lock.release()
+            result = await pending
+        else:
+            result = await runs.submit_followup(old_id, "next", request_id="followup-1")
+        assert (result["runId"] == old_id) == (state == "running")
+        duplicate = await runs.submit_followup(old_id, "next", request_id="followup-1")
+        assert duplicate["messageId"] == result["messageId"]
+        assert duplicate["runId"] == result["runId"]
+        if result["runId"] in runs._submission_tasks:
+            await asyncio.wait_for(runs._submission_tasks[result["runId"]], 2)
+        assert [m["content"] for m in messages.list_messages(project_id, chat_id)] == ["first", "next"]
+        assert len([r for r in server.requests if r[0] == "turn/start"]) == (1 if state == "running" else 2)
+        await finish(result["runId"])
+        if old_id in runs.runs:
+            del runs.runs[old_id]
+        # Retrying an acknowledged followup after completion/eviction must not
+        # turn it into a new send or conflict with its original receipt hash.
+        assert (await runs.submit_followup(old_id, "next", request_id="followup-1"))["messageId"] == result["messageId"]
+        with pytest.raises(AppError) as conflict:
+            await runs.submit_followup(old_id, "different", request_id="followup-1")
+        assert conflict.value.code == "request_id_conflict"
+        # The Web gateway also accepts a stale Run ID as the next instruction.
+        gateway = RemoteGateway(db, projects, chats, threads, SimpleNamespace(), runs, settings, transcripts, True)
+        remote = await gateway.execute("remote-followup", "steer_run", {"projectId": project_id, "chatId": chat_id, "runId": result["runId"], "content": "from web"})
+        assert remote["runId"] != result["runId"]
+        assert (await gateway.execute("remote-followup", "steer_run", {}))["messageId"] == remote["messageId"]
+        await asyncio.wait_for(runs._submission_tasks[remote["runId"]], 2)
+        await finish(remote["runId"])
+    finally:
+        await runs.close_submissions()
+        await runs.events.flush()
+        db.close()
 
 
 @pytest.mark.asyncio

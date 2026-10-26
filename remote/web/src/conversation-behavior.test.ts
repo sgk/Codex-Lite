@@ -1,5 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { retryComposerTarget } from "./conversation-behavior.js";
+
+test("終了後の再送は古いRunを外し同じチャットへ通常送信する", () => {
+  const original = { projectId: "p", chatId: "c", runId: "old", content: "continue", attachments: [] };
+  const retry = retryComposerTarget("steer_run", original, "");
+  assert.equal(retry.operation, "send_message");
+  assert.deepEqual(retry.payload, { projectId: "p", chatId: "c", content: "continue", attachments: [] });
+  assert.equal(original.runId, "old");
+  const active = retryComposerTarget("steer_run", original, "new");
+  assert.equal(active.operation, "steer_run");
+  assert.equal(active.payload.runId, "new");
+  assert.equal(retryComposerTarget("create_chat", original, "new").operation, "create_chat");
+});
 
 test("同じミリ秒内でも送信と応答をデーモン時刻順に並べる", () => {
   const ordered = sortConversationTimeline([

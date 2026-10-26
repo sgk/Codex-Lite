@@ -20,6 +20,7 @@ import type { FirebasePublicConfig, RemoteAttachment, RemoteOperation, RemoteTas
 import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection } from "./conversation-behavior.js";
 import { messageReadState } from "../../shared/src/unread.js";
 import { renderMarkdown } from "./markdown.js";
+import { retryComposerTarget } from "./conversation-behavior.js";
 
 const buildInfo = document.getElementById("build-info");
 if (buildInfo) {
@@ -1079,6 +1080,13 @@ async function sendInstruction(): Promise<void> {
 
 async function retryOptimisticInstruction(item: OptimisticInstruction): Promise<void> {
   if (item.state !== "failed" || item.deviceId !== elements.device.value) return;
+  const currentChat = (chatsByDeviceProject.get(treeProjectKey(item.deviceId, item.projectId)) ?? [])
+    .find((chat) => chat.id === item.chatId);
+  const runId = item.projectId === elements.project.value && item.chatId === elements.chat.value
+    ? selectedActiveRunId() : text(currentChat?.data().activeRun?.id);
+  const target = retryComposerTarget(item.operation, item.payload, runId);
+  item.operation = target.operation;
+  item.payload = target.payload;
   item.state = "queued";
   item.taskId = undefined;
   renderedConversationSignature = "";

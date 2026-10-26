@@ -284,7 +284,7 @@ class RemoteGateway:
         if operation == "steer_run":
             if not self.use_app_server:
                 raise AppError("remote_steer_not_supported", "Remote steering requires app-server mode.", 409)
-            return await self.app_runs.steer_run(run_id, _required_text(payload.get("content"), "content", 1, 100_000), _remote_attachments(payload))
+            return await self.app_runs.submit_followup(run_id, _required_text(payload.get("content"), "content", 1, 100_000), _remote_attachments(payload))
         if operation == "cancel_run":
             return await self.app_runs.cancel_run(run_id) if self.use_app_server else await self.runs.cancel_run(run_id)
         if operation == "resolve_approval":

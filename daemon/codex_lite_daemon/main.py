@@ -426,7 +426,15 @@ def create_app(config: Config | None = None) -> Starlette:
     @post("/projects/{project_id}/chats/{chat_id}/messages")
     async def create_message(project_id: str, chat_id: str, body: dict) -> dict:
         if use_app_server:
-            result = await app_runs.submit_message(project_id, chat_id, _required_str(body, "content", min_length=1), _attachments(body), _optional_str(body, "requestId"))
+            followup_run_id = _optional_str(body, "followupRunId")
+            if followup_run_id:
+                previous = app_runs.get_run(followup_run_id)
+                chats.get_chat_row(project_id, chat_id)
+                if previous["chatId"] != chat_id:
+                    raise AppError("run_chat_mismatch", "Run does not belong to this chat.", 409)
+                result = await app_runs.submit_followup(followup_run_id, _required_str(body, "content", min_length=1), _attachments(body), _optional_str(body, "requestId"))
+            else:
+                result = await app_runs.submit_message(project_id, chat_id, _required_str(body, "content", min_length=1), _attachments(body), _optional_str(body, "requestId"))
         else:
             result = runs.start_message_run(project_id, chat_id, _required_str(body, "content", min_length=1))
         return result

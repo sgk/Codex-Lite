@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isCountableProgressEvent } from "./progress-sync.js";
+import { isCountableProgressEvent, shouldRelayAcceptedRun } from "./progress-sync.js";
+
+test("終了境界の追加指示で新しいRunが始まればWebへ実行状態を中継する", () => {
+  assert.equal(shouldRelayAcceptedRun("steer_run", "next", "finished"), true);
+  assert.equal(shouldRelayAcceptedRun("steer_run", "active", "active"), false);
+  assert.equal(shouldRelayAcceptedRun("send_message", "new", ""), true);
+  assert.equal(shouldRelayAcceptedRun("create_chat", "new", ""), true);
+  assert.equal(shouldRelayAcceptedRun("cancel_run", "old", "old"), false);
+  assert.equal(shouldRelayAcceptedRun("steer_run", "", "old"), false);
+});
 
 test("deltaと思考は同期せず完了した作業だけを進行件数に数える", () => {
   assert.equal(isCountableProgressEvent({ sequence: 1, event: "progress", data: { method: "item/reasoning/summaryTextDelta" } }), false);

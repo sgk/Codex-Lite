@@ -1,5 +1,10 @@
 import type { SseEvent } from "./daemon.js";
 
+export function shouldRelayAcceptedRun(operation: string, runId: string, previousRunId: string): boolean {
+  return Boolean(runId && (operation === "send_message" || operation === "create_chat"
+    || (operation === "steer_run" && runId !== previousRunId)));
+}
+
 export function isCountableProgressEvent(event: SseEvent): boolean {
   if (event.event !== "progress" || !isObject(event.data)) return false;
   const method = stringField(event.data, "method");

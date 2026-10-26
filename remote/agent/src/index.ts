@@ -24,7 +24,7 @@ import { catalogRetryDecision, cloudCatalogSnapshot, diffCatalog, prioritizeCata
 import { loadAgentConfig } from "./config.js";
 import { firebaseGoogleAccessToken } from "./credentials.js";
 import { LocalDaemon } from "./daemon.js";
-import { isCountableProgressEvent } from "./progress-sync.js";
+import { isCountableProgressEvent, shouldRelayAcceptedRun } from "./progress-sync.js";
 import { historyChunks } from "./history-chunks.js";
 import { latestMessageVersion } from "../../shared/src/unread.js";
 import { ConnectionHealth } from "./connection-health.js";
@@ -167,7 +167,7 @@ async function processTask(taskRef: DocumentReference<DocumentData>, initial: Qu
         )
         : await daemon.execute(taskId, initial.operation, prepared.payload);
     const runId = textField(result, "runId") || textField(result, "id");
-    const relaysCreatedRun = Boolean(runId && (initial.operation === "send_message" || initial.operation === "create_chat"));
+    const relaysCreatedRun = shouldRelayAcceptedRun(initial.operation, runId, textField(prepared.payload, "runId"));
     if (relaysCreatedRun) relayedRunIds.add(runId);
     const publicResult = initial.operation === "get_runtime" || initial.operation === "update_runtime" ? result : {
       ...(runId ? { runId } : {}),

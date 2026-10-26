@@ -1,3 +1,14 @@
+import type { RemoteTaskPayload } from "../../shared/src/types.js";
+
+export function retryComposerTarget(operation: string, payload: RemoteTaskPayload, activeRunId: string): {
+  operation: "create_chat" | "send_message" | "steer_run"; payload: RemoteTaskPayload;
+} {
+  if (operation === "create_chat") return { operation, payload: { ...payload } };
+  const { runId: _expiredRunId, ...instruction } = payload;
+  return { operation: composerOperation(false, activeRunId),
+    payload: { ...instruction, ...(activeRunId ? { runId: activeRunId } : {}) } };
+}
+
 export function titleFromFirstInstruction(content: string): string {
   const normalized = content.trim().split(/\s+/u).filter(Boolean).join(" ");
   if (!normalized) return "New Chat";
