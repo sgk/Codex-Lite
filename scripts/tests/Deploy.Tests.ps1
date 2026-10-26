@@ -23,10 +23,15 @@ if ($null -eq $definition) { throw "Daemon shutdown function not found" }
         if ($scenario -eq "removed") {
             throw [System.Management.Automation.ItemNotFoundException]::new("Endpoint removed after existence check")
         }
+        if ($scenario -eq "removed-file") {
+            throw [System.IO.FileNotFoundException]::new("Endpoint removed while opening file")
+        }
         throw [System.IO.IOException]::new("Endpoint is unreadable")
     }
     Stop-RemainingLocalDaemon -EndpointPath "test-endpoint.json"
     $scenario = "removed"
+    Stop-RemainingLocalDaemon -EndpointPath "test-endpoint.json"
+    $scenario = "removed-file"
     Stop-RemainingLocalDaemon -EndpointPath "test-endpoint.json"
     $scenario = "unreadable"
     $failed = $false

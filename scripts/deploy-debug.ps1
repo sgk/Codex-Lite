@@ -162,7 +162,7 @@ function Stop-RemainingLocalDaemon {
     try {
         $endpointJson = Get-Content -LiteralPath $EndpointPath -Raw
     }
-    catch [System.Management.Automation.ItemNotFoundException] {
+    catch [System.Management.Automation.ItemNotFoundException], [System.IO.FileNotFoundException] {
         # Normal shutdown can remove the endpoint after Test-Path succeeds.
         # There is then no remaining daemon to stop; other I/O errors must fail.
         Write-Host "local daemon endpoint disappeared during graceful shutdown"
