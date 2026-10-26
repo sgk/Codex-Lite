@@ -1383,6 +1383,40 @@ async def test_remote_catalog_does_not_import_unregistered_project_candidates(li
 
 
 @pytest.mark.asyncio
+async def test_catalog_revision_http_wait_parses_required_integer_and_blocks(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = create_app(make_test_config(linux_tmp_path))
+    gateway = app.state.remote_gateway
+    original_wait = gateway.wait_catalog_revision
+    received = []
+
+    async def bounded_wait(after_revision):
+        received.append(after_revision)
+        return await original_wait(after_revision, timeout_seconds=0.05)
+
+    monkeypatch.setattr(gateway, "wait_catalog_revision", bounded_wait)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        revision = (await client.get("/remote/v1/catalog-revision")).json()["revision"]
+        pending = asyncio.create_task(client.get(f"/remote/v1/catalog-revision/wait?after={revision}"))
+        await asyncio.sleep(0.01)
+        assert received == [revision]
+        assert type(received[0]) is int
+        assert not pending.done()
+        gateway.mark_catalog_changed()
+        response = await pending
+        assert response.status_code == 200
+        assert response.json() == {"revision": revision + 1}
+
+        # An unchanged revision must also wait for the long-poll timeout.
+        pending = asyncio.create_task(client.get(f"/remote/v1/catalog-revision/wait?after={revision + 1}"))
+        await asyncio.sleep(0.01)
+        assert not pending.done()
+        assert (await pending).json() == {"revision": revision + 1}
+        invalid = await client.get("/remote/v1/catalog-revision/wait?after=invalid")
+        assert invalid.status_code == 422
+        assert len(received) == 2
+
+
+@pytest.mark.asyncio
 async def test_remote_catalog_preserves_desktop_order_and_reports_sync_priority(linux_tmp_path: Path) -> None:
     app = create_app(make_test_config(linux_tmp_path))
     remote_gateway = app.state.remote_gateway

@@ -597,7 +597,7 @@ def create_app(config: Config | None = None) -> Starlette:
 def _route_helpers(app: Starlette):
     def route(method: str, path: str, status_code: int = 200):
         def decorator(func):
-            signature = inspect.signature(func)
+            signature = inspect.signature(func, eval_str=True)
 
             async def endpoint(request: Request) -> Response:
                 kwargs = {}
@@ -652,14 +652,14 @@ def _query_param(request: Request, name: str, parameter: inspect.Parameter):
         return parameter.default
     else:
         raise _validation_error(f"Query parameter is required: {name}", {"field": name})
-    if isinstance(parameter.default, bool):
+    if parameter.annotation is bool or isinstance(parameter.default, bool):
         normalized = value.strip().lower()
         if normalized in {"1", "true", "yes", "on"}:
             return True
         if normalized in {"0", "false", "no", "off"}:
             return False
         raise _validation_error(f"Query parameter must be a boolean: {name}", {"field": name})
-    if isinstance(parameter.default, int):
+    if parameter.annotation is int or isinstance(parameter.default, int):
         try:
             return int(value)
         except ValueError as exc:
