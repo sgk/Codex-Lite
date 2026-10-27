@@ -30,7 +30,7 @@ from codex_lite_daemon.run_service import EventHub
 from codex_lite_daemon.runner.base import RunnerEvent
 from codex_lite_daemon.runner.codex_runner import CodexRunner
 from codex_lite_daemon.services import ChatService, MessageService, ProjectService
-from codex_lite_daemon.transcript_import import TranscriptImportService
+from codex_lite_daemon.transcript_import import TranscriptImportService, TranscriptSession
 from codex_lite_daemon.util.ids import new_id
 from codex_lite_daemon.util.time import utc_now
 import codex_lite_daemon.util.time as time_util
@@ -4624,7 +4624,7 @@ async def test_project_candidates_are_loaded_from_codex_state(linux_tmp_path: Pa
             {"path": str(project_dir), "name": "project", "threadCount": 1, "lastUsedAt": "2026-06-27T00:00:00Z"},
         ]
 
-        imported = (await client.post("/project-candidates/import")).json()
+        imported = (await client.post("/project-candidates/import", json={"paths": [candidate["path"] for candidate in candidates]})).json()
         assert [project["path"] for project in imported] == [str(newer_project_dir), str(project_dir)]
 
         project = next(item for item in imported if item["path"] == str(project_dir))
@@ -4665,6 +4665,77 @@ async def test_project_candidates_import_accepts_selected_paths(linux_tmp_path: 
 
         candidates = (await client.get("/project-candidates")).json()
         assert [candidate["path"] for candidate in candidates] == [str(second_dir)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [None, {}, {"paths": None}, {"paths": "all"}])
+async def test_history_import_requires_explicit_selection(linux_tmp_path: Path, body, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = create_app(make_test_config(linux_tmp_path))
+    service = app.state.remote_gateway.transcript_import
+    def unexpected_scan():
+        raise AssertionError("No selection must not scan or import all history")
+    monkeypatch.setattr(service, "_sessions_by_path", unexpected_scan)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        result = await client.post("/project-candidates/import", json=body)
+        assert result.status_code == 422
+        assert (await client.post("/project-candidates/import", json={"paths": []})).json() == []
+        assert (await client.get("/projects")).json() == []
+
+
+@pytest.mark.asyncio
+async def test_history_import_preserves_existing_and_unselected_chats(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = create_app(make_test_config(linux_tmp_path))
+    gateway = app.state.remote_gateway
+    paths = [linux_tmp_path / name for name in ("existing", "selected", "unselected")]
+    for path in paths:
+        path.mkdir()
+    existing = gateway.projects.create_project(str(paths[0]), "custom name")
+    chat = gateway.chats.upsert_chat_index(existing["id"], "owned", "custom title", "owned", utc_now(), utc_now())
+    before_project = gateway.projects.get_project_row(existing["id"])
+    before_chat = gateway.chats.get_chat_row(existing["id"], chat["id"])
+    sessions = {
+        paths[0]: [TranscriptSession("owned", paths[0], "do not archive", None, archived=True, archived_state_known=True)],
+        paths[1]: [TranscriptSession("owned", paths[1], "do not move", None, can_continue=True),
+                   TranscriptSession("selected-new", paths[1], "Selected", None, can_continue=True)],
+        paths[2]: [TranscriptSession("unselected-new", paths[2], "Unselected", None, can_continue=True)],
+    }
+    service = gateway.transcript_import
+    monkeypatch.setattr(service, "_sessions_by_path", lambda: sessions)
+    monkeypatch.setattr(service, "_transcript_sessions", lambda: [s for items in sessions.values() for s in items])
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        candidates = (await client.get("/project-candidates")).json()
+        assert {c["path"]: c["threadCount"] for c in candidates} == {str(paths[1]): 1, str(paths[2]): 1}
+        response = await client.post("/project-candidates/import", json={"paths": [str(paths[1]), str(paths[0])]})
+        assert response.status_code == 200
+        imported = response.json()
+        assert [p["path"] for p in imported] == [str(paths[1])]
+        assert [c["id"] for c in gateway.chats.list_chats(imported[0]["id"])] == ["selected-new"]
+        assert gateway.projects.get_project_row(existing["id"]) == before_project
+        assert gateway.chats.get_chat_row(existing["id"], chat["id"]) == before_chat
+        assert app.state.db.fetchone("SELECT id FROM chats WHERE id='unselected-new'") is None
+
+
+@pytest.mark.asyncio
+async def test_history_import_rolls_back_on_failure(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = create_app(make_test_config(linux_tmp_path))
+    service = app.state.remote_gateway.transcript_import
+    paths = [linux_tmp_path / name for name in ("first", "second")]
+    for path in paths:
+        path.mkdir()
+    monkeypatch.setattr(service, "_sessions_by_path", lambda: {
+        path: [TranscriptSession(f"thread-{path.name}", path, path.name, None, can_continue=True)] for path in paths
+    })
+    original_index = service.index_project
+    def fail_second(project, sessions):
+        original_index(project, sessions)
+        if project["path"] == str(paths[1]):
+            raise AppError("import_failed", "test import failure", 500)
+    monkeypatch.setattr(service, "index_project", fail_second)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/project-candidates/import", json={"paths": [str(p) for p in paths]})
+        assert response.status_code == 500
+        assert (await client.get("/projects")).json() == []
+        assert app.state.db.fetchall("SELECT id FROM chats") == []
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,50 @@
+<Window x:Class="CodexLite.ProjectHistoryImportDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="読み込む履歴を選択" Width="1000" Height="560" MinWidth="720" MinHeight="380"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="読み込むプロジェクトをチェックしてください。選択したプロジェクト配下の未アーカイブの会話を追加します。既存のプロジェクト・チャットは変更しません。"
+                   TextWrapping="Wrap" Margin="0,0,0,12"/>
+        <DockPanel Grid.Row="1" Margin="0,0,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button Content="表示中をすべて選択" Click="SelectVisible_Click" Margin="10,0,6,0" Padding="10,4"/>
+                <Button Content="選択をすべて解除" Click="ClearSelection_Click" Padding="10,4"/>
+            </StackPanel>
+            <TextBlock DockPanel.Dock="Left" Text="絞り込み" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBox x:Name="FilterBox" TextChanged="FilterBox_TextChanged" Padding="6,4"
+                     AutomationProperties.Name="プロジェクト名またはパスで絞り込み" ToolTip="プロジェクト名またはパスで絞り込み"/>
+        </DockPanel>
+        <DataGrid x:Name="CandidatesGrid" Grid.Row="2" AutoGenerateColumns="False" IsReadOnly="True"
+                  CanUserAddRows="False" CanUserDeleteRows="False" HeadersVisibility="Column"
+                  EnableRowVirtualization="True" EnableColumnVirtualization="True">
+            <DataGrid.Columns>
+                <DataGridTemplateColumn Header="読込" Width="55">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center"
+                                      AutomationProperties.Name="{Binding Name}"/>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTextColumn Header="プロジェクト" Binding="{Binding Name}" Width="170"/>
+                <DataGridTextColumn Header="ディレクトリ" Binding="{Binding Path}" Width="*"/>
+                <DataGridTextColumn Header="会話数" Binding="{Binding ThreadCount}" Width="70"/>
+                <DataGridTextColumn Header="最終利用" Binding="{Binding LastUsed}" Width="145"/>
+            </DataGrid.Columns>
+        </DataGrid>
+        <DockPanel Grid.Row="3" Margin="0,12,0,0">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button x:Name="ImportButton" Content="選択した履歴を読み込む" Click="Import_Click"
+                        IsDefault="True" IsEnabled="False" Padding="14,6" Margin="0,0,8,0"/>
+                <Button Content="キャンセル" IsCancel="True" Padding="14,6"/>
+            </StackPanel>
+            <TextBlock x:Name="SelectionSummary" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
+        </DockPanel>
+    </Grid>
+</Window>

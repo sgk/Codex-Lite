@@ -295,11 +295,14 @@ def create_app(config: Config | None = None) -> Starlette:
 
     @get("/project-candidates")
     async def list_project_candidates() -> list[dict]:
-        return transcript_import.list_project_candidates()
+        return await asyncio.to_thread(transcript_import.list_project_candidates)
 
     @post("/project-candidates/import")
-    async def import_project_candidates(body: dict | None = None) -> list[dict]:
-        projects_created = transcript_import.import_project_candidates(_optional_str_list(body, "paths") if body else None)
+    async def import_project_candidates(body: dict) -> list[dict]:
+        paths = _optional_str_list(body, "paths")
+        if paths is None:
+            raise _validation_error("読み込むプロジェクトのpathsを明示してください。", {"field": "paths"})
+        projects_created = await asyncio.to_thread(transcript_import.import_project_candidates, paths)
         if projects_created:
             remote_gateway.mark_catalog_changed()
         return projects_created

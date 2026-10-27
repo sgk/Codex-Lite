@@ -6410,30 +6410,23 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (candidates.Count > 0)
+        var dialog = new ProjectHistoryImportDialog(candidates) { Owner = this };
+        if (dialog.ShowDialog() == true && dialog.SelectedPaths.Count > 0)
         {
-            var preview = string.Join(Environment.NewLine, candidates.Take(20).Select(candidate => $"{candidate.Name} | {candidate.Path} | {candidate.ThreadCount} threads"));
-            if (candidates.Count > 20)
+            var selectedPaths = dialog.SelectedPaths.ToArray();
+            try
             {
-                preview += $"{Environment.NewLine}...";
+                await RunBusyAsync($"選択した{selectedPaths.Length}プロジェクトの履歴を読み込み中...", async () =>
+                {
+                    var imported = await _client.ImportProjectCandidatesAsync(selectedPaths) ?? [];
+                    await RefreshProjectsAsync();
+                    StatusText.Text = $"履歴の読み込み完了 | {imported.Count}プロジェクト";
+                });
             }
-            if (System.Windows.MessageBox.Show(this, preview, "Import Codex Projects", MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK)
+            catch (Exception ex)
             {
-                try
-                {
-                    await RunBusyAsync($"Importing {candidates.Count} project candidate(s)...", async () =>
-                    {
-                        var imported = await _client.ImportProjectCandidatesAsync(candidates.Select(candidate => candidate.Path)) ?? [];
-                        StatusText.Text = $"import complete | {imported.Count} project(s)";
-                        await RefreshProjectsAsync();
-                    });
-                }
-                catch (Exception ex)
-                {
-                    StatusText.Text = $"import error | {ex.Message}";
-                }
+                StatusText.Text = $"import error | {ex.Message}";
             }
-            return;
         }
     }
 

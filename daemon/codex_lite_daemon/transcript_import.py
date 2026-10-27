@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 from .codex_state import CodexStateService, CodexThreadMetadata
 from .config import Config
+from .errors import AppError
 from .provider_context import visible_user_request
 from .services import ChatService, ProjectService
 
@@ -51,8 +52,9 @@ class TranscriptImportService:
     def list_project_candidates(self) -> list[dict]:
         candidates: dict[Path, ProjectCandidate] = {}
         registered = {_path_key(Path(project["path"]).resolve()) for project in self.projects.list_projects()}
+        known_ids = self._registered_session_ids()
         for session in self._transcript_sessions():
-            if session.hidden or session.archived or _path_key(session.path) in registered:
+            if session.hidden or session.archived or not session.can_continue or session.id in known_ids or _path_key(session.path) in registered:
                 continue
             candidate = candidates.setdefault(session.path, ProjectCandidate(path=session.path))
             candidate.thread_count += 1
@@ -68,17 +70,30 @@ class TranscriptImportService:
             for candidate in sorted(candidates.values(), key=lambda item: item.last_used_at or "", reverse=True)
         ]
 
-    def import_project_candidates(self, paths: list[str] | None = None) -> list[dict]:
+    def _registered_session_ids(self) -> set[str]:
+        return {str(value) for row in self.chats.db.fetchall("SELECT id, codex_session_id FROM chats")
+                for value in (row["id"], row["codex_session_id"]) if value}
+
+    def import_project_candidates(self, paths: list[str]) -> list[dict]:
+        if not paths:
+            return []
         imported: list[dict] = []
-        candidates = self._candidates_from_paths(paths) if paths is not None else self.list_project_candidates()
         sessions_by_path = self._sessions_by_path()
-        for candidate in candidates:
-            try:
+        with self.chats.db.transaction():
+            candidates = self._candidates_from_paths(paths)
+            known_ids = self._registered_session_ids()
+            selected_sessions = {
+                path: [session for session in sessions if not session.hidden and not session.archived
+                       and session.can_continue and session.id not in known_ids]
+                for path, sessions in sessions_by_path.items()
+            }
+            for candidate in candidates:
+                path = Path(candidate["path"])
+                if not any(sessions for session_path, sessions in selected_sessions.items() if _path_key(session_path) == _path_key(path)):
+                    raise AppError("import_candidate_unavailable", "選択したプロジェクトに読み込み可能な履歴がありません。一覧を取得し直してください。", 409)
                 project = self.projects.create_project(candidate["path"], candidate["name"])
-                self.index_project(project, sessions_by_path)
+                self.index_project(project, selected_sessions)
                 imported.append(project)
-            except Exception:
-                continue
         return imported
 
     def index_registered_projects(self) -> int:
@@ -129,7 +144,9 @@ class TranscriptImportService:
         registered = {_path_key(Path(project["path"]).resolve()) for project in self.projects.list_projects()}
         for value in paths:
             path = self._candidate_path(value)
-            if path is None or _path_key(path) in registered or path in seen:
+            if path is None:
+                raise AppError("import_candidate_unavailable", "選択したプロジェクトのディレクトリを読み込めません。一覧を取得し直してください。", 409)
+            if _path_key(path) in registered or path in seen:
                 continue
             seen.add(path)
             candidates.append({"path": str(path), "name": path.name, "threadCount": 0, "lastUsedAt": None})
