@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
+using CodexLite.Services;
 
 namespace CodexLite.Models;
 
@@ -169,6 +170,11 @@ public sealed record MessageDto(
     bool SpacerIsLoading = false,
     long? HistorySequence = null)
 {
+    public string DisplayContent => IsUserMessage ? MessageAttachmentPresentation.Parse(Content, Attachments).Content : Content;
+
+    public IReadOnlyList<MessageAttachmentDto> DisplayAttachments => IsUserMessage
+        ? MessageAttachmentPresentation.Parse(Content, Attachments).Attachments : Attachments ?? [];
+
     public bool IsInlineStatus => Role.Equals("status", StringComparison.OrdinalIgnoreCase);
 
     public bool IsSpacer => Role.Equals("spacer", StringComparison.OrdinalIgnoreCase);

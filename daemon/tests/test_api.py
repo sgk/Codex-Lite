@@ -67,6 +67,23 @@ def test_message_timestamps_keep_microseconds_and_sort_with_legacy_seconds(linux
         db.close()
 
 
+def test_attachment_metadata_migrates_existing_message_table(linux_tmp_path: Path) -> None:
+    database_path = linux_tmp_path / "legacy.sqlite"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("""CREATE TABLE messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, role TEXT NOT NULL,
+                              content TEXT NOT NULL, run_id TEXT, created_at TEXT NOT NULL, kind TEXT NOT NULL)""")
+        connection.execute("INSERT INTO messages VALUES ('old', 'old-chat', 'user', 'old text', NULL, '2026-01-01T00:00:00Z', 'instruction')")
+    db = Database(database_path)
+    try:
+        db.migrate()
+        row = db.fetchone("SELECT content, attachments_json FROM messages WHERE id = 'old'")
+        assert row == {"content": "old text", "attachments_json": "[]"}
+        db.migrate()
+        assert db.fetchone("SELECT content, attachments_json FROM messages WHERE id = 'old'") == row
+    finally:
+        db.close()
+
+
 @pytest.fixture
 def linux_tmp_path() -> Path:
     path = Path(tempfile.mkdtemp(prefix="codex-lite-test-", dir="/tmp"))
@@ -3222,7 +3239,49 @@ async def test_app_server_run_can_be_steered(linux_tmp_path: Path) -> None:
     stored_messages = messages.list_messages(project_id, chat_id)
     assert stored_messages[-1]["id"] == steered["messageId"]
     assert stored_messages[-1]["content"] == f"please continue with more detail\n\nAttachments:\n- image.png: {image_path}\n- note.txt: {note_path}"
+    assert stored_messages[-1]["attachments"] == [
+        {"path": str(image_path), "name": "image.png", "kind": "image"},
+        {"path": str(note_path), "name": "note.txt", "kind": "file"},
+    ]
+    assert messages.list_run_instructions(result["runId"])[-1]["attachments"] == stored_messages[-1]["attachments"]
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_submission_persists_attachment_metadata_without_cloud_image(linux_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    image_path = project_dir / "photo.png"
+    image_path.write_bytes(b"local image")
+    app = create_app(make_test_config(linux_tmp_path))
+    gateway = app.state.remote_gateway
+    project = gateway.projects.create_project(str(project_dir))
+    chat = gateway.chats.create_chat(project["id"], "test")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_start(*args):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(gateway.app_runs, "_start_message_run_reserved", delayed_start)
+    metadata = [{"path": str(image_path), "name": "photo.png", "kind": "image"}]
+    try:
+        accepted = await gateway.app_runs.submit_message(project["id"], chat["id"], "見て", metadata, "attachment-request")
+        await started.wait()
+        stored = gateway.app_runs.messages.list_run_instructions(accepted["runId"])
+        assert len(stored) == 1 and stored[0]["attachments"] == metadata
+        assert stored[0]["requestId"] == "attachment-request"
+        page = await gateway.app_threads.list_message_page(project["id"], chat["id"], 10, None, None)
+        assert next(message for message in page["messages"] if message["id"] == accepted["messageId"])["attachments"] == metadata
+        remote = _remote_history(stored, str(project_dir))
+        assert len(remote) == 1 and "attachments" not in remote[0]
+        assert "local image" not in json.dumps(remote)
+    finally:
+        release.set()
+        await gateway.app_runs.close_submissions()
+        await gateway.app_runs.flush_events()
+        app.state.db.close()
 
 
 @pytest.mark.asyncio

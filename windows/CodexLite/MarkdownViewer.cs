@@ -142,6 +142,11 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
 
     public event EventHandler<MarkdownImageRequestedEventArgs>? ImageRequested;
 
+    public event EventHandler<MarkdownImageClickedEventArgs>? ImageClicked;
+
+    public double ImageMaxWidth { get; set; } = 720;
+    public double ImageMaxHeight { get; set; } = 600;
+
     public string Markdown
     {
         get => (string)GetValue(MarkdownProperty);
@@ -985,13 +990,21 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
         {
             Source = request.Source,
             Stretch = Stretch.Uniform,
-            MaxWidth = 720,
-            MaxHeight = 600,
+            MaxWidth = ImageMaxWidth,
+            MaxHeight = ImageMaxHeight,
             Margin = new Thickness(0, 4, 0, 4),
-            ToolTip = string.IsNullOrWhiteSpace(alternativeText) ? target : alternativeText,
+            ToolTip = ImageClicked is not null ? "クリックして拡大" : (string.IsNullOrWhiteSpace(alternativeText) ? target : alternativeText),
             Visibility = request.Source is null ? Visibility.Collapsed : Visibility.Visible
         };
-        image.MouseLeftButtonUp += (_, _) => LinkClicked?.Invoke(this, new MarkdownLinkClickedEventArgs(request.LinkTarget));
+        image.MouseLeftButtonUp += (_, args) =>
+        {
+            if (image.Source is not null && ImageClicked is not null)
+            {
+                args.Handled = true;
+                ImageClicked.Invoke(this, new MarkdownImageClickedEventArgs(image.Source, alternativeText));
+            }
+            else LinkClicked?.Invoke(this, new MarkdownLinkClickedEventArgs(request.LinkTarget));
+        };
         image.Cursor = System.Windows.Input.Cursors.Hand;
         var fallback = CreateImageFallback(alternativeText, request.LinkTarget, request.SourceTask is null ? "画像を表示できません" : "画像を読み込み中…");
         fallback.Visibility = request.Source is null ? Visibility.Visible : Visibility.Collapsed;
@@ -1072,6 +1085,12 @@ public sealed class MarkdownViewer : FlowDocumentScrollViewer
 public sealed class MarkdownLinkClickedEventArgs(string target) : EventArgs
 {
     public string Target { get; } = target;
+}
+
+public sealed class MarkdownImageClickedEventArgs(ImageSource source, string title) : EventArgs
+{
+    public ImageSource Source { get; } = source;
+    public string Title { get; } = title;
 }
 
 public sealed class MarkdownImageRequestedEventArgs(string target, string alternativeText) : EventArgs

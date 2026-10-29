@@ -189,7 +189,7 @@ def test_archive_cleanup_is_bounded_and_preserves_usage(history):
     service, _, messages, db, project_id, _, _ = history
     db.execute("INSERT INTO chats(id,project_id,title,created_at,updated_at,archived_at) VALUES ('other',?,'other','now','now','now')", (project_id,))
     messages.insert_message("thread-tail", "user", "instruction", kind="instruction")
-    db.execute("INSERT INTO messages VALUES ('m','other','user','other',NULL,'now','instruction')")
+    db.execute("INSERT INTO messages(id, chat_id, role, content, run_id, created_at, kind) VALUES ('m','other','user','other',NULL,'now','instruction')")
     db.execute("""INSERT INTO token_usage_samples(chat_id,provider,thread_id,turn_id,recorded_at,
         input_tokens,cached_input_tokens,output_tokens,reasoning_output_tokens,total_tokens,thread_total_signature)
         VALUES ('thread-tail','openai','t','turn','now',10,0,2,0,12,'signature')""")

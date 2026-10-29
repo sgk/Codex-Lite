@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 def project_out(row: dict) -> dict:
     return {
         "id": row["id"],
@@ -26,7 +28,7 @@ def chat_out(row: dict) -> dict:
 
 
 def message_out(row: dict) -> dict:
-    return {
+    result = {
         "id": row["id"],
         "chatId": row["chat_id"],
         "role": row["role"],
@@ -35,6 +37,12 @@ def message_out(row: dict) -> dict:
         "createdAt": row["created_at"],
         "kind": row["kind"],
     }
+    raw = row.get("attachments_json")
+    if raw:
+        attachments = json.loads(raw)
+        if attachments:
+            result["attachments"] = attachments
+    return result
 
 
 def automation_out(row: dict) -> dict:

@@ -30,6 +30,24 @@ def append(path, records):
 
 
 @pytest.mark.asyncio
+async def test_attachment_metadata_survives_history_projection_and_restart(history):
+    service, _, _, _, project_id, _, _ = history
+    attachment = {"path": "/mnt/c/Users/me/AppData/Local/CodexLite/attachments/clipboard-20261029-164954-1234567890abcdef1234567890abcdef.png",
+                  "name": "clipboard-20261029-164954-1234567890abcdef1234567890abcdef.png", "kind": "image"}
+    message = service.messages.insert_message("thread-tail", "user", "見て\n\nAttachments:\n- " + attachment["name"],
+                                              run_id="test-run", kind="instruction", attachments=[attachment])
+    assert message["attachments"] == [attachment]
+    page = await service.list_message_page(project_id, "thread-tail", 10, None, None)
+    assert next(item for item in page["messages"] if item["id"] == message["id"])["attachments"] == [attachment]
+    second = reopened(service)
+    try:
+        page = await second.list_message_page(project_id, "thread-tail", 10, None, None)
+        assert next(item for item in page["messages"] if item["id"] == message["id"])["attachments"] == [attachment]
+    finally:
+        second.messages.db.close()
+
+
+@pytest.mark.asyncio
 async def test_restart_and_append_only_parse_new_records(history, monkeypatch):
     service, _, _, _, project_id, path, meta = history
     write_lines(path, [meta, *[assistant(i) for i in range(100)]])

@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT NOT NULL,
   run_id TEXT,
   created_at TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN ('instruction', 'work', 'conclusion', 'waiting', 'status', 'activity'))
+  kind TEXT NOT NULL CHECK(kind IN ('instruction', 'work', 'conclusion', 'waiting', 'status', 'activity')),
+  attachments_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS submission_receipts (
@@ -242,6 +243,8 @@ class Database:
             if "kind" not in message_columns:
                 self._conn.execute("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'conclusion'")
                 self._conn.execute("UPDATE messages SET kind = 'instruction' WHERE role = 'user'")
+            if "attachments_json" not in message_columns:
+                self._conn.execute("ALTER TABLE messages ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
             run_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()}
             for name, declaration in {
                 "provider": "TEXT",

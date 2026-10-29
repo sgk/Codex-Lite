@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Callable
@@ -668,13 +669,15 @@ class MessageService:
         )
         return [message_out(row) for row in rows]
 
-    def insert_message(self, chat_id: str, role: str, content: str, run_id: str | None = None, kind: str | None = None, created_at: str | None = None) -> dict:
+    def insert_message(self, chat_id: str, role: str, content: str, run_id: str | None = None, kind: str | None = None, created_at: str | None = None, attachments: list[dict] | None = None) -> dict:
         message_id = new_id("msg")
         now = created_at or utc_now()
         clean_kind = _message_kind(role, kind)
+        metadata = [{"path": str(item.get("path") or ""), "name": str(item.get("name") or Path(str(item.get("path") or "")).name),
+                     "kind": "image" if item.get("kind") == "image" else "file"} for item in attachments or []]
         self.db.execute(
-            "INSERT INTO messages(id, chat_id, role, content, run_id, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (message_id, chat_id, role, content, run_id, now, clean_kind),
+            "INSERT INTO messages(id, chat_id, role, content, run_id, created_at, kind, attachments_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (message_id, chat_id, role, content, run_id, now, clean_kind, json.dumps(metadata, ensure_ascii=False)),
         )
         self.db.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (now, chat_id))
         row = self.db.fetchone("SELECT * FROM messages WHERE id = ?", (message_id,))

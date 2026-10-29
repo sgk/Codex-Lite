@@ -1166,10 +1166,12 @@
                                                         Background="#D7A928"
                                                         Margin="-6,-6,0,-6"
                                                         Visibility="{Binding IsWorkProgressMessage, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                                <local:MarkdownViewer Markdown="{Binding Content}"
+                                                <local:MarkdownViewer Markdown="{Binding DisplayContent}"
                                                                       SearchText="{Binding HistorySearchTerm, RelativeSource={RelativeSource AncestorType={x:Type Window}}}"
                                                                       LinkClicked="MarkdownViewer_LinkClicked"
-                                                                      ImageRequested="MarkdownViewer_ImageRequested">
+                                                                      ImageRequested="MarkdownViewer_ImageRequested"
+                                                                      ImageClicked="MarkdownViewer_ImageClicked"
+                                                                      ImageMaxWidth="240" ImageMaxHeight="160">
                                                     <local:MarkdownViewer.Style>
                                                         <Style TargetType="{x:Type local:MarkdownViewer}" BasedOn="{StaticResource MessageMarkdownViewer}">
                                                             <Style.Triggers>
@@ -1190,7 +1192,7 @@
                                                            Margin="-6"/>
                                             </Grid>
                                         </Border>
-                                        <ItemsControl ItemsSource="{Binding Attachments}" Margin="0,6,0,0">
+                                        <ItemsControl ItemsSource="{Binding DisplayAttachments}" Margin="0,6,0,0">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
                                                     <Border BorderBrush="#D6DCE5" BorderThickness="1" Background="#FAFBFC" Padding="6" Margin="0,2,0,4" CornerRadius="2">
@@ -1201,7 +1203,7 @@
                                                                 <RowDefinition Height="Auto"/>
                                                             </Grid.RowDefinitions>
                                                             <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                                                            <Border Grid.Row="1" BorderBrush="#E1E4E8" BorderThickness="1" Background="White" Margin="0,6,0,4" MaxHeight="320">
+                                                            <Border Grid.Row="1" BorderBrush="#E1E4E8" BorderThickness="1" Background="White" Margin="0,6,0,4" HorizontalAlignment="Left">
                                                                 <Border.Style>
                                                                     <Style TargetType="{x:Type Border}">
                                                                         <Setter Property="Visibility" Value="Collapsed"/>
@@ -1212,7 +1214,11 @@
                                                                         </Style.Triggers>
                                                                     </Style>
                                                                 </Border.Style>
-                                                                <Image Source="{Binding Uri}" MaxHeight="300" Stretch="Uniform"/>
+                                                                <Grid>
+                                                                    <TextBlock Text="画像を読み込み中…" Foreground="#666" Margin="8"/>
+                                                                    <Image MaxWidth="240" MaxHeight="160" Stretch="Uniform" Cursor="Hand"
+                                                                           ToolTip="クリックして拡大" Loaded="AttachmentImage_Loaded" DataContextChanged="AttachmentImage_DataContextChanged" MouseLeftButtonUp="AttachmentImage_MouseLeftButtonUp"/>
+                                                                </Grid>
                                                             </Border>
                                                             <TextBlock Grid.Row="2" Text="{Binding Path}" Foreground="#666" FontSize="11" TextWrapping="Wrap" Visibility="{Binding PathVisibility}"/>
                                                         </Grid>
@@ -1260,6 +1266,8 @@
                                             <local:MarkdownViewer Markdown="{Binding ActivityDetailText, Mode=OneWay}"
                                                                   Style="{StaticResource MessageMarkdownViewer}"
                                                                   ImageRequested="MarkdownViewer_ImageRequested"
+                                                                  ImageClicked="MarkdownViewer_ImageClicked"
+                                                                  ImageMaxWidth="240" ImageMaxHeight="160"
                                                                   MaxHeight="600"/>
                                         </Border>
                                     </Expander>

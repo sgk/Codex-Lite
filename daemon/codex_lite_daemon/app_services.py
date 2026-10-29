@@ -579,7 +579,7 @@ class AppServerRunService:
         run_id = new_id("run")
         with self.chats.db.transaction():
             self._insert_run_row(run_id, chat_id)
-            message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
+            message = self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction", attachments=attachments)
             if request_id is not None:
                 self.chats.db.execute("INSERT INTO submission_receipts(request_id, payload_hash, run_id, message_id, created_at) VALUES (?, ?, ?, ?, ?)", (request_id, payload_hash, run_id, message["id"], message["createdAt"]))
         # Admission has no await before this reservation. Slow provider requests
@@ -679,7 +679,7 @@ class AppServerRunService:
         if accepted_run_id is None:
             self._insert_run_row(run_id, chat_id)
         try:
-            user_message = accepted_message if accepted_message is not None else self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction")
+            user_message = accepted_message if accepted_message is not None else self.messages.insert_message(chat_id, "user", _content_with_attachment_summary(content, attachments or []), run_id=run_id, kind="instruction", attachments=attachments)
         except Exception as exc:
             self._finish_run_row(run_id, "failed", str(exc), "user_message_store_failed")
             raise
@@ -1251,6 +1251,7 @@ class AppServerRunService:
                     run_id=run_id,
                     kind="instruction",
                     created_at=accepted_at,
+                    attachments=attachments,
                 )
                 if request_id is not None:
                     self.chats.db.execute("INSERT INTO submission_receipts(request_id, payload_hash, run_id, message_id, created_at) VALUES (?, ?, ?, ?, ?)", (request_id, payload_hash, run_id, user_message["id"], accepted_at))

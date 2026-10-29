@@ -9712,6 +9712,93 @@ public partial class MainWindow : Window
         await OpenMarkdownLinkAsync(sender, e.Target);
     }
 
+    private void MarkdownViewer_ImageClicked(object sender, MarkdownImageClickedEventArgs e)
+    {
+        ShowExpandedImage(e.Source, e.Title);
+    }
+
+    private async void AttachmentImage_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Image { DataContext: MessageAttachmentDto attachment } image || image.Parent is not Grid container)
+            return;
+        var status = container.Children.OfType<TextBlock>().FirstOrDefault();
+        image.Source = null;
+        image.Tag = null;
+        if (status is not null)
+        {
+            status.Text = "画像を読み込み中…";
+            status.Visibility = Visibility.Visible;
+        }
+        try
+        {
+            var path = AttachmentImagePath.Resolve(attachment, AttachmentDirectory(), _wslDistroName);
+            var source = await Task.Run(() => ReadAttachmentImage(path, 480));
+            if (!image.IsLoaded || !ReferenceEquals(image.DataContext, attachment)) return;
+            image.Source = source;
+            image.Tag = path;
+            if (status is not null) status.Visibility = Visibility.Collapsed;
+        }
+        catch (Exception ex)
+        {
+            if (!image.IsLoaded || !ReferenceEquals(image.DataContext, attachment)) return;
+            if (status is not null) status.Text = "画像を表示できません（元のファイルを確認してください）";
+            WritePerformanceLog("attachment-thumbnail-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+        }
+    }
+
+    private void AttachmentImage_DataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (sender is System.Windows.Controls.Image { IsLoaded: true } image)
+            AttachmentImage_Loaded(image, new RoutedEventArgs());
+    }
+
+    private async void AttachmentImage_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Image { Tag: string path } image || image.Source is null) return;
+        e.Handled = true;
+        try
+        {
+            var source = await Task.Run(() => ReadAttachmentImage(path, 1920));
+            ShowExpandedImage(source, (image.DataContext as MessageAttachmentDto)?.Name ?? "画像");
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"画像を開けません: {ShortError(ex)}";
+            WritePerformanceLog("attachment-expand-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
+        }
+    }
+
+    private static BitmapImage ReadAttachmentImage(string path, int decodeWidth)
+    {
+        using var stream = File.OpenRead(path);
+        var image = new BitmapImage();
+        image.BeginInit();
+        image.CacheOption = BitmapCacheOption.OnLoad;
+        image.DecodePixelWidth = decodeWidth;
+        image.StreamSource = stream;
+        image.EndInit();
+        image.Freeze();
+        return image;
+    }
+
+    private void ShowExpandedImage(ImageSource source, string title)
+    {
+        var close = new Button { Content = "閉じる", IsCancel = true, HorizontalAlignment = System.Windows.HorizontalAlignment.Right, MinWidth = 80, Margin = new Thickness(8) };
+        var panel = new DockPanel();
+        DockPanel.SetDock(close, Dock.Bottom);
+        panel.Children.Add(close);
+        panel.Children.Add(new System.Windows.Controls.Image { Source = source, Stretch = Stretch.Uniform, Margin = new Thickness(8) });
+        var dialog = new Window
+        {
+            Owner = this, Title = string.IsNullOrWhiteSpace(title) ? "画像" : title,
+            Width = Math.Min(1100, SystemParameters.WorkArea.Width * 0.9),
+            Height = Math.Min(850, SystemParameters.WorkArea.Height * 0.9),
+            WindowStartupLocation = WindowStartupLocation.CenterOwner, Content = panel
+        };
+        close.Click += (_, _) => dialog.Close();
+        dialog.ShowDialog();
+    }
+
     private void MarkdownViewer_ImageRequested(object sender, MarkdownImageRequestedEventArgs e)
     {
         var target = e.Target.Trim();
