@@ -218,6 +218,7 @@ public partial class MainWindow : Window
     private readonly List<QueuedComposerSubmission> _queuedComposerSubmissions = new();
     private readonly ObservableCollection<QueuedComposerSubmission> _visibleComposerSubmissions = new();
     private string _textSizeSetting = "small";
+    private string _composerSendKey = ComposerSendKey.CtrlEnter;
     private string _codexHomeMode = DefaultCodexHomeMode();
     private bool _wrapFileText;
     private readonly Dictionary<string, ActiveUiRun> _activeRunsByChat = new(StringComparer.Ordinal);
@@ -2525,6 +2526,8 @@ public partial class MainWindow : Window
             }
             _textSizeSetting = NormalizeTextSize(state?.TextSize);
             ApplyTextSizeSetting(_textSizeSetting);
+            _composerSendKey = ComposerSendKey.Normalize(state?.ComposerSendKey);
+            UpdateComposerSendKeyHints();
             _codexHomeMode = NormalizeCodexHomeMode(state?.CodexHomeMode) ?? DefaultCodexHomeMode();
             _wrapFileText = state?.WrapFileText ?? false;
             _persistedSelectedProjectId = string.IsNullOrWhiteSpace(state?.SelectedProjectId) ? null : state.SelectedProjectId;
@@ -2564,13 +2567,16 @@ public partial class MainWindow : Window
             ApplyWindowPlacement(state?.Window);
             ApplyTreePaneWidth(state?.TreePaneWidth);
         }
-        catch
+        catch (Exception ex)
         {
+            WritePerformanceLog("ui-state-load-error", $"type={LogText(ex.GetType().Name)} message={LogText(ex.Message)}");
             _persistedExpandedProjectIds.Clear();
             _persistedProjectOrderIds.Clear();
             _persistedChatOrderIdsByProject.Clear();
             _textSizeSetting = "small";
             ApplyTextSizeSetting(_textSizeSetting);
+            _composerSendKey = "unavailable";
+            UpdateComposerSendKeyHints();
             _codexHomeMode = DefaultCodexHomeMode();
             _wrapFileText = false;
             _persistedSelectedProjectId = null;
@@ -2634,7 +2640,8 @@ public partial class MainWindow : Window
             _composerDraftsByChat.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             _newChatComposerDraftsByProject.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             _remoteSyncEnabled,
-            RemoteSyncFeature.IsEnabled ? RemoteSyncFeature.Configuration!.Identity : null);
+            RemoteSyncFeature.IsEnabled ? RemoteSyncFeature.Configuration!.Identity : null,
+            _composerSendKey);
         File.WriteAllText(_uiStatePath, JsonSerializer.Serialize(state, _json));
     }
 
@@ -2843,7 +2850,7 @@ public partial class MainWindow : Window
             Owner = this,
             Title = "設定",
             Width = 440,
-            Height = 390,
+            Height = 470,
             MinWidth = 320,
             MinHeight = 220,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
@@ -2875,6 +2882,31 @@ public partial class MainWindow : Window
             choices.Children.Add(radio);
         }
         content.Children.Add(choices);
+        content.Children.Add(new TextBlock { Text = "メッセージの送信キー", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 18, 0, 8) });
+        var sendKeyChoices = new StackPanel();
+        TextBlock? sendKeyError = null;
+        foreach (var (label, value) in new[]
+        {
+            ("Ctrl+Enterで送信（Enterで改行）", ComposerSendKey.CtrlEnter),
+            ("Enterで送信（Shift+Enterで改行）", ComposerSendKey.Enter)
+        })
+        {
+            var radio = new RadioButton { Content = label, Tag = value, GroupName = "ComposerSendKey", IsChecked = _composerSendKey == value, Margin = new Thickness(0, 0, 0, 6) };
+            radio.Checked += (_, _) =>
+            {
+                _composerSendKey = value;
+                UpdateComposerSendKeyHints();
+                SaveUiState();
+                if (sendKeyError is not null) sendKeyError.Visibility = Visibility.Collapsed;
+            };
+            sendKeyChoices.Children.Add(radio);
+        }
+        content.Children.Add(sendKeyChoices);
+        if (_composerSendKey is not (ComposerSendKey.CtrlEnter or ComposerSendKey.Enter))
+        {
+            sendKeyError = new TextBlock { Text = "送信キー設定が不正です。上のいずれかを選んでください。", TextWrapping = TextWrapping.Wrap };
+            content.Children.Add(sendKeyError);
+        }
         content.Children.Add(new TextBlock { Text = "CODEX_HOME", FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 18, 0, 8) });
         var codexChoices = new StackPanel();
         foreach (var (label, value, description) in new[]
@@ -2942,7 +2974,7 @@ public partial class MainWindow : Window
             };
             content.Children.Add(remoteButton);
         }
-        panel.Children.Add(content);
+        panel.Children.Add(new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
         dialog.Content = panel;
         dialog.ShowDialog();
     }
@@ -7206,11 +7238,21 @@ public partial class MainWindow : Window
         {
             return;
         }
-        if (e.Key == Key.Enter && e.KeyboardDevice.Modifiers == System.Windows.Input.ModifierKeys.Control)
+        var modifiers = e.KeyboardDevice.Modifiers;
+        if (ComposerSendKey.ShouldSend(_composerSendKey, e.Key == Key.Enter,
+            modifiers.HasFlag(ModifierKeys.Control), modifiers.HasFlag(ModifierKeys.Shift),
+            modifiers.HasFlag(ModifierKeys.Alt), modifiers.HasFlag(ModifierKeys.Windows), false))
         {
             e.Handled = true;
             await SubmitMessageBoxAsync();
         }
+    }
+
+    private void UpdateComposerSendKeyHints()
+    {
+        var hint = ComposerSendKey.Hint(_composerSendKey);
+        SendButton.ToolTip = hint;
+        NewChatSendButton.ToolTip = hint;
     }
 
     private bool TryHandleComposerPaste(System.Windows.Input.KeyEventArgs e)
@@ -10606,7 +10648,8 @@ public sealed record UiState(
     Dictionary<string, string>? ComposerDraftsByChat = null,
     Dictionary<string, string>? NewChatComposerDraftsByProject = null,
     bool CloudSyncEnabled = false,
-    string? CloudSyncIdentity = null);
+    string? CloudSyncIdentity = null,
+    string? ComposerSendKey = null);
 
 public sealed record WindowPlacementState(
     double Left,

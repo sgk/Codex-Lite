@@ -17,7 +17,7 @@ import {
   type Unsubscribe,
 } from "firebase/firestore";
 import type { FirebasePublicConfig, RemoteAttachment, RemoteOperation, RemoteTaskPayload } from "../../shared/src/types.js";
-import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection } from "./conversation-behavior.js";
+import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, loadComposerSendKey, normalizeComposerSendKey, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, saveComposerSendKey, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction, type ChatSelection, type ComposerSendKey } from "./conversation-behavior.js";
 import { messageReadState } from "../../shared/src/unread.js";
 import { renderMarkdown } from "./markdown.js";
 import { retryComposerTarget } from "./conversation-behavior.js";
@@ -59,6 +59,8 @@ const elements = {
   device: byId<HTMLSelectElement>("device"), project: byId<HTMLSelectElement>("project"), chat: byId<HTMLSelectElement>("chat"),
   newChat: byId<HTMLInputElement>("new-chat"),
   content: byId<HTMLTextAreaElement>("content"), send: byId<HTMLButtonElement>("send"),
+  webSettings: byId<HTMLButtonElement>("web-settings"), settingsDialog: byId<HTMLDialogElement>("settings-dialog"),
+  settingsClose: byId<HTMLButtonElement>("settings-close"), sendKey: byId<HTMLSelectElement>("composer-send-key"), settingsError: byId<HTMLElement>("settings-error"),
   approvalLevel: byId<HTMLSelectElement>("approval-level"), model: byId<HTMLSelectElement>("model"), reasoning: byId<HTMLSelectElement>("reasoning"), attachFile: byId<HTMLButtonElement>("attach-file"), fileInput: byId<HTMLInputElement>("file-input"), attachments: byId<HTMLElement>("attachments"), composer: byId<HTMLElement>("composer"),
   conversationBody: byId<HTMLElement>("conversation-body"), history: byId<HTMLElement>("history"), sendQueue: byId<HTMLElement>("send-queue"), error: byId<HTMLElement>("error"), runProgress: byId<HTMLElement>("run-progress"), runProgressText: byId<HTMLElement>("run-progress-text"), cancelRun: byId<HTMLButtonElement>("cancel-run"), approvalActions: byId<HTMLElement>("approval-actions"), approvalSummary: byId<HTMLElement>("approval-summary"),
   usagePanel: byId<HTMLElement>("usage-panel"), usageRefresh: byId<HTMLButtonElement>("usage-refresh"), usageProvider: byId<HTMLElement>("usage-provider"), usageFiveText: byId<HTMLElement>("usage-five-text"), usageWeekText: byId<HTMLElement>("usage-week-text"), usageCredits: byId<HTMLElement>("usage-credits"), usageFiveBar: byId<HTMLElement>("usage-five-bar"), usageWeekBar: byId<HTMLElement>("usage-week-bar"), usageFiveStart: byId<HTMLElement>("usage-five-start"), usageFiveEnd: byId<HTMLElement>("usage-five-end"), usageWeekStart: byId<HTMLElement>("usage-week-start"), usageWeekEnd: byId<HTMLElement>("usage-week-end"),
@@ -122,6 +124,34 @@ let composerDraftContext = "";
 let composerDrafts = new Map<string, { content: string; updatedAt: number }>();
 let historyFollowingEnd = true;
 let historyFollowFrame: number | undefined;
+let composerSendKey: ComposerSendKey | null = null;
+try {
+  composerSendKey = loadComposerSendKey(localStorage);
+} catch (error) {
+  elements.settingsError.textContent = `送信キー設定を読み込めません: ${error instanceof Error ? error.message : String(error)}`;
+  elements.error.textContent = elements.settingsError.textContent;
+}
+elements.sendKey.value = composerSendKey ?? "";
+function updateComposerSendKeyHint(): void {
+  elements.send.title = composerSendKey === "enter" ? "Enterで送信・Shift+Enterで改行"
+    : composerSendKey === "ctrl-enter" ? "Ctrl+Enterで送信・Enterで改行" : "送信キー設定を確認してください。";
+}
+updateComposerSendKeyHint();
+elements.webSettings.addEventListener("click", () => elements.settingsDialog.showModal());
+elements.settingsClose.addEventListener("click", () => elements.settingsDialog.close());
+elements.sendKey.addEventListener("change", () => {
+  const next = normalizeComposerSendKey(elements.sendKey.value);
+  try {
+    saveComposerSendKey(localStorage, next);
+    composerSendKey = next;
+    if (elements.error.textContent === elements.settingsError.textContent) elements.error.textContent = "";
+    elements.settingsError.textContent = "";
+    updateComposerSendKeyHint();
+  } catch (error) {
+    elements.sendKey.value = composerSendKey ?? "";
+    elements.settingsError.textContent = `送信キー設定を保存できません: ${error instanceof Error ? error.message : String(error)}`;
+  }
+});
 
 function updateVisualViewportHeight(): void {
   const height = window.visualViewport?.height ?? window.innerHeight;
@@ -136,6 +166,7 @@ elements.logout.addEventListener("click", () => void signOut(auth));
 elements.device.addEventListener("change", subscribeDeviceContents);
 elements.send.addEventListener("click", () => void sendInstruction());
 elements.content.addEventListener("keydown", (event) => {
+  if (composerSendKey === null) return;
   if (!shouldSubmitComposer(
     event.key,
     event.ctrlKey,
@@ -143,6 +174,7 @@ elements.content.addEventListener("keydown", (event) => {
     event.altKey,
     event.metaKey,
     event.isComposing || event.keyCode === 229,
+    composerSendKey,
   )) return;
   event.preventDefault();
   void sendInstruction();

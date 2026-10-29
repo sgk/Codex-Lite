@@ -9,7 +9,18 @@
     <title>Codex Lite Remote</title>
   </head>
   <body>
-    <header><div><p class="eyebrow">REMOTE WORKSPACE</p><h1>Codex Lite</h1></div><div class="header-actions"><span id="build-info" class="build-info"></span><button id="logout" hidden>ログアウト</button></div></header>
+    <header><div><p class="eyebrow">REMOTE WORKSPACE</p><h1>Codex Lite</h1></div><div class="header-actions"><span id="build-info" class="build-info"></span><button id="web-settings" type="button" class="secondary">設定</button><button id="logout" hidden>ログアウト</button></div></header>
+    <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
+      <h2 id="settings-title">設定</h2>
+      <label for="composer-send-key">メッセージの送信キー</label>
+      <select id="composer-send-key">
+        <option value="ctrl-enter">Ctrl+Enterで送信（Enterで改行）</option>
+        <option value="enter">Enterで送信（Shift+Enterで改行）</option>
+      </select>
+      <p class="muted">このブラウザーに保存します。IME変換中は送信しません。</p>
+      <p id="settings-error" role="alert"></p>
+      <button id="settings-close" type="button">閉じる</button>
+    </dialog>
     <main>
       <section id="startup-loading" class="startup-loading" role="status"><span class="spinner" aria-hidden="true"></span><span>読み込み中…</span></section>
       <section id="login" class="card" hidden>

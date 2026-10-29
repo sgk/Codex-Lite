@@ -22,7 +22,7 @@ test("同じミリ秒内でも送信と応答をデーモン時刻順に並べ�
   ]);
   assert.deepEqual(ordered.map(item => item.sourceOrder), [2, 1, 0]);
 });
-import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction } from "./conversation-behavior.js";
+import { activityCountLabel, approvalSummary, chatSelectionFromHash, chatSelectionHash, chatTreeIndicator, composerDraftContextKey, composerOperation, createdChatSelectionAction, deepSeekBalanceLabel, historyChunksAreComplete, historyUpdatePosition, isSupportedImageMimeType, loadComposerSendKey, normalizeComposerSendKey, parseHistoryChunk, permissionModeForSettings, permissionSettingsForMode, projectTreeIndicator, remainingChargeLabel, saveComposerSendKey, sidebarSwipeAction, shouldSubmitComposer, sortConversationTimeline, titleFromFirstInstruction } from "./conversation-behavior.js";
 
 test("新規チャットのタイトルはデスクトップと同じく最初の指示から作る", () => {
   assert.equal(titleFromFirstInstruction("  最初の\n\n指示です  "), "最初の 指示です");
@@ -103,6 +103,35 @@ test("Ctrl+Enterだけで送信しEnterとIME変換中は送信しない", () =>
   assert.equal(shouldSubmitComposer("Enter", true, false, true, false, false), false);
   assert.equal(shouldSubmitComposer("Enter", true, false, false, true, false), false);
   assert.equal(shouldSubmitComposer("Enter", true, false, false, false, true), false);
+});
+
+test("Enter送信ではShift+Enterを改行に残しIME確定を送信しない", () => {
+  assert.equal(shouldSubmitComposer("Enter", false, false, false, false, false, "enter"), true);
+  assert.equal(shouldSubmitComposer("Enter", false, true, false, false, false, "enter"), false);
+  assert.equal(shouldSubmitComposer("Enter", true, false, false, false, false, "enter"), false);
+  assert.equal(shouldSubmitComposer("Enter", false, false, true, false, false, "enter"), false);
+  assert.equal(shouldSubmitComposer("Enter", false, false, false, true, false, "enter"), false);
+  assert.equal(shouldSubmitComposer("Enter", false, false, false, false, true, "enter"), false);
+  assert.equal(shouldSubmitComposer("a", false, false, false, false, false, "enter"), false);
+  assert.equal(normalizeComposerSendKey(null), "ctrl-enter");
+  assert.throws(() => normalizeComposerSendKey("invalid"), /不正/);
+  assert.equal(normalizeComposerSendKey("enter"), "enter");
+});
+
+test("送信キー設定はブラウザーに保存・復元しストレージエラーを隠さない", () => {
+  const data = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => data.get(key) ?? null,
+    setItem: (key: string, value: string) => { data.set(key, value); },
+  };
+  assert.equal(loadComposerSendKey(storage), "ctrl-enter");
+  saveComposerSendKey(storage, "enter");
+  assert.equal(loadComposerSendKey(storage), "enter");
+  saveComposerSendKey(storage, "ctrl-enter");
+  assert.equal(loadComposerSendKey(storage), "ctrl-enter");
+  assert.throws(() => loadComposerSendKey({ getItem: () => { throw new Error("read failed"); } }), /read failed/);
+  assert.throws(() => saveComposerSendKey({ setItem: () => { throw new Error("write failed"); } }, "enter"), /write failed/);
+  assert.equal(loadComposerSendKey(storage), "ctrl-enter");
 });
 
 test("画像添付で扱えるMIMEタイプだけを受け入れる", () => {

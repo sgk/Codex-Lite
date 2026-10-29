@@ -126,6 +126,23 @@ export function chatSelectionFromHash(hash: string): ChatSelection | undefined {
   } catch { return undefined; }
 }
 
+export type ComposerSendKey = "ctrl-enter" | "enter";
+export const COMPOSER_SEND_KEY_STORAGE_KEY = "codex-lite.composer-send-key";
+
+export function normalizeComposerSendKey(value: string | null): ComposerSendKey {
+  if (value === null || value === "ctrl-enter") return "ctrl-enter";
+  if (value === "enter") return "enter";
+  throw new Error("送信キー設定の値が不正です。設定画面で選び直してください。");
+}
+
+export function loadComposerSendKey(storage: Pick<Storage, "getItem">): ComposerSendKey {
+  return normalizeComposerSendKey(storage.getItem(COMPOSER_SEND_KEY_STORAGE_KEY));
+}
+
+export function saveComposerSendKey(storage: Pick<Storage, "setItem">, mode: ComposerSendKey): void {
+  storage.setItem(COMPOSER_SEND_KEY_STORAGE_KEY, mode);
+}
+
 export function shouldSubmitComposer(
   key: string,
   ctrlKey: boolean,
@@ -133,8 +150,10 @@ export function shouldSubmitComposer(
   altKey: boolean,
   metaKey: boolean,
   isComposing: boolean,
+  mode: ComposerSendKey = "ctrl-enter",
 ): boolean {
-  return key === "Enter" && ctrlKey && !shiftKey && !altKey && !metaKey && !isComposing;
+  return key === "Enter" && !shiftKey && !altKey && !metaKey && !isComposing
+    && (mode === "enter" ? !ctrlKey : ctrlKey);
 }
 
 export function composerDraftContextKey(deviceId: string, projectId: string, chatId: string): string {
