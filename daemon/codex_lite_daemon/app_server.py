@@ -54,7 +54,12 @@ class AppServerClient:
 
     @property
     def is_running(self) -> bool:
-        return self._process is not None and self._process.returncode is None
+        return (
+            self._process is not None
+            and self._process.returncode is None
+            and self._reader_task is not None
+            and not self._reader_task.done()
+        )
 
     @property
     def stderr_tail(self) -> list[str]:
@@ -218,7 +223,9 @@ class AppServerClient:
         async with self._start_lock:
             if self.is_running and self._active_model_provider == self._desired_model_provider:
                 return
-            if self.is_running:
+            # A process can remain alive after its stdout reader has failed.
+            # Retire that half-alive transport before replacing it.
+            if self._process is not None:
                 await self.close()
             codex = await self.codex_runner.resolve()
             self._prepare_codex_home()
@@ -323,9 +330,14 @@ class AppServerClient:
                 except asyncio.TimeoutError:
                     process.kill()
                     await process.wait()
-        for task in (self._reader_task, self._stderr_task):
+        tasks = [task for task in (self._reader_task, self._stderr_task) if task is not None]
+        for task in tasks:
             if task is not None and not task.done():
                 task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._reader_task = None
+        self._stderr_task = None
 
     def _cancel_idle_shutdown(self) -> None:
         task = self._idle_shutdown_task
@@ -370,43 +382,56 @@ class AppServerClient:
         process = self._process
         assert process is not None
         assert process.stdout is not None
-        while True:
-            line = await process.stdout.readline()
-            if not line:
-                break
-            try:
-                message = json.loads(line.decode("utf-8"))
-            except json.JSONDecodeError:
-                continue
-            method = message.get("method")
-            if "id" in message and isinstance(method, str):
-                params = dict(message.get("params") or {})
-                params[SERVER_REQUEST_ID_KEY] = message["id"]
-                notification = AppServerNotification(method, params)
-                await self._dispatch_notification(notification)
-                continue
-            if "id" in message:
-                request_id = message["id"]
-                future = self._pending.pop(request_id, None)
-                if future is None or future.done():
+        reader_error: Exception | None = None
+        try:
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                try:
+                    message = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
-                if "error" in message:
-                    future.set_exception(_app_server_error(message["error"]))
-                else:
-                    future.set_result(message.get("result") or {})
-                continue
-            if isinstance(method, str):
-                notification = AppServerNotification(method, message.get("params") or {})
-                await self._dispatch_notification(notification)
-        for future in self._pending.values():
-            if not future.done():
-                future.set_exception(AppError("app_server_closed", "Codex app-server exited.", 503))
-        self._pending.clear()
-        exit_notification = AppServerNotification(
-            "app_server/exited",
-            {"message": "Codex app-server exited."},
-        )
-        await self._dispatch_notification(exit_notification)
+                method = message.get("method")
+                if "id" in message and isinstance(method, str):
+                    params = dict(message.get("params") or {})
+                    params[SERVER_REQUEST_ID_KEY] = message["id"]
+                    notification = AppServerNotification(method, params)
+                    await self._dispatch_notification(notification)
+                    continue
+                if "id" in message:
+                    request_id = message["id"]
+                    future = self._pending.pop(request_id, None)
+                    if future is None or future.done():
+                        continue
+                    if "error" in message:
+                        future.set_exception(_app_server_error(message["error"]))
+                    else:
+                        future.set_result(message.get("result") or {})
+                    continue
+                if isinstance(method, str):
+                    notification = AppServerNotification(method, message.get("params") or {})
+                    await self._dispatch_notification(notification)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            reader_error = exc
+            self.lifecycle_error = f"stdout reader: {type(exc).__name__}: {exc}"
+            if process.returncode is None:
+                process.terminate()
+        finally:
+            message = "Codex app-server stdout reader stopped."
+            if reader_error is not None:
+                message = f"{message} {type(reader_error).__name__}: {reader_error}"
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(AppError("app_server_closed", message, 503))
+            self._pending.clear()
+            exit_notification = AppServerNotification(
+                "app_server/exited",
+                {"message": message},
+            )
+            await self._dispatch_notification(exit_notification)
 
     async def _read_stderr(self) -> None:
         process = self._process
@@ -477,6 +502,8 @@ class AppServerClient:
             "notificationQueueDepth": sum(queue.qsize() for queue in self._subscribers),
             "unsubscribedThreadCount": len(self._unsubscribed_threads),
             "idleShutdownScheduled": self._idle_shutdown_task is not None,
+            "stdoutReaderAlive": self._reader_task is not None and not self._reader_task.done(),
+            "stderrReaderAlive": self._stderr_task is not None and not self._stderr_task.done(),
             "lifecycleError": self.lifecycle_error,
         }
 

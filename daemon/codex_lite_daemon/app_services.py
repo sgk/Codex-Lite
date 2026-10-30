@@ -556,6 +556,7 @@ class AppServerRunService:
         self._provider_turn_start_locks: dict[str, asyncio.Lock] = {}
         self._starting_chats: set[str] = set()
         self._submission_tasks: dict[str, asyncio.Task] = {}
+        self._watcher_tasks: set[asyncio.Task] = set()
         self._cancel_requested_submissions: set[str] = set()
         self._untracked_threads: dict[str, dict[str, Any]] = {}
 
@@ -634,6 +635,18 @@ class AppServerRunService:
             self._starting_chats.discard(run.chat_id)
             self._submission_tasks.pop(run_id, None)
             self._cancel_requested_submissions.discard(run_id)
+
+    async def close_watchers(self) -> None:
+        tasks = list(self._watcher_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _start_watcher(self, run_id: str, notification_queue: asyncio.Queue[AppServerNotification], app_server: Any) -> None:
+        task = asyncio.create_task(self._watch_run(run_id, notification_queue, app_server))
+        self._watcher_tasks.add(task)
+        task.add_done_callback(self._watcher_tasks.discard)
 
     async def start_message_run(self, project_id: str, chat_id: str, content: str, attachments: list[dict[str, Any]] | None = None) -> dict:
         project = self.projects.get_project_row(project_id)
@@ -760,7 +773,7 @@ class AppServerRunService:
         )
         self._start_run_row(run_id, thread_id, turn_id, provider)
         await self.events.publish(run_id, "status", {"status": "running"})
-        asyncio.create_task(self._watch_run(run_id, notification_queue, app_server))
+        self._start_watcher(run_id, notification_queue, app_server)
         return {"messageId": user_message["id"], "runId": run_id}
 
     async def _start_turn(self, app_server: Any, thread_id: str, project_path: str, input_items: list[dict[str, Any]], settings: AppServerRuntimeSettings) -> dict:
@@ -798,7 +811,10 @@ class AppServerRunService:
         thread = response.get("thread") or {}
         status = thread.get("status") if isinstance(thread, dict) else {}
         if isinstance(status, dict) and status.get("type") == "notLoaded":
-            resume_params: dict[str, Any] = {"threadId": thread_id}
+            # The daemon already persists visible history. Returning every
+            # turn can produce one JSON line hundreds of MiB long and kill
+            # only the stdout reader while leaving Codex itself alive.
+            resume_params: dict[str, Any] = {"threadId": thread_id, "excludeTurns": True}
             if settings.model:
                 resume_params["model"] = settings.model
                 provider = model_provider_for_model(settings.model)
@@ -947,7 +963,7 @@ class AppServerRunService:
                             "summary": "app-serverで継続中の実行を再検出し、途中経過の追跡を再開しました。",
                         },
                     )
-                    asyncio.create_task(self._watch_run(run_id, notification_queue, app_server))
+                    self._start_watcher(run_id, notification_queue, app_server)
                     notification_queue = None
                 except Exception as exc:
                     if adopted_run_id is not None:

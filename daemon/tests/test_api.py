@@ -3123,7 +3123,7 @@ async def test_app_server_run_resumes_not_loaded_thread_before_turn(linux_tmp_pa
     assert app_server.requests == [
         ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "approvalsReviewer": "user", "permissions": ":danger-full-access"}),
         ("thread/read", {"threadId": "thread_1"}),
-        ("thread/resume", {"threadId": "thread_1"}),
+        ("thread/resume", {"threadId": "thread_1", "excludeTurns": True}),
         ("thread/settings/update", {"threadId": "thread_1", "approvalPolicy": "never", "approvalsReviewer": "user", "permissions": ":danger-full-access"}),
         ("turn/start", {"threadId": "thread_1", "cwd": str(project_dir), "input": [{"type": "text", "text": "hello"}]}),
     ]

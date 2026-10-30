@@ -114,6 +114,50 @@ async def test_timeout_drops_pending_future(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stdout_reader_failure_fails_pending_requests_and_marks_transport_dead(tmp_path):
+    client = client_for_test(tmp_path)
+
+    class BrokenStdout:
+        async def readline(self):
+            raise ValueError("Separator is found, but chunk is longer than limit")
+
+    class Process:
+        stdout = BrokenStdout()
+        returncode = None
+        terminated = False
+
+        def terminate(self):
+            self.terminated = True
+
+    process = Process()
+    client._process = process  # type: ignore[assignment]
+    pending = asyncio.get_running_loop().create_future()
+    client._pending[1] = pending
+    queue = client.subscribe_queue()
+
+    await client._read_stdout()
+
+    with pytest.raises(AppError) as exc:
+        await pending
+    assert exc.value.code == "app_server_closed"
+    assert process.terminated is True
+    assert "stdout reader: ValueError" in str(client.lifecycle_error)
+    assert (await queue.get()).method == "app_server/exited"
+
+
+@pytest.mark.asyncio
+async def test_finished_stdout_reader_makes_live_process_unhealthy(tmp_path):
+    client = client_for_test(tmp_path)
+    client._process = type("Process", (), {"returncode": None})()  # type: ignore[assignment]
+    client._reader_task = asyncio.create_task(asyncio.sleep(0))
+    await client._reader_task
+
+    assert client.is_running is False
+    diagnostics = client.environment_diagnostics()
+    assert diagnostics["stdoutReaderAlive"] is False
+
+
+@pytest.mark.asyncio
 async def test_metadata_polling_does_not_extend_idle_deadline(tmp_path, monkeypatch):
     client = client_for_test(tmp_path)
     monkeypatch.setattr(type(client), "is_running", property(lambda self: True))

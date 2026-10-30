@@ -103,6 +103,7 @@ def create_app(config: Config | None = None) -> Starlette:
                     pass
             await app_runs.close_submissions()
             await app_servers.close()
+            await app_runs.close_watchers()
             await app_runs.flush_events()
             await runs.flush_events()
             if maintenance_task is not None:
