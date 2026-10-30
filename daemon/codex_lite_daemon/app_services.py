@@ -36,6 +36,7 @@ CANCEL_IDLE_WAIT_SECONDS = 15.0
 CANCEL_IDLE_POLL_SECONDS = 0.1
 RUN_STATE_RECONCILE_SECONDS = 5.0
 IDLE_RECONCILE_NOTIFICATION_GRACE_SECONDS = 0.5
+OVERLOAD_RETRY_DELAYS_SECONDS = (30.0, 60.0, 120.0)
 PROVIDER_CONTEXT_MAX_CHARS = 32000
 INLINE_ACTIVITY_IMAGE_MAX_BYTES = 1_500_000
 APPROVAL_REQUEST_METHODS = {
@@ -460,6 +461,8 @@ class AppServerActiveRun:
     revision: int = 0
     last_persisted_at_monotonic: float = 0.0
     adopted: bool = False
+    overload_retry_waiting: bool = False
+    overload_retry_cancel: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
 
 def _app_server_for_provider(app_server: Any, provider: str) -> Any:
@@ -1072,6 +1075,11 @@ class AppServerRunService:
             return _run_out(run_id, run)
         if run.status != "running":
             return _run_out(run_id, run)
+        async with run.steer_lock:
+            if run.overload_retry_waiting:
+                run.overload_retry_cancel.set()
+                await self._finish_cancelled_run(run_id, run)
+                return _run_out(run_id, run)
         app_server = _app_server_for_provider(self.app_server, run.provider)
         try:
             await app_server.request("turn/interrupt", {"threadId": run.thread_id, "turnId": run.turn_id})
@@ -1174,6 +1182,8 @@ class AppServerRunService:
                 return _run_out(run_id, run) | {"messageId": receipt["message_id"], "createdAt": receipt["created_at"]}
         if run.status != "running":
             raise AppError("steer_run_finished", "Run has already finished.", 409)
+        if run.overload_retry_waiting:
+            raise AppError("overload_retry_waiting", "混雑のため再試行待ちです。再開後に追加指示を送ってください。", 409)
         clean_content = content.strip()
         if not clean_content:
             raise AppError("validation_error", "Steer content must not be empty.", 400)
@@ -1335,6 +1345,8 @@ class AppServerRunService:
         reasoning_buffered_chars = 0
         last_reasoning_flush = time.monotonic()
         last_state_reconcile = time.monotonic()
+        overload_error: dict[str, Any] | None = None
+        overload_retries = 0
 
         async def flush_reasoning_progress() -> None:
             nonlocal last_reasoning_flush, reasoning_buffered_chars
@@ -1473,6 +1485,14 @@ class AppServerRunService:
                             async with run.steer_lock:
                                 if not notification_queue.empty() or run.instruction_revision != reconcile_instruction_revision:
                                     continue
+                                if overload_error is not None:
+                                    run.status = "failed"
+                                    run.error = str(overload_error)
+                                    run.finished_at = utc_now()
+                                    run.terminal_reason = "overload_completion_missing"
+                                    self._finish_run_row(run_id, run.status, run.error, run.terminal_reason)
+                                    await self.events.publish(run_id, "error", {"code": "server_overloaded", "message": run.error})
+                                    return
                                 await complete_all_agent_messages()
                                 run.status = "succeeded"
                                 run.finished_at = utc_now()
@@ -1709,18 +1729,64 @@ class AppServerRunService:
                             continue
                         turn = notification.params.get("turn") or {}
                         turn_status = str(turn.get("status") or "completed")
-                        if turn_status == "completed":
-                            await complete_all_agent_messages()
-                        else:
+                        if turn_status == "failed" and overload_error is not None and overload_retries < len(OVERLOAD_RETRY_DELAYS_SECONDS):
                             await flush_all_pending_agent_output()
-                        run.status = "succeeded" if turn_status == "completed" else "cancelled" if turn_status in {"cancelled", "interrupted"} else "failed"
-                        run.finished_at = utc_now()
-                        run.terminal_reason = f"turn_completed:{turn_status}"
-                        run.revision += 1
-                        self.chats.touch_provider_thread(run.chat_id, run.provider)
-                        self._finish_run_row(run_id, run.status, reason=run.terminal_reason)
-                        await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
+                            delay = OVERLOAD_RETRY_DELAYS_SECONDS[overload_retries]
+                            overload_retries += 1
+                            run.overload_retry_waiting = True
+                            run.overload_retry_cancel.clear()
+                            await self.events.publish(run_id, "progress", {
+                                "method": "app_server/overload_retry",
+                                "summary": f"モデルが混雑しています。{int(delay)}秒後に再試行します（{overload_retries}/{len(OVERLOAD_RETRY_DELAYS_SECONDS)}）。",
+                            })
+                        else:
+                            delay = None
+                        if delay is None:
+                            if turn_status == "completed":
+                                await complete_all_agent_messages()
+                            else:
+                                await flush_all_pending_agent_output()
+                            run.status = "succeeded" if turn_status == "completed" else "cancelled" if turn_status in {"cancelled", "interrupted"} else "failed"
+                            run.error = str(overload_error) if overload_error is not None and run.status == "failed" else None
+                            run.finished_at = utc_now()
+                            run.terminal_reason = f"turn_completed:{turn_status}"
+                            run.revision += 1
+                            self.chats.touch_provider_thread(run.chat_id, run.provider)
+                            self._finish_run_row(run_id, run.status, run.error, reason=run.terminal_reason)
+                            if run.error:
+                                await self.events.publish(run_id, "error", {"code": "server_overloaded", "message": run.error})
+                            else:
+                                await self.events.publish(run_id, "done", {"status": run.status, "exitCode": 0 if run.status == "succeeded" else None})
+                            return
+                    try:
+                        await asyncio.wait_for(run.overload_retry_cancel.wait(), timeout=delay)
                         return
+                    except asyncio.TimeoutError:
+                        pass
+                    async with run.steer_lock:
+                        if run.status != "running" or run.overload_retry_cancel.is_set():
+                            return
+                        chat = self.chats.get_chat_row_by_id(run.chat_id)
+                        project_id = str(chat["project_id"])
+                        project = self.projects.get_project_row(project_id)
+                        settings = self.threads.settings_for_chat(project_id, run.chat_id)
+                        async with self._provider_turn_start_locks.setdefault(run.provider, asyncio.Lock()):
+                            app_server.bind_queue(notification_queue, run.thread_id)
+                            await _apply_codex_lite_thread_settings(app_server, run.thread_id, settings)
+                            response = await app_server.request("turn/start", {
+                                "threadId": run.thread_id,
+                                "cwd": str(project["path"]),
+                                "input": [{"type": "text", "text": "つづけて"}],
+                            })
+                            new_turn_id = _turn_id_from_response(response)
+                            if not new_turn_id:
+                                raise AppError("app_server_error", "Retry turn/start did not return a turn id.", 502)
+                            run.turn_id = new_turn_id
+                            app_server.bind_queue(notification_queue, run.thread_id, new_turn_id)
+                            self._start_run_row(run_id, run.thread_id, new_turn_id, run.provider)
+                        run.overload_retry_waiting = False
+                        overload_error = None
+                        await self.events.publish(run_id, "progress", {"method": "app_server/overload_retry_started", "summary": "混雑後の処理を再開しました。"})
                 elif notification.method == "error":
                     if _is_retryable_app_server_error(notification.params):
                         summary = _retryable_error_summary(notification.params)
@@ -1735,6 +1801,10 @@ class AppServerRunService:
                                 "summary": summary,
                             },
                         )
+                        continue
+                    if _is_server_overloaded(notification.params):
+                        overload_error = notification.params
+                        await self.events.publish(run_id, "progress", {"method": "app_server/overloaded", "summary": "モデルが混雑しています。処理の終了を確認しています。"})
                         continue
                     run.status = "failed"
                     await flush_all_pending_agent_output()
@@ -2029,6 +2099,11 @@ def _is_retryable_app_server_error(params: dict[str, Any]) -> bool:
     if isinstance(error, dict) and error.get("willRetry") is True:
         return True
     return False
+
+
+def _is_server_overloaded(params: dict[str, Any]) -> bool:
+    error = params.get("error")
+    return isinstance(error, dict) and error.get("codexErrorInfo") == "serverOverloaded" and params.get("willRetry") is False
 
 
 def _retryable_error_summary(params: dict[str, Any]) -> str:

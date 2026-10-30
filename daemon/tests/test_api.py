@@ -3371,6 +3371,78 @@ async def test_app_server_exit_finishes_stream_with_error(linux_tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "cancel", "exhaust"])
+async def test_overloaded_turn_retries_after_completion_or_cancels(linux_tmp_path: Path, monkeypatch, outcome: str) -> None:
+    import codex_lite_daemon.app_services as app_services
+
+    monkeypatch.setattr(app_services, "OVERLOAD_RETRY_DELAYS_SECONDS", (0.1,))
+    cfg = make_test_config(linux_tmp_path)
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+
+    class RetryServer(TurnStartAppServer):
+        async def request(self, method, params):
+            result = await super().request(method, params)
+            if method == "turn/start":
+                count = sum(1 for name, _ in self.requests if name == method)
+                return {"turn": {"id": f"turn_{count}"}}
+            return result
+
+    server = RetryServer()
+    threads = AppServerThreadService(projects, chats, messages, TranscriptImportService(cfg, projects, chats), server, make_runtime_settings())
+    runs = AppServerRunService(projects, threads, messages, server, 1, make_runtime_settings())
+    project_id = projects.create_project(str(project_dir))["id"]
+    chat_id = chats.upsert_chat_index(project_id, "thread_1", "test", "thread_1", utc_now(), utc_now())["id"]
+    chats.upsert_provider_thread(project_id, chat_id, "openai", "thread_1", history_initialized=True)
+    result = await asyncio.wait_for(runs.start_message_run(project_id, chat_id, "hello"), 3)
+    run = runs.runs[result["runId"]]
+    queue = server.subscribers[-1]
+    await queue.put(AppServerNotification("error", {"threadId": "thread_1", "turnId": "turn_1", "willRetry": False, "error": {"codexErrorInfo": "serverOverloaded", "message": "Selected model is at capacity."}}))
+    await asyncio.sleep(0.02)
+    assert len([r for r in server.requests if r[0] == "turn/start"]) == 1
+    await queue.put(AppServerNotification("turn/completed", {"threadId": "thread_1", "turn": {"id": "turn_1", "status": "failed"}}))
+    for _ in range(100):
+        if run.overload_retry_waiting:
+            break
+        await asyncio.sleep(0.005)
+    assert run.overload_retry_waiting
+    if outcome == "cancel":
+        await runs.cancel_run(result["runId"])
+        await asyncio.sleep(0.15)
+        assert run.status == "cancelled"
+        assert len([r for r in server.requests if r[0] == "turn/start"]) == 1
+    else:
+        for _ in range(100):
+            if run.turn_id == "turn_2":
+                break
+            await asyncio.sleep(0.01)
+        assert run.turn_id == "turn_2"
+        assert [r for r in server.requests if r[0] == "turn/start"][-1][1]["input"] == [{"type": "text", "text": "つづけて"}]
+        if outcome == "exhaust":
+            await queue.put(AppServerNotification("error", {"threadId": "thread_1", "turnId": "turn_2", "willRetry": False, "error": {"codexErrorInfo": "serverOverloaded", "message": "Selected model is at capacity."}}))
+        await queue.put(AppServerNotification("turn/completed", {"threadId": "thread_1", "turn": {"id": "turn_2", "status": "failed" if outcome == "exhaust" else "completed"}}))
+        for _ in range(100):
+            if not run.watcher_alive:
+                break
+            await asyncio.sleep(0.01)
+        assert run.status == ("failed" if outcome == "exhaust" else "succeeded")
+        if outcome == "exhaust":
+            assert "Selected model is at capacity" in run.error
+            assert len([r for r in server.requests if r[0] == "turn/start"]) == 2
+    for _ in range(100):
+        if not run.watcher_alive:
+            break
+        await asyncio.sleep(0.01)
+    assert not run.watcher_alive
+    db.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("terminal", ["completed", "interrupted", "failed", "exited"])
 async def test_run_terminal_paths_release_thread_and_queue(linux_tmp_path: Path, terminal: str) -> None:
     cfg = make_test_config(linux_tmp_path)
