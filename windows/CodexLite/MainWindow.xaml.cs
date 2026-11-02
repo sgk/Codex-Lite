@@ -4994,6 +4994,10 @@ public partial class MainWindow : Window
         {
             return;
         }
+        if (_isMessageScrollBarPointerDown && e.VerticalChange != 0)
+        {
+            _messageScrollInteractionVersion++;
+        }
         if (FindVisualChild<ScrollViewer>(ActiveMessagesList, _ => true) is ScrollViewer scrollViewer)
         {
             if (ConversationTab.IsSelected)
@@ -5034,8 +5038,8 @@ public partial class MainWindow : Window
 
         _isLoadingOlderMessages = true;
         UpdateHistorySpacer();
-        var oldExtent = scrollViewer.ExtentHeight;
-        var oldOffset = scrollViewer.VerticalOffset;
+        var targetView = ActiveMessagesList;
+        var targetMessages = _messages;
         try
         {
             StatusText.Text = $"older history loading | {LoadedHistoryMessageCount()} message(s)";
@@ -5054,6 +5058,11 @@ public partial class MainWindow : Window
             var olderMessages = OrderMessages(page?.Messages ?? [])
                 .Where(message => !existingIds.Contains(message.Id))
                 .ToList();
+            // The user may have scrolled while the request was in flight.
+            // Capture the current position immediately before changing the list.
+            var position = new HistoryScrollPosition(
+                scrollViewer.VerticalOffset, scrollViewer.ExtentHeight, _messageScrollInteractionVersion,
+                scrollViewer.VerticalOffset + scrollViewer.ViewportHeight >= scrollViewer.ExtentHeight - 1);
             var insertIndex = _messages.Any(message => message.Id == HistorySpacerMessageId) ? 1 : 0;
             for (var index = olderMessages.Count - 1; index >= 0; index--)
             {
@@ -5061,8 +5070,14 @@ public partial class MainWindow : Window
             }
             UpdateHistorySpacer();
             await Dispatcher.Yield(DispatcherPriority.Background);
-            var delta = scrollViewer.ExtentHeight - oldExtent;
-            scrollViewer.ScrollToVerticalOffset(Math.Max(0, oldOffset + delta));
+            if (!ReferenceEquals(ActiveMessagesList, targetView) || !ReferenceEquals(_messages, targetMessages))
+            {
+                return;
+            }
+            if (position.OffsetAfterInsertion(scrollViewer.ExtentHeight, scrollViewer.ViewportHeight, _messageScrollInteractionVersion) is double offset)
+            {
+                scrollViewer.ScrollToVerticalOffset(offset);
+            }
             StatusText.Text = $"history loaded | {LoadedHistoryMessageCount()} message(s)";
             UpdateCurrentChatHistoryState();
         }

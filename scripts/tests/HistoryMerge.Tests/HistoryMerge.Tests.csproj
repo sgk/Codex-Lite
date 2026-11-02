@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../../windows/CodexLite/Services/HistoryMessageMerge.cs" Link="HistoryMessageMerge.cs" />
+    <Compile Include="../../../windows/CodexLite/Services/HistoryScrollPosition.cs" Link="HistoryScrollPosition.cs" />
   </ItemGroup>
 </Project>

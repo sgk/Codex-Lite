@@ -40,6 +40,15 @@ Check(initial.Count(m => m.Content == "つづけて") == 2,
 var repeatedBatch = new ObservableCollection<Message>();
 HistoryMessageMerge.PrependMissing(repeatedBatch, new[] { saved, saved }, m => m.Id, 0);
 Check(repeatedBatch.Count == 1, "duplicate IDs inside a batch are inserted only once");
+var position = new HistoryScrollPosition(700, 2000, 12);
+Check(position.OffsetAfterInsertion(2400, 300, 12) == 1100,
+    "preserve the current position with inserted height using the position captured after the request");
+Check(position.OffsetAfterInsertion(2400, 300, 13) is null,
+    "do not restore an old position after interaction during layout");
+Check(new HistoryScrollPosition(50, 2000, 1).OffsetAfterInsertion(1800, 300, 1) == 0,
+    "clamp the adjusted offset when the unloaded spacer is removed");
+Check(new HistoryScrollPosition(1700, 2000, 1, true).OffsetAfterInsertion(2400, 300, 1) == 2100,
+    "stay at the end after viewport and virtualized extent change");
 Console.WriteLine($"History merge: {checks} checks passed (Windows client not built or launched).");
 
 sealed record Message(string Id, string Content);
