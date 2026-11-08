@@ -29,6 +29,7 @@ class CodexThreadMetadata:
     can_continue: bool
     continue_disabled_reason: str | None
     hidden: bool = False
+    parent_thread_id: str | None = None
 
 
 class CodexStateService:
@@ -122,6 +123,7 @@ class CodexStateService:
                 f"CASE WHEN {guardian} THEN NULL ELSE first_user_message END AS first_user_message" if "first_user_message" in columns else "NULL AS first_user_message",
                 f"{guardian} AS guardian",
                 f"{'1' if 'source' in columns else '0'} AS has_source_metadata",
+                "CASE WHEN json_valid(source) THEN json_extract(source, '$.subagent.thread_spawn.parent_thread_id') ELSE NULL END AS parent_thread_id" if "source" in columns else "NULL AS parent_thread_id",
                 "archived",
                 "archived_at" if "archived_at" in columns else "NULL AS archived_at",
                 "rollout_path",
@@ -174,6 +176,7 @@ class CodexStateService:
             can_continue=can_continue,
             continue_disabled_reason=continue_disabled_reason,
             hidden=hidden,
+            parent_thread_id=row["parent_thread_id"] if isinstance(row["parent_thread_id"], str) and row["parent_thread_id"] != thread_id else None,
         )
 
     def _continue_state(self, transcript_path: Path | None, archived: bool) -> tuple[bool, str | None]:

@@ -101,7 +101,8 @@ public sealed record ChatDto(
     string? ContinueDisabledReason = null,
     bool HasAutomation = false,
     bool HasEnabledAutomation = false,
-    string LatestMessageVersion = "");
+    string LatestMessageVersion = "",
+    string? ParentThreadId = null);
 
 public sealed record AutomationDto(
     string Id,

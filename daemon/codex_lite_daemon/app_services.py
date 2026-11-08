@@ -559,6 +559,60 @@ class AppServerRunService:
         self._watcher_tasks: set[asyncio.Task] = set()
         self._cancel_requested_submissions: set[str] = set()
         self._untracked_threads: dict[str, dict[str, Any]] = {}
+        self._subagent_archive_tasks: dict[str, asyncio.Task] = {}
+
+    def _schedule_finished_subagents(self, run_id: str, app_server: Any, run: AppServerActiveRun, item: dict[str, Any]) -> None:
+        if item.get("type") != "collabAgentToolCall" or item.get("senderThreadId") != run.thread_id:
+            return
+        states = item.get("agentsStates")
+        if not isinstance(states, dict):
+            return
+        receivers = item.get("receiverThreadIds")
+        if not isinstance(receivers, list):
+            return
+        for thread_id in receivers:
+            state = states.get(thread_id) if isinstance(thread_id, str) else None
+            if not isinstance(state, dict) or state.get("status") not in {"completed", "errored", "interrupted", "shutdown"}:
+                continue
+            if thread_id in self._subagent_archive_tasks:
+                continue
+            task = asyncio.create_task(self._archive_finished_subagent(app_server, run, thread_id, run_id))
+            self._subagent_archive_tasks[thread_id] = task
+            task.add_done_callback(lambda _task, key=thread_id: self._subagent_archive_tasks.pop(key, None))
+
+    async def _archive_finished_subagent(self, app_server: Any, run: AppServerActiveRun, thread_id: str, run_id: str = "") -> None:
+        _acquire_run_lease(app_server)
+        try:
+            state_service = self.threads.transcripts.codex_state
+            if state_service is None:
+                return
+            metadata = await asyncio.to_thread(state_service.list_threads)
+            child = next((thread for thread in metadata if thread.id == thread_id), None)
+            if child is None or child.parent_thread_id != run.thread_id or child.archived:
+                return
+            chat = self.chats.get_chat_row_by_id(run.chat_id)
+            project_id = str(chat["project_id"])
+            project = self.projects.get_project_row(project_id)
+            if child.path != Path(project["path"]).resolve():
+                return
+            async with self._provider_turn_start_locks.setdefault(run.provider, asyncio.Lock()):
+                if any(other.thread_id == thread_id and other.status == "running" for other in self.runs.values()):
+                    return
+                result = await app_server.request_if_running("thread/read", {"threadId": thread_id, "includeTurns": False})
+                status = (result.get("thread") or {}).get("status") or {}
+                if status.get("type") != "idle":
+                    return
+                terminals = await app_server.request_if_running("thread/backgroundTerminals/list", {"threadId": thread_id, "limit": 1})
+                if terminals.get("data") != [] or terminals.get("nextCursor"):
+                    return
+                await app_server.request_if_running("thread/archive", {"threadId": thread_id})
+            self.chats.archive_confirmed_imported_chats(project_id, {thread_id})
+        except Exception as exc:
+            await self.events.publish(run_id, "progress", {
+                "method": "subagent/archive_failed", "summary": f"サブエージェントのアーカイブに失敗しました: {exc}",
+            })
+        finally:
+            await _release_run_lease(app_server)
 
     async def submit_message(self, project_id: str, chat_id: str, content: str, attachments: list[dict[str, Any]] | None = None, request_id: str | None = None) -> dict:
         """Save acceptance immediately; execution is owned by the daemon."""
@@ -1550,6 +1604,8 @@ class AppServerRunService:
                     continue
                 if not _notification_matches(notification, run):
                     continue
+                if notification.method == "item/completed" and isinstance(notification.params.get("item"), dict):
+                    self._schedule_finished_subagents(run_id, app_server, run, notification.params["item"])
                 run.last_notification_at = utc_now()
                 run.last_notification_method = notification.method
                 run.revision += 1

@@ -621,7 +621,7 @@
                                     Panel.ZIndex="2"
                                     Grid.ColumnSpan="4"
                                     Visibility="{Binding ShowDropAfter, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                            <TextBlock Grid.Column="0" Text="{Binding Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" MinWidth="0" Margin="16,0,6,0">
+                            <TextBlock Grid.Column="0" Text="{Binding Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" MinWidth="0" Margin="{Binding TitleMargin}">
                                 <TextBlock.Style>
                                     <Style TargetType="{x:Type TextBlock}">
                                         <Setter Property="Visibility" Value="Visible"/>

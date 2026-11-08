@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS chats (
   title_override_at TEXT,
   auto_title_set_at TEXT,
   codex_session_id TEXT,
+  parent_thread_id TEXT,
   transcript_path TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -213,6 +214,8 @@ class Database:
         with self._lock:
             self._conn.executescript(SCHEMA)
             columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(chats)").fetchall()}
+            if "parent_thread_id" not in columns:
+                self._conn.execute("ALTER TABLE chats ADD COLUMN parent_thread_id TEXT")
             if "transcript_path" not in columns:
                 self._conn.execute("ALTER TABLE chats ADD COLUMN transcript_path TEXT")
             if "title_override_at" not in columns:

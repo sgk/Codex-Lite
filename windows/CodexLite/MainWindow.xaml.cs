@@ -2127,15 +2127,33 @@ public partial class MainWindow : Window
     private void ApplyProjectChats(ProjectTreeItem projectItem, IEnumerable<ChatDto> chats, string? preferredChatId, bool markUpdatedChats = false)
     {
         var previousChatIds = projectItem.Chats.Select(item => item.Chat.Id).ToArray();
-        var orderedChats = OrderChats(projectItem, chats);
+        var orderedChats = OrderChats(projectItem, chats).ToList();
         RememberChatOrder(projectItem, orderedChats);
+        var visibleChats = orderedChats.Where(ChatMatchesFilter).ToList();
+        var parentByThread = visibleChats.GroupBy(chat => chat.CodexSessionId ?? chat.Id, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().Id, StringComparer.Ordinal);
+        var children = visibleChats.Where(chat => chat.ParentThreadId is not null && parentByThread.TryGetValue(chat.ParentThreadId, out var parentId) && parentId != chat.Id)
+            .GroupBy(chat => parentByThread[chat.ParentThreadId!])
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+        var nestedIds = children.SelectMany(group => group.Value).Select(chat => chat.Id).ToHashSet(StringComparer.Ordinal);
+        var groupedChats = new List<ChatDto>();
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        void AddWithChildren(ChatDto chat)
+        {
+            if (!visited.Add(chat.Id)) return;
+            groupedChats.Add(chat);
+            if (children.TryGetValue(chat.Id, out var nested))
+                foreach (var child in nested) AddWithChildren(child);
+        }
+        foreach (var chat in visibleChats.Where(chat => !nestedIds.Contains(chat.Id))) AddWithChildren(chat);
+        foreach (var chat in visibleChats) AddWithChildren(chat);
         var existingById = projectItem.Chats
             .GroupBy(item => item.Chat.Id)
             .ToDictionary(group => group.Key, group => group.First());
         var targetItems = new HashSet<ChatTreeItem>();
         var targetIndex = 0;
 
-        foreach (var chat in orderedChats)
+        foreach (var chat in groupedChats)
         {
             if (!ChatMatchesFilter(chat))
             {
@@ -2168,6 +2186,7 @@ public partial class MainWindow : Window
                 }
             }
             chatItem.HasUnloadedHistory = _chatsWithUnloadedHistory.Contains((projectItem.Project.Id, chat.Id));
+            chatItem.IsSubAgent = nestedIds.Contains(chat.Id);
             chatItem.IsRunning = IsChatRunning(chat.Id);
             if (markUpdatedChats
                 && previousMessageVersion is not null

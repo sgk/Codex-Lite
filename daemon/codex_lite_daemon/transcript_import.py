@@ -38,6 +38,7 @@ class TranscriptSession:
     can_continue: bool = False
     continue_disabled_reason: str | None = "このチャットは取り込み済み履歴のため、Codex Liteからは継続できません。"
     hidden: bool = False
+    parent_thread_id: str | None = None
 
 
 class TranscriptImportService:
@@ -134,6 +135,10 @@ class TranscriptImportService:
                 session.can_continue,
                 session.continue_disabled_reason,
             )
+            self.chats.db.execute(
+                "UPDATE chats SET parent_thread_id = ? WHERE project_id = ? AND codex_session_id = ? AND parent_thread_id IS NOT ?",
+                (session.parent_thread_id, project["id"], session.id, session.parent_thread_id),
+            )
             indexed += 1
         self.chats.archive_confirmed_imported_chats(project["id"], confirmed_hidden_ids)
         return indexed
@@ -217,6 +222,7 @@ class TranscriptImportService:
             can_continue=thread.can_continue,
             continue_disabled_reason=thread.continue_disabled_reason,
             hidden=thread.hidden,
+            parent_thread_id=thread.parent_thread_id,
         )
 
     def _codex_homes(self) -> list[Path]:

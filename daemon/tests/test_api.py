@@ -5605,6 +5605,95 @@ def test_codex_state_schema_mismatch_is_reported_without_crashing(linux_tmp_path
     assert "missing columns" in diagnostics["error"]
 
 
+def test_subagent_parent_metadata_is_imported_without_guessing(linux_tmp_path: Path) -> None:
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    cfg = make_test_config(linux_tmp_path)
+    transcript = cfg.codex_home / "sessions" / "subagent.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json_line({"type": "session_meta", "payload": {}}))
+    write_codex_state_db(cfg, [("child", str(project_dir), "worker", str(transcript), 0, 1, 2, None)])
+    with sqlite3.connect(cfg.codex_sqlite_home / "state_5.sqlite") as state:
+        state.execute("ALTER TABLE threads ADD COLUMN source TEXT")
+        state.execute("UPDATE threads SET source=?", (json.dumps({"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}}),))
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    importer = TranscriptImportService(cfg, projects, chats, CodexStateService(cfg))
+    project = projects.create_project(str(project_dir))
+    importer.index_project(project)
+    assert chats.list_chats(project["id"])[0]["parentThreadId"] == "parent"
+    db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,terminal_count,parent,expected", [
+    ("idle", 0, "parent", True),
+    ("active", 0, "parent", False),
+    ("notLoaded", 0, "parent", False),
+    ("idle", 1, "parent", False),
+    ("idle", 0, "other", False),
+])
+async def test_subagent_archive_requires_parent_and_idle_without_terminals(linux_tmp_path: Path, status: str, terminal_count: int, parent: str, expected: bool) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    project_dir = linux_tmp_path / "project"
+    project_dir.mkdir()
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    project = projects.create_project(str(project_dir))
+    chat_id = chats.upsert_chat_index(project["id"], "parent", "parent", "parent", utc_now(), utc_now())["id"]
+    chats.upsert_chat_index(project["id"], "child", "child", "child", utc_now(), utc_now())
+    class Server:
+        def __init__(self): self.requests = []
+        async def request_if_running(self, method, params):
+            self.requests.append(method)
+            if method == "thread/read": return {"thread": {"status": {"type": status}}}
+            if method == "thread/backgroundTerminals/list": return {"data": [{}] * terminal_count}
+            return {}
+    server = Server()
+    importer = TranscriptImportService(cfg, projects, chats)
+    importer.codex_state = SimpleNamespace(list_threads=lambda: [SimpleNamespace(id="child", parent_thread_id=parent, archived=False, path=project_dir)])
+    threads = AppServerThreadService(projects, chats, messages, importer, server, make_runtime_settings())
+    runs = AppServerRunService(projects, threads, messages, server, 1, make_runtime_settings())
+    run = app_services.AppServerActiveRun("parent", "turn", chat_id)
+    await runs._archive_finished_subagent(server, run, "child")
+    assert ("thread/archive" in server.requests) is expected
+    assert (db.fetchone("SELECT archived_at FROM chats WHERE id='child'")["archived_at"] is not None) is expected
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_subagent_archive_scheduling_only_uses_explicit_terminal_states(linux_tmp_path: Path) -> None:
+    cfg = make_test_config(linux_tmp_path)
+    db = Database(cfg.database_path)
+    db.migrate()
+    projects = ProjectService(db, cfg)
+    chats = ChatService(db, projects)
+    messages = MessageService(db, chats)
+    importer = TranscriptImportService(cfg, projects, chats)
+    server = TurnStartAppServer()
+    threads = AppServerThreadService(projects, chats, messages, importer, server, make_runtime_settings())
+    runs = AppServerRunService(projects, threads, messages, server, 1, make_runtime_settings())
+    run = app_services.AppServerActiveRun("parent", "turn", "chat")
+    scheduled = []
+    async def archive(_server, _run, thread_id, _run_id):
+        scheduled.append(thread_id)
+    runs._archive_finished_subagent = archive
+    item = {"type": "collabAgentToolCall", "senderThreadId": "parent", "receiverThreadIds": ["done", "busy", "unknown"],
+            "agentsStates": {"done": {"status": "completed"}, "busy": {"status": "running"}, "unknown": {"status": "notFound"}}}
+    runs._schedule_finished_subagents("run", server, run, item)
+    runs._schedule_finished_subagents("run", server, run, item)
+    await asyncio.gather(*list(runs._subagent_archive_tasks.values()))
+    assert scheduled == ["done"]
+    runs._schedule_finished_subagents("run", server, run, item | {"senderThreadId": "other"})
+    assert scheduled == ["done"]
+    db.close()
+
+
 def json_line(value: dict) -> str:
     return json.dumps(value) + "\n"
 

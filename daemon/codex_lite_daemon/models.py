@@ -18,6 +18,7 @@ def chat_out(row: dict) -> dict:
         "projectId": row["project_id"],
         "title": _display_title(row["title"]),
         "codexSessionId": row["codex_session_id"],
+        "parentThreadId": row.get("parent_thread_id"),
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "canContinue": bool(row.get("can_continue", 1)),

@@ -184,6 +184,20 @@ public sealed class ChatTreeItem : INotifyPropertyChanged
 
     public string Title => DisplayTitle(Chat.Title);
 
+    private bool _isSubAgent;
+    public bool IsSubAgent
+    {
+        get => _isSubAgent;
+        set
+        {
+            if (_isSubAgent == value) return;
+            _isSubAgent = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(TitleMargin));
+        }
+    }
+    public System.Windows.Thickness TitleMargin => new(IsSubAgent ? 34 : 16, 0, 6, 0);
+
     public string EditTitle { get; set; }
 
     public bool HasAutomation => Chat.HasAutomation;
